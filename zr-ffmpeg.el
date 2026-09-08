@@ -178,9 +178,9 @@ is the option symbol and whose cdr is its value."
 
 Each page is a plist with an integer `:id', a `:kind' (`file', `screen', or
 `audio-device'), a `:source', a `:preset', and an `:overrides' plist.  A file
-page's `:source' supplies video and audio streams.  `:subtitle-source' is an
-optional subtitle file associated with the page.  Use additional pages for
-independent media inputs and devices.")
+page's `:source' supplies selected video, audio, subtitle, and data streams.
+`:subtitle-source' is an optional external subtitle file associated with the
+page.  Use additional pages for independent media inputs and devices.")
 
 (defvar-local zr-ffmpeg--current-input-id 1)
 (defvar-local zr-ffmpeg--composition-mode 'separate)
@@ -203,6 +203,7 @@ independent media inputs and devices.")
   (list :id (or id 1) :kind 'file :source nil :monitor nil
         :window-hwnd nil :window-exe nil
         :audio-device nil :video-streams 'all :audio-streams 'all
+        :subtitle-streams 'all :data-streams nil
         :subtitle-source nil
         :preset 'file-copy :overrides nil
         :stream-info nil))
@@ -351,22 +352,34 @@ whose cdr is its value."
   "Return flattened argv for structured argument list KEY of PAGE."
   (zr-ffmpeg--args->argv (zr-ffmpeg--argument-list key page fallback)))
 
+(defun zr-ffmpeg--stream-selection (page key)
+  "Return PAGE's stream selection for KEY.
+The value is `all', nil, or a list of type-relative stream ordinals."
+  (if (plist-member page key)
+      (plist-get page key)
+    (if (eq key :data-streams) nil 'all)))
+
 (defun zr-ffmpeg--stream-selectors (page kind)
   "Return relative FFmpeg stream selectors for PAGE and KIND.
-The default `all' selects every stream of that type.  A list of integer
-indices selects only those streams."
+The default `all' selects every stream of that type, nil selects none, and a
+list of integers selects type-relative stream ordinals."
   (let* ((key (pcase kind
                 ('video :video-streams)
-                ('audio :audio-streams)))
-         (selection (or (plist-get page key) 'all))
-         (prefix (pcase kind ('video "v") ('audio "a"))))
-    (if (eq selection 'all)
-        (list (concat prefix "?"))
-      (mapcar (lambda (index) (format "%s:%d?" prefix index)) selection))))
-
-(defun zr-ffmpeg--stream-selection (page key)
-  "Return PAGE's explicit stream selection for KEY, defaulting to `all'."
-  (or (plist-get page key) 'all))
+                ('audio :audio-streams)
+                ('subtitle :subtitle-streams)
+                ('data :data-streams)
+                (_ (user-error "Unsupported stream kind: %s" kind))))
+         (selection (zr-ffmpeg--stream-selection page key))
+         (prefix (pcase kind
+                   ('video "v")
+                   ('audio "a")
+                   ('subtitle "s")
+                   ('data "d"))))
+    (cond
+     ((eq selection 'all) (list (concat prefix "?")))
+     ((null selection) nil)
+     (t (mapcar (lambda (index) (format "%s:%d?" prefix index))
+                selection)))))
 
 (defun zr-ffmpeg--selected-stream-index (page key label)
   "Return one selected stream index for PAGE's KEY.
@@ -389,16 +402,19 @@ Treat `all' as the primary stream and reject multiple explicit selections."
 
 (defun zr-ffmpeg--stream-selector-kind-p (stream kind)
   "Return non-nil when STREAM is a selector for KIND.
-KIND is the one-letter FFmpeg stream type, such as `v' or `a'.  This accepts
-both the all-stream spelling `v?' and indexed spellings such as `v:0?'."
+KIND is the one-letter FFmpeg stream type, such as `v', `a', `s', or `d'.
+This accepts both the all-stream spelling `v?' and indexed spellings such as
+`v:0?'."
   (and (stringp stream)
        (or (equal stream kind)
            (string-prefix-p (concat kind "?") stream)
            (string-prefix-p (concat kind ":") stream))))
 
 (defun zr-ffmpeg--probe-streams (source)
-  "Return stream metadata for local SOURCE, or nil when unavailable."
-  (when (and (zr-ffmpeg--local-path-p source)
+  "Return stream metadata for local or URL SOURCE, or nil when unavailable.
+Each result includes the global ffprobe `:index' and type-relative `:ordinal'."
+  (when (and (or (zr-ffmpeg--local-path-p source)
+                 (zr-ffmpeg--url-p source))
              (executable-find zr-ffmpeg-ffprobe-program))
     (with-temp-buffer
       (when (zerop (call-process zr-ffmpeg-ffprobe-program nil t nil
@@ -407,48 +423,78 @@ both the all-stream spelling `v?' and indexed spellings such as `v:0?'."
         (condition-case nil
             (let ((json (json-parse-buffer :object-type 'alist
                                            :array-type 'list
-                                           :null-object nil)))
-              (mapcar (lambda (stream)
-                        (list :index (alist-get 'index stream)
-                              :type (intern (alist-get 'codec_type stream))
-                              :codec (alist-get 'codec_name stream)
-                              :language (alist-get 'language
-                                                    (alist-get 'tags stream))))
-                      (alist-get 'streams json)))
+                                           :null-object nil))
+                  (ordinals (make-hash-table :test 'eq)))
+              (mapcar
+               (lambda (stream)
+                 (let* ((codec-type (alist-get 'codec_type stream))
+                        (type (and (stringp codec-type)
+                                   (intern codec-type)))
+                        (ordinal (and type (gethash type ordinals 0))))
+                   (when type
+                     (puthash type (1+ ordinal) ordinals))
+                   (list :index (alist-get 'index stream)
+                         :ordinal ordinal
+                         :type type
+                         :codec (alist-get 'codec_name stream)
+                         :language (alist-get 'language
+                                               (alist-get 'tags stream)))))
+               (alist-get 'streams json)))
           (json-parse-error nil))))))
 
 (defun zr-ffmpeg-set-stream-selection ()
-  "Choose all or selected video/audio streams for the current page."
+  "Choose all, none, or selected streams for the current page."
   (interactive)
   (let* ((page (zr-ffmpeg--current-page))
          (source (plist-get page :source))
          (streams (zr-ffmpeg--probe-streams source))
          (types '(("video" . :video-streams)
-                  ("audio" . :audio-streams))))
+                  ("audio" . :audio-streams)
+                  ("subtitle" . :subtitle-streams)
+                  ("data" . :data-streams))))
     (unless streams
       (user-error "No stream metadata available for %s" (or source "input")))
+    (setf (plist-get page :stream-info) streams)
     (dolist (type types)
       (let* ((kind (intern (car type)))
              (key (cdr type))
+             (default (if (eq kind 'data) nil 'all))
              (available (cl-remove-if-not
                          (lambda (stream)
                            (eq (plist-get stream :type) kind)) streams))
-             (choices (mapcar
-                       (lambda (stream)
-                         (cons (format "%d: %s%s" (plist-get stream :index)
-                                       (or (plist-get stream :codec) "unknown")
-                                       (if-let* ((language (plist-get stream
-                                                                    :language)))
-                                           (format " (%s)" language) ""))
-                               (plist-get stream :index)))
-                       available))
+             (choices
+              (append
+               (list (cons "[all] all streams" 'all)
+                     (cons "[none] no streams" nil))
+               (mapcar
+                (lambda (stream)
+                  (cons (format "%d: %s%s"
+                                (plist-get stream :index)
+                                (or (plist-get stream :codec) "unknown")
+                                (if-let* ((language (plist-get stream :language)))
+                                    (format " (%s)" language) ""))
+                        (plist-get stream :ordinal)))
+                available)))
              (selected (completing-read-multiple
-                        (format "%s streams (empty = all): " (car type))
+                        (format "%s streams (empty = %s): "
+                                (car type) (if (eq default 'all) "all" "none"))
                         choices nil nil)))
-        (zr-ffmpeg--page-set key
-                             (if (null selected) 'all
-                               (mapcar (lambda (choice)
-                                         (cdr (assoc choice choices))) selected)))))
+        (let* ((values (mapcar (lambda (choice) (cdr (assoc choice choices)))
+                               selected))
+               (specials (cl-remove-if-not
+                          (lambda (value) (memq value '(all nil))) values)))
+          (when (and specials (> (length values) 1))
+            (user-error "Choose all/none or specific %s streams, not both"
+                        (car type)))
+          (when (> (length specials) 1)
+            (user-error "Choose either all or none for %s streams"
+                        (car type)))
+          (zr-ffmpeg--page-set
+           key (cond
+                ((null selected) default)
+                ((eq (car specials) 'all) 'all)
+                ((and specials (null (car specials))) nil)
+                (t values))))))
     (transient-setup)))
 
 (defun zr-ffmpeg--read-source (prompt current &optional target)
@@ -477,6 +523,12 @@ When TARGET is non-nil, use output target history instead."
                   "Input path/URL: " (plist-get page :source))))
     (zr-ffmpeg--page-set :kind 'file)
     (zr-ffmpeg--page-set :source source)
+    (dolist (selection '((:video-streams . all)
+                         (:audio-streams . all)
+                         (:subtitle-streams . all)
+                         (:data-streams . nil)))
+      (zr-ffmpeg--page-set (car selection) (cdr selection)))
+    (zr-ffmpeg--page-set :stream-info nil)
     (zr-ffmpeg--clear-capture-fields)
     (transient-setup)))
 
@@ -765,8 +817,10 @@ preset only as a default, while an explicit Output value always wins."
                                 (list (format "v:%d?"
                                               (zr-ffmpeg--burn-video-index page)))
                               (zr-ffmpeg--stream-selectors page 'video)))
-                          (when audio
-                            (zr-ffmpeg--stream-selectors page 'audio))))
+                           (when audio
+                            (zr-ffmpeg--stream-selectors page 'audio))
+                          (zr-ffmpeg--stream-selectors page 'subtitle)
+                          (zr-ffmpeg--stream-selectors page 'data)))
                  specs))
           ('screen
            (push (zr-ffmpeg--spec
@@ -869,7 +923,7 @@ Both `soft' and `soft-default' modes are treated as soft subtitles."
   "Scope stream-specific ARGS of KIND to output INDEX.
 Subtitle options are always explicitly scoped because multiple pages can
 contribute different subtitle encoders or metadata."
-  (let ((suffix (if (and (= index 0) (not (eq kind 'subtitle)))
+  (let ((suffix (if (and (= index 0) (memq kind '(video audio)))
                     "" (format ":%d" index)))
         result)
     (dolist (entry args (nreverse result))
@@ -884,19 +938,92 @@ contribute different subtitle encoders or metadata."
                            ('audio (memq option '(c:a b:a maxrate:a bufsize:a
                                                   filter:a filter:a:0)))
                            ('subtitle (memq option '(c:s metadata:s disposition:s)))
+                           ('data (memq option '(c:d metadata:d disposition:d)))
                            (_ nil)))
                     (intern (format "%s:%d" option index)) option)))
           (push (cons scoped (cdr entry)) result))))))
+
+(defun zr-ffmpeg--page-stream-info (page)
+  "Return cached or probed stream metadata for file PAGE."
+  (or (plist-get page :stream-info)
+      (when (and (eq (plist-get page :kind) 'file)
+                 (plist-get page :source))
+        (let ((streams (zr-ffmpeg--probe-streams
+                        (plist-get page :source))))
+          (when streams
+            (setf (plist-get page :stream-info) streams))
+          streams))))
+
+(defun zr-ffmpeg--stream-selector-count (page stream)
+  "Return the number of streams selected by STREAM for PAGE."
+  (let* ((kind (cond
+                ((zr-ffmpeg--stream-selector-kind-p stream "v") 'video)
+                ((zr-ffmpeg--stream-selector-kind-p stream "a") 'audio)
+                ((zr-ffmpeg--stream-selector-kind-p stream "s") 'subtitle)
+                ((zr-ffmpeg--stream-selector-kind-p stream "d") 'data)))
+         (prefix (pcase kind
+                   ('video "v")
+                   ('audio "a")
+                   ('subtitle "s")
+                   ('data "d"))))
+    (if (or (null kind)
+            (not (string-prefix-p (concat prefix "?") stream)))
+        1
+      (let ((info (zr-ffmpeg--page-stream-info page)))
+        (unless info
+          (user-error "Cannot determine %s stream count for page %s"
+                      kind (plist-get page :id)))
+        (length (cl-remove-if-not
+                 (lambda (candidate)
+                   (eq (plist-get candidate :type) kind))
+                 info))))))
+
+(defun zr-ffmpeg--external-subtitle-output-args (pages specs)
+  "Return scoped output args for external subtitle specs in SPECS."
+  (let ((subtitle-index 0) result)
+    (dolist (spec specs result)
+      (let* ((role (plist-get spec :role))
+             (page (cl-find (plist-get spec :owner-id) pages
+                            :key (lambda (candidate)
+                                   (plist-get candidate :id)))))
+        (dolist (stream (plist-get spec :streams))
+          (when (zr-ffmpeg--stream-selector-kind-p stream "s")
+            (let ((count (if (eq role 'subtitle)
+                             1
+                           (zr-ffmpeg--stream-selector-count page stream))))
+              (when (eq role 'subtitle)
+                (setq result
+                      (append result
+                              (zr-ffmpeg--scope-output-args
+                               (append (zr-ffmpeg--page-subtitle-args page)
+                                       (zr-ffmpeg--page-subtitle-disposition page))
+                               'subtitle subtitle-index))))
+              (setq subtitle-index (+ subtitle-index count)))))))))
+
+(defun zr-ffmpeg--primary-data-output-args (specs)
+  "Return default copy args when primary data streams are selected."
+  (when (cl-some
+         (lambda (spec)
+           (and (eq (plist-get spec :role) 'primary)
+                (cl-some (lambda (stream)
+                           (zr-ffmpeg--stream-selector-kind-p stream "d"))
+                         (plist-get spec :streams))))
+         specs)
+    '((c:d . "copy"))))
 
 (defun zr-ffmpeg--filtergraph (pages specs)
   "Return (FILTERGRAPH . MAPS) for PAGES and SPECS, or nil."
   (let* ((mode zr-ffmpeg--composition-mode)
          (pages (zr-ffmpeg--selected-pages pages))
          (video-pages (cl-remove-if-not
-                       (lambda (page) (zr-ffmpeg--page-effective page :video))
+                       (lambda (page)
+                         (and (zr-ffmpeg--page-effective page :video)
+                              (zr-ffmpeg--stream-selectors page 'video)))
                        pages))
          (audio-pages (cl-remove-if-not
-                       (lambda (page) (zr-ffmpeg--page-effective page :audio))
+                       (lambda (page)
+                         (and (zr-ffmpeg--page-effective page :audio)
+                              (zr-ffmpeg--stream-selectors page 'audio)))
                        pages))
          (burn-pages (cl-remove-if-not
                       #'zr-ffmpeg--burn-subtitle-page-p pages))
@@ -911,7 +1038,10 @@ contribute different subtitle encoders or metadata."
       (let ((primary (zr-ffmpeg--spec-index
                       specs (plist-get page :id) 'primary)))
         (when (integerp primary)
-          (push (format "%d:a:0" primary) audio-refs))))
+          (push (format "%d:a:%d" primary
+                        (zr-ffmpeg--selected-stream-index
+                         page :audio-streams "audio"))
+                audio-refs))))
     (setq audio-refs (nreverse audio-refs))
     (cl-labels
         ((vlabel (page)
@@ -1037,8 +1167,10 @@ contribute different subtitle encoders or metadata."
                         for index from 0
                         append
                         (cl-loop for stream in (plist-get spec :streams)
-                                 when (zr-ffmpeg--stream-selector-kind-p
-                                       stream "s")
+                                 when (or (zr-ffmpeg--stream-selector-kind-p
+                                           stream "s")
+                                          (zr-ffmpeg--stream-selector-kind-p
+                                           stream "d"))
                                  collect (format "%d:%s" index stream))))))
       (when filters
         (cons (mapconcat #'identity filters ";") maps)))))
@@ -1086,57 +1218,53 @@ contribute different subtitle encoders or metadata."
         (when (zr-ffmpeg--copy-video-p video-page)
           (user-error "Burn-in requires video encoding for composed output, not copy"))))))
 
-(defun zr-ffmpeg--page-output-args (pages composed video-output audio-output)
-  "Collect output stream arguments from PAGES.
+(defun zr-ffmpeg--page-output-args (pages composed video-output audio-output specs)
+  "Collect output stream arguments from PAGES and SPECS.
 VIDEO-OUTPUT and AUDIO-OUTPUT describe streams produced by the task."
-  (if composed
-      (append
-       (when video-output
-         (when-let* ((page (cl-find-if
-                          (lambda (candidate)
-                            (zr-ffmpeg--page-effective candidate :video))
-                           pages)))
-           (zr-ffmpeg--page-video-args page)))
-       (when audio-output
-         (when-let* ((page (cl-find-if
-                           (lambda (candidate)
-                             (zr-ffmpeg--page-effective candidate :audio))
-                           pages)))
-           (zr-ffmpeg--page-audio-args page)))
-       (let ((subtitle-index 0) result)
-         (dolist (page pages result)
-           (when (zr-ffmpeg--soft-subtitle-page-p page)
-             (setq result
-                   (append result
-                           (zr-ffmpeg--scope-output-args
-                            (append (zr-ffmpeg--page-subtitle-args page)
-                                    (zr-ffmpeg--page-subtitle-disposition page))
-                            'subtitle subtitle-index)))
-             (setq subtitle-index (1+ subtitle-index))))))
-    (let ((video-index 0) (audio-index 0) (subtitle-index 0) result)
-      (dolist (page pages result)
-        (when (and video-output
-                   (zr-ffmpeg--page-effective page :video))
+  (let (result)
+    (if composed
+        (progn
+          (when video-output
+            (when-let* ((page (cl-find-if
+                               (lambda (candidate)
+                                 (zr-ffmpeg--page-effective candidate :video))
+                               pages)))
+              (setq result
+                    (append result (zr-ffmpeg--page-video-args page)))))
+          (when audio-output
+            (when-let* ((page (cl-find-if
+                               (lambda (candidate)
+                                 (zr-ffmpeg--page-effective candidate :audio))
+                               pages)))
+              (setq result
+                    (append result (zr-ffmpeg--page-audio-args page)))))
           (setq result
                 (append result
-                        (zr-ffmpeg--scope-output-args
-                         (zr-ffmpeg--page-video-args page) 'video video-index)))
-          (setq video-index (1+ video-index)))
-        (when (and audio-output
-                   (zr-ffmpeg--page-effective page :audio))
-          (setq result
-                (append result
-                        (zr-ffmpeg--scope-output-args
-                         (zr-ffmpeg--page-audio-args page) 'audio audio-index)))
-          (setq audio-index (1+ audio-index)))
-        (when (zr-ffmpeg--soft-subtitle-page-p page)
-          (setq result
-                (append result
-                        (zr-ffmpeg--scope-output-args
-                         (append (zr-ffmpeg--page-subtitle-args page)
-                                 (zr-ffmpeg--page-subtitle-disposition page))
-                         'subtitle subtitle-index)))
-          (setq subtitle-index (1+ subtitle-index)))))))
+                        (when (cl-some #'zr-ffmpeg--soft-subtitle-page-p pages)
+                          (zr-ffmpeg--external-subtitle-output-args pages specs))
+                        (zr-ffmpeg--primary-data-output-args specs))))
+      (let ((video-index 0) (audio-index 0))
+        (dolist (page pages)
+          (when (and video-output
+                     (zr-ffmpeg--page-effective page :video))
+            (setq result
+                  (append result
+                          (zr-ffmpeg--scope-output-args
+                           (zr-ffmpeg--page-video-args page) 'video video-index)))
+            (setq video-index (1+ video-index)))
+          (when (and audio-output
+                     (zr-ffmpeg--page-effective page :audio))
+            (setq result
+                  (append result
+                          (zr-ffmpeg--scope-output-args
+                           (zr-ffmpeg--page-audio-args page) 'audio audio-index)))
+            (setq audio-index (1+ audio-index))))
+        (setq result
+              (append result
+                      (when (cl-some #'zr-ffmpeg--soft-subtitle-page-p pages)
+                        (zr-ffmpeg--external-subtitle-output-args pages specs))
+                      (zr-ffmpeg--primary-data-output-args specs)))))
+    result))
 
 (defun zr-ffmpeg--build-command (&optional pages output)
   "Build one complete FFmpeg argv for PAGES and OUTPUT."
@@ -1177,7 +1305,7 @@ VIDEO-OUTPUT and AUDIO-OUTPUT describe streams produced by the task."
                                  :global-args page)) selected))
                zr-ffmpeg-global-args)))
          (page-output-args (zr-ffmpeg--page-output-args
-                            selected composed video-output audio-output))
+                            selected composed video-output audio-output specs))
          (output-args
           (zr-ffmpeg--args->argv
            (append page-output-args
@@ -1215,7 +1343,9 @@ INPUT may be a page or source for programmatic callers; nil renders the task."
     (zr-ffmpeg--build-command (list input) output))
    ((stringp input)
     (let ((page (copy-tree (zr-ffmpeg--current-page))))
-      (setf (plist-get page :kind) 'file (plist-get page :source) input)
+      (setf (plist-get page :kind) 'file
+            (plist-get page :source) input
+            (plist-get page :stream-info) nil)
       (zr-ffmpeg--build-command (list page) output)))
    (t (zr-ffmpeg--build-command nil output))))
 

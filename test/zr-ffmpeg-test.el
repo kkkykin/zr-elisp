@@ -34,7 +34,11 @@
   (let ((page (zr-ffmpeg--new-page id))
         overrides)
     (setf (plist-get page :source) source
-          (plist-get page :subtitle-source) subtitle)
+          (plist-get page :subtitle-source) subtitle
+          ;; Existing tests focus on external subtitle behavior.  Internal
+          ;; subtitle selection is covered by dedicated tests below.
+          (plist-get page :subtitle-streams) nil
+          (plist-get page :data-streams) nil)
     (when mode
       (setq overrides (plist-put overrides :subtitle-mode mode)))
     (when codec
@@ -66,6 +70,173 @@
          (zr-ffmpeg--output-args nil)
          (zr-ffmpeg-output-resolution nil))
      ,@body))
+
+(ert-deftest zr-ffmpeg-test-stream-selector-states ()
+  "Stream selectors should distinguish all, none, and ordinals."
+  (let ((page (zr-ffmpeg--new-page 1)))
+    (should (equal (zr-ffmpeg--stream-selectors page 'video)
+                   '("v?")))
+    (should (equal (zr-ffmpeg--stream-selectors page 'subtitle)
+                   '("s?")))
+    (should-not (zr-ffmpeg--stream-selectors page 'data))
+    (setf (plist-get page :subtitle-streams) nil
+          (plist-get page :data-streams) '(0 2))
+    (should-not (zr-ffmpeg--stream-selectors page 'subtitle))
+    (should (equal (zr-ffmpeg--stream-selectors page 'data)
+                   '("d:0?" "d:2?")))))
+
+(ert-deftest zr-ffmpeg-test-probe-url-and-type-ordinals ()
+  "Probe should accept URLs and derive ordinals per stream type."
+  (let ((json
+         "{\"streams\":[{\"index\":0,\"codec_type\":\"video\",\"codec_name\":\"hevc\"},{\"index\":1,\"codec_type\":\"audio\",\"codec_name\":\"flac\"},{\"index\":2,\"codec_type\":\"subtitle\",\"codec_name\":\"pgs\"},{\"index\":3,\"codec_type\":\"subtitle\",\"codec_name\":\"pgs\"},{\"index\":4,\"codec_type\":\"data\",\"codec_name\":\"bin_data\"}]}" )
+        (seen nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_program) t))
+              ((symbol-function 'call-process)
+               (lambda (_program _infile _destination _display &rest args)
+                 (push (car (last args)) seen)
+                 (insert json)
+                 (goto-char (point-min))
+                 0)))
+      (let ((streams (zr-ffmpeg--probe-streams
+                      "https://example.com/video.mkv")))
+        (should (equal (car seen) "https://example.com/video.mkv"))
+        (should (equal (mapcar (lambda (stream)
+                                 (list (plist-get stream :index)
+                                       (plist-get stream :type)
+                                       (plist-get stream :ordinal)))
+                               streams)
+                       '((0 video 0) (1 audio 0) (2 subtitle 0)
+                         (3 subtitle 1) (4 data 0)))))
+      (should (zr-ffmpeg--probe-streams "/tmp/video.mkv"))
+      (should-not (zr-ffmpeg--probe-streams "-")))))
+
+(ert-deftest zr-ffmpeg-test-probe-failure-returns-nil ()
+  "Probe failures and malformed JSON should be reported as unavailable."
+  (cl-letf (((symbol-function 'executable-find)
+             (lambda (_program) t))
+            ((symbol-function 'call-process)
+             (lambda (&rest _args) 1)))
+    (should-not (zr-ffmpeg--probe-streams "/tmp/video.mkv")))
+  (cl-letf (((symbol-function 'executable-find)
+             (lambda (_program) t))
+            ((symbol-function 'call-process)
+             (lambda (_program _infile _destination _display &rest _args)
+               (insert "not json")
+               (goto-char (point-min))
+               0)))
+    (should-not (zr-ffmpeg--probe-streams "https://example.com/video.mkv"))))
+
+(ert-deftest zr-ffmpeg-test-url-input-spec-preserves-source ()
+  "URL file sources should remain URLs in expanded input specs."
+  (let ((page (zr-ffmpeg--new-page 1)))
+    (setf (plist-get page :source) "https://example.com/video.mkv"
+          (plist-get page :subtitle-streams) nil
+          (plist-get page :data-streams) nil)
+    (let ((spec (car (zr-ffmpeg--input-specs (list page)))))
+      (should (equal (plist-get spec :source)
+                     "https://example.com/video.mkv"))
+      (should-not (plist-get spec :file)))))
+
+(ert-deftest zr-ffmpeg-test-command-source-clears-stream-info-cache ()
+  "Programmatic source replacement must not reuse stale probe metadata."
+  (let ((page (zr-ffmpeg--new-page 1)))
+    (setf (plist-get page :source) "/tmp/old.mkv"
+          (plist-get page :stream-info)
+          '((:index 0 :type video :ordinal 0)))
+    (zr-ffmpeg-test--with-task (list page) 'separate
+      (let (built-page)
+        (cl-letf (((symbol-function 'zr-ffmpeg--build-command)
+                   (lambda (pages _output)
+                     (setq built-page (car pages))
+                     '("ffmpeg")))
+                  ((symbol-function 'zr-ffmpeg--output-for-input)
+                   (lambda (&rest _args) "/tmp/out.mkv")))
+          (zr-ffmpeg--command "https://example.com/new.mkv")
+          (should (equal (plist-get built-page :source)
+                         "https://example.com/new.mkv"))
+          (should-not (plist-get built-page :stream-info)))))))
+
+(ert-deftest zr-ffmpeg-test-stream-selection-ui-stores-ordinals ()
+  "The stream selection UI should store type-relative ordinals."
+  (let* ((page (zr-ffmpeg--new-page 1))
+         (responses (list nil nil '("2: pgs (jpn)") '("4: bin_data")))
+         (streams '((:index 0 :ordinal 0 :type video :codec "hevc")
+                    (:index 1 :ordinal 0 :type audio :codec "flac")
+                    (:index 2 :ordinal 0 :type subtitle :codec "pgs"
+                             :language "jpn")
+                    (:index 4 :ordinal 0 :type data :codec "bin_data"))))
+    (setf (plist-get page :source) "/tmp/video.mkv")
+    (zr-ffmpeg-test--with-task (list page) 'separate
+      (cl-letf (((symbol-function 'zr-ffmpeg--probe-streams)
+                 (lambda (_source) streams))
+                ((symbol-function 'completing-read-multiple)
+                 (lambda (&rest _args) (pop responses)))
+                ((symbol-function 'transient-setup)
+                 (lambda (&rest _args) nil)))
+        (zr-ffmpeg-set-stream-selection)
+        (should (equal (plist-get page :subtitle-streams) '(0)))
+        (should (equal (plist-get page :data-streams) '(0)))))))
+
+(ert-deftest zr-ffmpeg-test-default-and-explicit-internal-stream-maps ()
+  "Subtitle defaults to all, while data defaults to none."
+  (let ((page (zr-ffmpeg--new-page 1)))
+    (setf (plist-get page :source) "/tmp/v1.mkv")
+    (zr-ffmpeg-test--with-task (list page) 'separate
+      (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                       '("0:v?" "0:a?" "0:s?")))
+        (should-not (member "0:d?" argv)))
+      (setf (plist-get page :subtitle-streams) '(0 1)
+            (plist-get page :data-streams) '(0))
+      (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                       '("0:v?" "0:a?" "0:s:0?" "0:s:1?" "0:d:0?")))
+        (should (equal (zr-ffmpeg-test--option-values "-c:d" argv)
+                       '("copy"))))
+      (setf (plist-get page :subtitle-streams) nil
+            (plist-get page :data-streams) nil)
+      (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                       '("0:v?" "0:a?")))))))
+
+(ert-deftest zr-ffmpeg-test-internal-subtitles-preserve-external-output-index ()
+  "External subtitle args should account for mapped internal subtitles."
+  (let ((page (zr-ffmpeg-test--page
+               1 "/tmp/v1.mkv" "/tmp/s1.srt" 'soft-default "mov_text")))
+    (setf (plist-get page :subtitle-streams) 'all
+          (plist-get page :stream-info)
+          '((:index 0 :type video :ordinal 0)
+            (:index 1 :type audio :ordinal 0)
+            (:index 2 :type subtitle :ordinal 0)
+            (:index 3 :type subtitle :ordinal 1)))
+    (zr-ffmpeg-test--with-task (list page) 'separate
+      (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                       '("0:v?" "0:a?" "0:s?" "1:s:0?")))
+        (should (equal (zr-ffmpeg-test--option-values "-c:s:2" argv)
+                       '("mov_text")))
+        (should (equal (zr-ffmpeg-test--option-values
+                        "-disposition:s:2" argv)
+                       '("default")))))))
+
+(ert-deftest zr-ffmpeg-test-composed-internal-data-maps ()
+  "Composed output should directly map selected subtitle and data streams."
+  (let ((page1 (zr-ffmpeg--new-page 1))
+        (page2 (zr-ffmpeg--new-page 2)))
+    (setf (plist-get page1 :source) "/tmp/v1.mkv"
+          (plist-get page1 :subtitle-streams) '(0)
+          (plist-get page1 :data-streams) '(0)
+          (plist-get page2 :source) "/tmp/v2.mkv"
+          (plist-get page2 :subtitle-streams) nil
+          (plist-get page2 :data-streams) nil)
+    (zr-ffmpeg-test--with-task (list page1 page2) 'concat
+      (let ((argv (zr-ffmpeg--build-command
+                   (list page1 page2) "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                       '("[vout]" "[aout]" "0:s:0?" "0:d:0?")))
+        (should (equal (zr-ffmpeg-test--option-values "-c:d" argv)
+                       '("copy")))))))
 
 (ert-deftest zr-ffmpeg-test-soft-separate-order-and-codecs ()
   "Soft subtitles should follow their page inputs and use scoped codecs."
