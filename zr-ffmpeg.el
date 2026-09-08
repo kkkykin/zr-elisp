@@ -131,6 +131,7 @@
      :video-args ((c:v . "copy"))
      :audio-args ((c:a . "copy"))
      :output-args ((movflags . "+faststart"))
+     :subtitle-args ((c:s . "copy"))
      :subtitle-mode soft-default
      :audio t
      :video t)
@@ -139,6 +140,7 @@
      :video-args ((c:v . "copy"))
      :audio-args ((c:a . "libopus") (b:a . "192k")
                   (af . "loudnorm=I=-16:TP=-1.5:LRA=11"))
+     :subtitle-args ((c:s . "copy"))
      :subtitle-mode soft-default
      :audio t
      :video t)
@@ -147,6 +149,7 @@
      :video-args ((c:v . "copy"))
      :audio-args ((c:a . "libopus") (b:a . "192k")
                   (af . "loudnorm=I=-23:TP=-1.5:LRA=11"))
+     :subtitle-args ((c:s . "copy"))
      :subtitle-mode soft-default
      :audio t
      :video t))
@@ -420,6 +423,7 @@ Each result includes the global ffprobe `:index' and type-relative `:ordinal'."
       (when (zerop (call-process zr-ffmpeg-ffprobe-program nil t nil
                                  "-v" "quiet" "-print_format" "json"
                                  "-show_streams" source))
+        (goto-char (point-min))
         (condition-case nil
             (let ((json (json-parse-buffer :object-type 'alist
                                            :array-type 'list
