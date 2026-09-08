@@ -901,15 +901,8 @@ preset only as a default, while an explicit Output value always wins."
   (zr-ffmpeg--argument-list :audio-args page))
 
 (defun zr-ffmpeg--page-subtitle-args (page)
-  "Return PAGE soft subtitle arguments."
+  "Return PAGE arguments for mapped subtitle streams."
   (zr-ffmpeg--argument-list :subtitle-args page))
-
-(defun zr-ffmpeg--soft-subtitle-page-p (page)
-  "Return non-nil when PAGE has an active soft subtitle source.
-Both `soft' and `soft-default' modes are treated as soft subtitles."
-  (and (memq (zr-ffmpeg--page-effective page :subtitle-mode)
-             '(soft soft-default))
-       (zr-ffmpeg--subtitle-source page)))
 
 (defun zr-ffmpeg--burn-subtitle-page-p (page)
   "Return non-nil when PAGE has an active burn-in subtitle source."
@@ -917,23 +910,25 @@ Both `soft' and `soft-default' modes are treated as soft subtitles."
        (zr-ffmpeg--subtitle-source page)))
 
 (defun zr-ffmpeg--page-subtitle-disposition (page)
-  "Return disposition args for PAGE when soft-default subtitles are used."
-  (when (and (eq (zr-ffmpeg--page-effective page :subtitle-mode)
-                 'soft-default)
-             (zr-ffmpeg--subtitle-source page))
+  "Return default disposition args for PAGE's mapped soft-default subtitles."
+  (when (eq (zr-ffmpeg--page-effective page :subtitle-mode) 'soft-default)
     '((disposition:s . "default"))))
 
 (defun zr-ffmpeg--scope-output-args (args kind index)
   "Scope stream-specific ARGS of KIND to output INDEX.
-Subtitle options are always explicitly scoped because multiple pages can
-contribute different subtitle encoders or metadata."
-  (let ((suffix (if (and (= index 0) (memq kind '(video audio)))
+With nil INDEX, target all streams of KIND.  Subtitle metadata uses the
+metadata stream selector `s:s', followed by the subtitle ordinal if known."
+  (let ((suffix (if (or (null index)
+                       (and (= index 0) (memq kind '(video audio))))
                     "" (format ":%d" index)))
         result)
     (dolist (entry args (nreverse result))
       (if (stringp entry)
           (push entry result)
-        (let* ((option (car entry))
+        (let* ((option (if (and (eq kind 'subtitle)
+                                (eq (car entry) 'metadata:s))
+                           'metadata:s:s
+                         (car entry)))
                (scoped
                 (if (and (not (string-empty-p suffix))
                          (pcase kind
@@ -941,7 +936,7 @@ contribute different subtitle encoders or metadata."
                                                   filter:v filter:v:0)))
                            ('audio (memq option '(c:a b:a maxrate:a bufsize:a
                                                   filter:a filter:a:0)))
-                           ('subtitle (memq option '(c:s metadata:s disposition:s)))
+                           ('subtitle (memq option '(c:s metadata:s:s disposition:s)))
                            ('data (memq option '(c:d metadata:d disposition:d)))
                            (_ nil)))
                     (intern (format "%s:%d" option index)) option)))
@@ -958,51 +953,65 @@ contribute different subtitle encoders or metadata."
             (setf (plist-get page :stream-info) streams))
           streams))))
 
-(defun zr-ffmpeg--stream-selector-count (page stream)
-  "Return the number of streams selected by STREAM for PAGE."
-  (let* ((kind (cond
-                ((zr-ffmpeg--stream-selector-kind-p stream "v") 'video)
-                ((zr-ffmpeg--stream-selector-kind-p stream "a") 'audio)
-                ((zr-ffmpeg--stream-selector-kind-p stream "s") 'subtitle)
-                ((zr-ffmpeg--stream-selector-kind-p stream "d") 'data)))
-         (prefix (pcase kind
-                   ('video "v")
-                   ('audio "a")
-                   ('subtitle "s")
-                   ('data "d"))))
-    (if (or (null kind)
-            (not (string-prefix-p (concat prefix "?") stream)))
-        1
-      (let ((info (zr-ffmpeg--page-stream-info page)))
-        (unless info
-          (user-error "Cannot determine %s stream count for page %s"
-                      kind (plist-get page :id)))
-        (length (cl-remove-if-not
-                 (lambda (candidate)
-                   (eq (plist-get candidate :type) kind))
-                 info))))))
+(defun zr-ffmpeg--stream-selector-count (stream info)
+  "Return the number of streams selected by STREAM in metadata INFO.
+Return nil when INFO is unavailable.  Optional ordinal selectors can match
+zero streams, so they also require metadata for an accurate count."
+  (when info
+    (let ((kind (pcase (substring stream 0 1)
+                  ("v" 'video) ("a" 'audio) ("s" 'subtitle) ("d" 'data)))
+          (ordinal (and (string-match "\\`[vasd]:\\([0-9]+\\)\\??\\'" stream)
+                        (string-to-number (match-string 1 stream)))))
+      (cl-count-if
+       (lambda (candidate)
+         (and (eq (plist-get candidate :type) kind)
+              (or (null ordinal)
+                  (equal (plist-get candidate :ordinal) ordinal))))
+       info))))
 
-(defun zr-ffmpeg--external-subtitle-output-args (pages specs)
-  "Return scoped output args for external subtitle specs in SPECS."
-  (let ((subtitle-index 0) result)
-    (dolist (spec specs result)
-      (let* ((role (plist-get spec :role))
-             (page (cl-find (plist-get spec :owner-id) pages
-                            :key (lambda (candidate)
-                                   (plist-get candidate :id)))))
-        (dolist (stream (plist-get spec :streams))
-          (when (zr-ffmpeg--stream-selector-kind-p stream "s")
-            (let ((count (if (eq role 'subtitle)
-                             1
-                           (zr-ffmpeg--stream-selector-count page stream))))
-              (when (eq role 'subtitle)
-                (setq result
-                      (append result
-                              (zr-ffmpeg--scope-output-args
-                               (append (zr-ffmpeg--page-subtitle-args page)
-                                       (zr-ffmpeg--page-subtitle-disposition page))
-                               'subtitle subtitle-index))))
-              (setq subtitle-index (+ subtitle-index count)))))))))
+(defun zr-ffmpeg--subtitle-output-args (pages specs)
+  "Return output args for all mapped subtitle streams in SPECS.
+Known stream counts allow per-stream args in mapping order.  Unknown counts
+allow only identical arguments shared by all potentially mapped subtitles."
+  (let (groups)
+    ;; Both direct mapping and the filter graph preserve this spec/stream
+    ;; order, including interleaved primary and external subtitle inputs.
+    (dolist (spec specs)
+      (when-let* ((streams
+                   (cl-remove-if-not
+                    (lambda (stream)
+                      (zr-ffmpeg--stream-selector-kind-p stream "s"))
+                    (plist-get spec :streams))))
+        (let* ((page (cl-find (plist-get spec :owner-id) pages
+                              :key (lambda (candidate)
+                                     (plist-get candidate :id))))
+               (args (zr-ffmpeg--scope-output-args
+                      (append (zr-ffmpeg--page-subtitle-args page)
+                              (zr-ffmpeg--page-subtitle-disposition page))
+                      'subtitle nil))
+               (info (if (eq (plist-get spec :role) 'primary)
+                         (zr-ffmpeg--page-stream-info page)
+                       (zr-ffmpeg--probe-streams (plist-get spec :source)))))
+          (dolist (stream streams)
+            (let ((count (zr-ffmpeg--stream-selector-count stream info)))
+              (unless (eql count 0)
+                (push (cons count args) groups)))))))
+    (setq groups (nreverse groups))
+    (if (cl-some (lambda (group) (null (car group))) groups)
+        (let ((args (cdar groups)))
+          (unless (cl-every (lambda (group) (equal (cdr group) args)) groups)
+            (user-error
+             (concat "Cannot determine subtitle stream counts: "
+                     "different subtitle arguments require stream metadata")))
+          args)
+      (let ((subtitle-index 0) result)
+        (dolist (group groups result)
+          (dotimes (_ (car group))
+            (setq result
+                  (append result
+                          (zr-ffmpeg--scope-output-args
+                           (cdr group) 'subtitle subtitle-index)))
+            (setq subtitle-index (1+ subtitle-index))))))))
 
 (defun zr-ffmpeg--primary-data-output-args (specs)
   "Return default copy args when primary data streams are selected."
@@ -1241,12 +1250,7 @@ VIDEO-OUTPUT and AUDIO-OUTPUT describe streams produced by the task."
                                  (zr-ffmpeg--page-effective candidate :audio))
                                pages)))
               (setq result
-                    (append result (zr-ffmpeg--page-audio-args page)))))
-          (setq result
-                (append result
-                        (when (cl-some #'zr-ffmpeg--soft-subtitle-page-p pages)
-                          (zr-ffmpeg--external-subtitle-output-args pages specs))
-                        (zr-ffmpeg--primary-data-output-args specs))))
+                    (append result (zr-ffmpeg--page-audio-args page))))))
       (let ((video-index 0) (audio-index 0))
         (dolist (page pages)
           (when (and video-output
@@ -1262,13 +1266,10 @@ VIDEO-OUTPUT and AUDIO-OUTPUT describe streams produced by the task."
                   (append result
                           (zr-ffmpeg--scope-output-args
                            (zr-ffmpeg--page-audio-args page) 'audio audio-index)))
-            (setq audio-index (1+ audio-index))))
-        (setq result
-              (append result
-                      (when (cl-some #'zr-ffmpeg--soft-subtitle-page-p pages)
-                        (zr-ffmpeg--external-subtitle-output-args pages specs))
-                      (zr-ffmpeg--primary-data-output-args specs)))))
-    result))
+            (setq audio-index (1+ audio-index))))))
+    (append result
+            (zr-ffmpeg--subtitle-output-args pages specs)
+            (zr-ffmpeg--primary-data-output-args specs))))
 
 (defun zr-ffmpeg--build-command (&optional pages output)
   "Build one complete FFmpeg argv for PAGES and OUTPUT."

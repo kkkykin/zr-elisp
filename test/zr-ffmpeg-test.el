@@ -69,7 +69,16 @@
          (zr-ffmpeg--global-args nil)
          (zr-ffmpeg--output-args nil)
          (zr-ffmpeg-output-resolution nil))
-     ,@body))
+     ;; Fixture subtitle files contain one stream.  Primary metadata comes
+     ;; from each page's cache; tests can override this stub for other inputs.
+     (cl-letf (((symbol-function 'zr-ffmpeg--probe-streams)
+                (lambda (source)
+                  (when (cl-find source zr-ffmpeg--inputs-state
+                                 :test #'equal
+                                 :key (lambda (page)
+                                        (plist-get page :subtitle-source)))
+                    '((:index 0 :type subtitle :ordinal 0))))))
+       ,@body)))
 
 (ert-deftest zr-ffmpeg-test-stream-selector-states ()
   "Stream selectors should distinguish all, none, and ordinals."
@@ -201,7 +210,7 @@
                        '("0:v?" "0:a?")))))))
 
 (ert-deftest zr-ffmpeg-test-internal-subtitles-preserve-external-output-index ()
-  "External subtitle args should account for mapped internal subtitles."
+  "All internal subtitles get args before the external subtitle's index."
   (let ((page (zr-ffmpeg-test--page
                1 "/tmp/v1.mkv" "/tmp/s1.srt" 'soft-default "mov_text")))
     (setf (plist-get page :subtitle-streams) 'all
@@ -210,15 +219,205 @@
             (:index 1 :type audio :ordinal 0)
             (:index 2 :type subtitle :ordinal 0)
             (:index 3 :type subtitle :ordinal 1)))
-    (zr-ffmpeg-test--with-task (list page) 'separate
-      (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
-        (should (equal (zr-ffmpeg-test--option-values "-map" argv)
-                       '("0:v?" "0:a?" "0:s?" "1:s:0?")))
-        (should (equal (zr-ffmpeg-test--option-values "-c:s:2" argv)
-                       '("mov_text")))
-        (should (equal (zr-ffmpeg-test--option-values
-                        "-disposition:s:2" argv)
-                       '("default")))))))
+    (dolist (mode '(separate concat))
+      (zr-ffmpeg-test--with-task (list page) mode
+        (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+          (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                         (if (eq mode 'separate)
+                             '("0:v?" "0:a?" "0:s?" "1:s:0?")
+                           '("[vout]" "[aout]" "0:s?" "1:s:0?"))))
+          (dotimes (index 3)
+            (should (equal (zr-ffmpeg-test--option-values
+                            (format "-c:s:%d" index) argv)
+                           '("mov_text")))
+            (should (equal (zr-ffmpeg-test--option-values
+                            (format "-disposition:s:%d" index) argv)
+                           '("default"))))
+          (should-not (member "-c:s" argv))
+          (should-not (member "-c:s:3" argv)))))))
+
+(ert-deftest zr-ffmpeg-test-internal-subtitle-uses-copy-arg ()
+  "An internal-only selection uses its output index for copy and default."
+  (let ((page (zr-ffmpeg-test--page 1 "/tmp/multi.mkv")))
+    (setf (plist-get page :subtitle-streams) '(1)
+          (plist-get page :stream-info)
+          '((:index 0 :type video :ordinal 0)
+            (:index 1 :type audio :ordinal 0)
+            (:index 2 :type subtitle :ordinal 0)
+            (:index 3 :type subtitle :ordinal 1)))
+    (dolist (mode '(separate concat))
+      (zr-ffmpeg-test--with-task (list page) mode
+        (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+          (should (member "0:s:1?"
+                          (zr-ffmpeg-test--option-values "-map" argv)))
+          (should (equal (zr-ffmpeg-test--option-values "-c:s:0" argv)
+                         '("copy")))
+          (should (equal (zr-ffmpeg-test--option-values
+                          "-disposition:s:0" argv)
+                         '("default")))
+          (should-not (member "-c:s" argv))
+          (should-not (member "-c:s:1" argv)))))))
+
+(ert-deftest zr-ffmpeg-test-mixed-subtitles-follow-map-order ()
+  "Each page's internal and external subtitle args follow interleaved maps."
+  (let* ((page1 (zr-ffmpeg-test--page
+                 1 "/tmp/v1.mkv" "/tmp/s1.srt" 'soft-default "mov_text"))
+         (page2 (zr-ffmpeg-test--page
+                 2 "/tmp/v2.mkv" "/tmp/s2.ass" 'soft "webvtt"))
+         (pages (list page1 page2)))
+    (dolist (page pages)
+      (setf (plist-get page :stream-info)
+            '((:index 0 :type video :ordinal 0)
+              (:index 1 :type audio :ordinal 0)
+              (:index 2 :type subtitle :ordinal 0)
+              (:index 3 :type subtitle :ordinal 1))))
+    (setf (plist-get page1 :subtitle-streams) '(1)
+          (plist-get page2 :subtitle-streams) '(0)
+          (plist-get page1 :overrides)
+          '(:subtitle-mode soft-default
+            :subtitle-args ((c:s . "mov_text") (metadata:s . "language=eng")))
+          (plist-get page2 :overrides)
+          '(:subtitle-mode soft
+            :subtitle-args ((c:s . "webvtt") (metadata:s:s . "language=jpn"))))
+    (dolist (mode '(separate concat))
+      (zr-ffmpeg-test--with-task pages mode
+        (let ((argv (zr-ffmpeg--build-command pages "/tmp/out.mkv")))
+          (should (equal (zr-ffmpeg-test--option-values "-map" argv)
+                         (if (eq mode 'separate)
+                             '("0:v?" "0:a?" "0:s:1?" "1:s:0?"
+                               "2:v?" "2:a?" "2:s:0?" "3:s:0?")
+                           '("[vout]" "[aout]" "0:s:1?" "1:s:0?"
+                             "2:s:0?" "3:s:0?"))))
+          (cl-loop
+           for (codec language disposition) in
+           '(("mov_text" "language=eng" "default")
+             ("mov_text" "language=eng" "default")
+             ("webvtt" "language=jpn" nil)
+             ("webvtt" "language=jpn" nil))
+           for index from 0
+           do
+           (should (equal (zr-ffmpeg-test--option-values
+                           (format "-c:s:%d" index) argv)
+                          (list codec)))
+           (should (equal (zr-ffmpeg-test--option-values
+                           (format "-metadata:s:s:%d" index) argv)
+                          (list language)))
+           (should (equal (zr-ffmpeg-test--option-values
+                           (format "-disposition:s:%d" index) argv)
+                          (and disposition (list disposition)))))
+          (should-not (member "-c:s" argv))
+          (should-not (cl-some (lambda (arg)
+                                 (string-match-p "\\`-metadata:s\\(?::[0-9]+\\)?\\'" arg))
+                               argv))
+          (should-not (member "-c:s:4" argv)))))))
+
+(ert-deftest zr-ffmpeg-test-no-subtitles-have-no-output-args ()
+  "Neither none nor an empty wildcard match should inject subtitle args."
+  (let ((page (zr-ffmpeg-test--page 1 "/tmp/no-subtitles.mkv")))
+    (setf (plist-get page :stream-info)
+          '((:index 0 :type video :ordinal 0)
+            (:index 1 :type audio :ordinal 0)))
+    (dolist (selection '(nil all))
+      (setf (plist-get page :subtitle-streams) selection)
+      (zr-ffmpeg-test--with-task (list page) 'separate
+        (let ((argv (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")))
+          (should-not
+           (cl-some (lambda (arg)
+                      (string-match-p "\\`-\\(?:c\\|metadata\\|disposition\\):s" arg))
+                    argv)))))))
+
+(ert-deftest zr-ffmpeg-test-missing-optional-subtitles-do-not-shift-codecs ()
+  "Absent optional internal and external streams consume no output index."
+  (let* ((page1 (zr-ffmpeg-test--page
+                 1 "/tmp/v1.mkv" "/tmp/empty.mkv" 'soft "mov_text"))
+         (page2 (zr-ffmpeg-test--page
+                 2 "/tmp/v2.mkv" "/tmp/s2.srt" 'soft "webvtt"))
+         (pages (list page1 page2)))
+    (dolist (page pages)
+      (setf (plist-get page :stream-info)
+            '((:index 0 :type video :ordinal 0)
+              (:index 1 :type subtitle :ordinal 0))))
+    (setf (plist-get page1 :subtitle-streams) '(9 0)
+          (plist-get page2 :subtitle-streams) '(0))
+    (dolist (mode '(separate concat))
+      (zr-ffmpeg-test--with-task pages mode
+        (cl-letf (((symbol-function 'zr-ffmpeg--probe-streams)
+                   (lambda (source)
+                     (if (equal source "/tmp/empty.mkv")
+                         '((:index 0 :type video :ordinal 0))
+                       '((:index 0 :type subtitle :ordinal 0))))))
+          (let ((argv (zr-ffmpeg--build-command pages "/tmp/out.mkv")))
+            (should (member "0:s:9?"
+                            (zr-ffmpeg-test--option-values "-map" argv)))
+            (should (equal (zr-ffmpeg-test--option-values "-c:s:0" argv)
+                           '("mov_text")))
+            (should (equal (zr-ffmpeg-test--option-values "-c:s:1" argv)
+                           '("webvtt")))
+            (should (equal (zr-ffmpeg-test--option-values "-c:s:2" argv)
+                           '("webvtt")))
+            (should-not (member "-c:s:3" argv))))))))
+
+(ert-deftest zr-ffmpeg-test-unknown-subtitle-counts-share-identical-args ()
+  "Unavailable metadata permits common args for one input or mixed inputs."
+  (let ((page1 (zr-ffmpeg-test--page 1 "-"))
+        (page2 (zr-ffmpeg-test--page 2 "/tmp/v2.mkv" "/tmp/s2.srt")))
+    (dolist (page (list page1 page2))
+      (setf (plist-get page :overrides)
+            '(:subtitle-args ((c:s . "copy") (metadata:s . "language=eng")))))
+    (setf (plist-get page1 :subtitle-streams) 'all
+          (plist-get page2 :subtitle-streams) '(0 1))
+    (dolist (pages (list (list page1) (list page1 page2)))
+      (zr-ffmpeg-test--with-task pages 'separate
+        (cl-letf (((symbol-function 'zr-ffmpeg--probe-streams)
+                   (lambda (_source) nil)))
+          (let ((argv (zr-ffmpeg--build-command pages "/tmp/out.mkv")))
+            (should (equal (zr-ffmpeg-test--option-values "-c:s" argv)
+                           '("copy")))
+            (should (equal (zr-ffmpeg-test--option-values
+                            "-disposition:s" argv)
+                           '("default")))
+            (should (equal (zr-ffmpeg-test--option-values
+                            "-metadata:s:s" argv)
+                           '("language=eng")))
+            (should-not (member "-metadata:s" argv))
+            (should-not (cl-some (lambda (arg)
+                                   (string-prefix-p "-c:s:" arg))
+                                 argv))))))))
+
+(ert-deftest zr-ffmpeg-test-unknown-subtitle-counts-reject-different-args ()
+  "Unknown optional maps must not guess indices for different page args."
+  (dolist (settings '((soft "mov_text" soft "webvtt")
+                      (soft "copy" soft-default "copy")))
+    (let ((pages (list (zr-ffmpeg-test--page
+                       1 "/tmp/v1.mkv" nil (nth 0 settings) (nth 1 settings))
+                      (zr-ffmpeg-test--page
+                       2 "/tmp/v2.mkv" nil (nth 2 settings) (nth 3 settings)))))
+      (dolist (selection '(all (0)))
+        (dolist (page pages)
+          (setf (plist-get page :subtitle-streams) selection))
+        (zr-ffmpeg-test--with-task pages 'separate
+          (cl-letf (((symbol-function 'zr-ffmpeg--probe-streams)
+                     (lambda (_source) nil)))
+            (let ((error (should-error
+                          (zr-ffmpeg--build-command pages "/tmp/out.mkv")
+                          :type 'user-error)))
+              (should (string-match-p "different subtitle arguments"
+                                      (error-message-string error))))))))))
+
+(ert-deftest zr-ffmpeg-test-empty-subtitle-matches-do-not-prevent-shared-args ()
+  "Known empty matches do not contribute arguments to an unknown count."
+  (let* ((page1 (zr-ffmpeg-test--page
+                 1 "/tmp/empty.mkv" nil 'soft "mov_text"))
+         (page2 (zr-ffmpeg-test--page 2 "/tmp/unprobed.mkv"))
+         (pages (list page1 page2)))
+    (setf (plist-get page1 :subtitle-streams) 'all
+          (plist-get page1 :stream-info) '((:index 0 :type video :ordinal 0))
+          (plist-get page2 :subtitle-streams) 'all)
+    (zr-ffmpeg-test--with-task pages 'separate
+      (let ((argv (zr-ffmpeg--build-command pages "/tmp/out.mkv")))
+        (should (equal (zr-ffmpeg-test--option-values "-c:s" argv)
+                       '("copy")))
+        (should-not (member "mov_text" argv))))))
 
 (ert-deftest zr-ffmpeg-test-composed-internal-data-maps ()
   "Composed output should directly map selected subtitle and data streams."
