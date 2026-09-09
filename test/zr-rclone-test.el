@@ -1,4 +1,4 @@
-;;; zr-rclone-test.el --- RC and Virtual Dired tests -*- lexical-binding: t; -*-
+;;; zr-rclone-test.el --- RC sessions and external file-list tests -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 ;; Pure UI/path tests always run.  Integration tests use an isolated local
@@ -23,8 +23,7 @@
       (cancel-timer (zr-rclone-connection-timer zr-rclone-test--connection)))
     (when (process-live-p (zr-rclone-connection-process zr-rclone-test--connection))
       (delete-process (zr-rclone-connection-process zr-rclone-test--connection)))
-    (dolist (buffer (list (zr-rclone-connection-buffer zr-rclone-test--connection)
-                          (zr-rclone-connection-job-buffer zr-rclone-test--connection)))
+    (let ((buffer (zr-rclone-connection-job-buffer zr-rclone-test--connection)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))
     (setq zr-rclone-test--connection nil))
   (when (and zr-rclone-test--root (file-directory-p zr-rclone-test--root))
@@ -71,10 +70,14 @@
           (remote (concat "fixture:" name)))
      (make-directory local)
      (setf (zr-rclone-connection-transport connection) 'http)
-     (with-current-buffer (zr-rclone--buffer connection)
-       (setq zr-rclone-current-path remote zr-rclone-target-path nil
-             zr-rclone-call-options nil zr-rclone-bisync-options nil
-             zr-rclone-dry-run nil)
+     (let ((zr-rclone--connection connection))
+       (setf (zr-rclone-connection-current-path connection) remote
+             (zr-rclone-connection-target-path connection) nil
+             (zr-rclone-connection-call-options connection) nil
+             (zr-rclone-connection-bisync-options connection) nil
+             (zr-rclone-connection-list-recursive connection) nil
+             (zr-rclone-connection-media-rc-serve connection) nil
+             (zr-rclone-connection-dry-run connection) nil)
        ,@body)))
 
 (defun zr-rclone-test--wait (job connection)
@@ -126,39 +129,35 @@
   (should-error (zr-rclone--command-words "ls 'unfinished"))
   (should-error (zr-rclone--command-words "ls unfinished\\")))
 
-(ert-deftest zr-rclone-virtual-dired-keeps-original-entries-and-order ()
-  (with-temp-buffer
-    (zr-rclone-dired-mode)
-    (setq zr-rclone--entries
-          (mapcar (lambda (name) (list :fs "drive:dir" :path name :name name :size 7))
-                  '("a space.txt" "b\nnewline.txt" "c\\backslash.txt")))
-    (cl-letf (((symbol-function 'insert-directory)
-               (lambda (&rest _) (ert-fail "Virtual listing read a filesystem"))))
-      (zr-rclone--render)
-      (should (derived-mode-p 'dired-mode))
-      (dired-mark 2)
-      (should (equal (mapcar (lambda (entry) (plist-get entry :path))
-                             (zr-rclone--selected))
-                     '("a space.txt" "b\nnewline.txt")))
-      (should (equal (zr-rclone--display-name "c\\backslash.txt") "c\\\\backslash.txt"))
-      (let ((saved (zr-rclone--marks)))
-        (zr-rclone--render saved)
-        (should (= (length (zr-rclone--selected)) 2)))
-      (should (eq revert-buffer-function #'zr-rclone-refresh))
-      (should (eq (lookup-key (current-local-map) (kbd "C")) #'zr-rclone-copy))
-      (should-not (lookup-key (current-local-map) (kbd "Z"))))))
+(ert-deftest zr-rclone-panel-keeps-the-callers-buffer ()
+  (let ((zr-rclone--connection (zr-rclone--make-connection :url "http://panel.invalid/")))
+    (with-temp-buffer
+      (insert "user buffer content")
+      (let ((origin (current-buffer)) (directory default-directory))
+        (unwind-protect
+            (cl-letf (((symbol-function 'zr-rclone--request)
+                       (lambda (&rest _) (ert-fail "Opening the panel queried a directory"))))
+              (zr-rclone)
+              (transient--show)
+              (should (eq (current-buffer) origin))
+              (should (equal (buffer-string) "user buffer content"))
+              (should (equal default-directory directory))
+              (should-not (get-buffer "*rclone http://panel.invalid/*")))
+          (transient-quit-all))))))
 
-(ert-deftest zr-rclone-directory-failure-preserves-state ()
-  (with-temp-buffer
-    (zr-rclone-dired-mode)
-    (setq zr-rclone--connection (zr-rclone--make-connection :connected t)
-          zr-rclone-current-path "drive:old"
-          zr-rclone-target-path "backup:target")
-    (cl-letf (((symbol-function 'zr-rclone--list-entries)
-               (lambda (&rest _) (error "Directory unavailable"))))
-      (should-error (zr-rclone-cd "drive:missing"))
-      (should (equal zr-rclone-current-path "drive:old"))
-      (should (equal zr-rclone-target-path "backup:target")))))
+(ert-deftest zr-rclone-setting-paths-does-not-list-directories ()
+  (let ((zr-rclone--connection
+         (zr-rclone--make-connection :current-path "drive:old"
+                                     :target-path "backup:target")))
+    (cl-letf (((symbol-function 'zr-rclone--request)
+               (lambda (&rest _) (ert-fail "Setting paths performed an RC request"))))
+      (zr-rclone-cd "../new")
+      (should (equal (zr-rclone-connection-current-path zr-rclone--connection) "drive:new"))
+      (should-error (zr-rclone-cd ""))
+      (should (equal (zr-rclone-connection-current-path zr-rclone--connection) "drive:new"))
+      (zr-rclone-swap-paths)
+      (should (equal (zr-rclone-connection-current-path zr-rclone--connection) "backup:target"))
+      (should (equal (zr-rclone-connection-target-path zr-rclone--connection) "drive:new")))))
 
 (ert-deftest zr-rclone-webdav-url-mapping-and-tramp-names ()
   (let ((mapping '(:root "drive:media" :url "https://host:8443/dav/")))
@@ -189,75 +188,79 @@
                 (should-error (zr-rclone--call connection "rc/noop")))
             (setf (zr-rclone-connection-password connection) password)))))))
 
-(ert-deftest zr-rclone-real-copy-move-delete-and-completion ()
+(ert-deftest zr-rclone-real-directory-copy-move-and-completion ()
   (zr-rclone-test--with-server
     (let* ((name "中文 file %?#.txt")
-           (destination (concat remote "/destination"))
-           (local-destination (expand-file-name "destination" local)))
-      (write-region "original bytes" nil (expand-file-name name local) nil 'silent)
-      (make-directory local-destination)
-      (zr-rclone-refresh)
-      (should (member (concat remote "/destination/")
-                      (zr-rclone--path-completions connection (concat remote "/d") nil t)))
+           (source (expand-file-name "source" local))
+           (target (expand-file-name "target" local))
+           (moved (expand-file-name "moved" local)))
+      (make-directory (expand-file-name "empty" source) t)
+      (make-directory target)
+      (write-region "original bytes" nil (expand-file-name name source) nil 'silent)
+      (write-region "preserve extra target" nil (expand-file-name "extra.txt" target) nil 'silent)
+      (should (member (concat remote "/source/")
+                      (zr-rclone--path-completions connection (concat remote "/s") nil t)))
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/source")
+            (zr-rclone-connection-target-path connection) (concat remote "/target"))
       (dolist (transport '(http cli))
         (setf (zr-rclone-connection-transport connection) transport)
-        (let* ((entry (cl-find name zr-rclone--entries :test #'equal
-                               :key (lambda (entry) (plist-get entry :name))))
-               (copy-name (concat destination "/" (symbol-name transport) ".txt"))
-               (plan (zr-rclone--transfer-plan entry copy-name nil))
-               (job (zr-rclone--submit (car plan) (cadr plan) "test copy")))
-          (should (equal (plist-get (zr-rclone-test--wait job connection) :state) "done"))
-          (should (equal (with-temp-buffer
-                           (insert-file-contents (expand-file-name
-                                                 (concat (symbol-name transport) ".txt")
-                                                 local-destination))
-                           (buffer-string)) "original bytes"))))
-      (let* ((entry (list :fs destination :path "http.txt" :name "http.txt"))
-             (plan (zr-rclone--transfer-plan entry (concat destination "/renamed.txt") t)))
-        (zr-rclone-test--wait (zr-rclone--submit (car plan) (cadr plan) "test rename")
-                              connection))
-      (should-not (file-exists-p (expand-file-name "http.txt" local-destination)))
-      (should (file-exists-p (expand-file-name "renamed.txt" local-destination)))
-      (zr-rclone-test--wait
-       (zr-rclone--submit "operations/deletefile"
-                          (list (cons 'fs destination) '(remote . "renamed.txt"))
-                          "test delete") connection)
-      (should-not (file-exists-p (expand-file-name "renamed.txt" local-destination))))))
+        (let ((job (zr-rclone-copy)))
+          (should (equal (plist-get (zr-rclone-test--wait job connection) :state) "done")))
+        (should (equal (with-temp-buffer
+                         (insert-file-contents (expand-file-name name target))
+                         (buffer-string))
+                       "original bytes"))
+        (should (file-directory-p (expand-file-name "empty" target)))
+        (should (file-exists-p (expand-file-name "extra.txt" target))))
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/target")
+            (zr-rclone-connection-target-path connection) (concat remote "/moved"))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (let ((job (zr-rclone-move)))
+          (should (equal (plist-get (zr-rclone-test--wait job connection) :state) "done"))))
+      (should-not (file-exists-p (expand-file-name name target)))
+      (should (file-exists-p (expand-file-name name moved)))
+      (should (file-exists-p (expand-file-name "extra.txt" moved)))
+      (setf (zr-rclone-connection-target-path connection)
+            (concat (zr-rclone-connection-current-path connection) "/nested"))
+      (should-error (zr-rclone-copy)))))
 
-(ert-deftest zr-rclone-real-json-listing-and-filter-options ()
+(ert-deftest zr-rclone-real-file-lists-filter-recursion-and-consumer ()
   (zr-rclone-test--with-server
     (let ((source (expand-file-name "source" local))
-          (target (expand-file-name "target" local)))
-      (make-directory source)
+          (target (expand-file-name "target" local))
+          received)
+      (make-directory (expand-file-name "sub" source) t)
       (write-region "included" nil (expand-file-name "keep.mkv" source) nil 'silent)
       (write-region "excluded" nil (expand-file-name "skip.txt" source) nil 'silent)
-      (setq zr-rclone-current-path (concat remote "/source")
-            zr-rclone-target-path (concat remote "/target"))
-      (save-window-excursion
-        (let ((listing (zr-rclone-list-json)))
-          (unwind-protect
-              (with-current-buffer listing
-                (let ((entries (alist-get 'list (zr-rclone--parse-json (buffer-string)))))
-                  (should (vectorp entries))
-                  (should (equal (sort (mapcar (lambda (entry) (alist-get 'Name entry))
-                                               entries)
-                                       #'string-lessp)
-                                 '("keep.mkv" "skip.txt")))))
-            (kill-buffer listing))))
+      (write-region "nested" nil (expand-file-name "sub/nested.mkv" source) nil 'silent)
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/source")
+            (zr-rclone-connection-target-path connection) (concat remote "/target"))
+      (should (equal (zr-rclone-list-files)
+                     (list (concat remote "/source/keep.mkv") (concat remote "/source/skip.txt"))))
       (cl-letf (((symbol-function 'read-string)
-                 (lambda (&rest _) "{\"_filter\":{\"IncludeRule\":[\"*.mkv\"]}}"))
-                ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
-        (zr-rclone-set-call-options)
+                 (lambda (&rest _) "{\"_filter\":{\"IncludeRule\":[\"*.mkv\"]}}")))
+        (zr-rclone-set-call-options))
+      (let ((zr-rclone-file-list-function
+             (lambda (files owner) (setq received (list files owner)))))
+        (zr-rclone-send-file-list))
+      (should (equal (car received) (list (concat remote "/source/keep.mkv"))))
+      (should (eq (cadr received) connection))
+      (zr-rclone-toggle-recursive)
+      (should (equal (zr-rclone-list-files)
+                     (list (concat remote "/source/keep.mkv")
+                           (concat remote "/source/sub/nested.mkv"))))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
         (let ((job (zr-rclone-sync)))
           (zr-rclone-test--wait job connection)
           (should (equal (plist-get job :state) "done"))))
       (should (file-exists-p (expand-file-name "keep.mkv" target)))
+      (should (file-exists-p (expand-file-name "sub/nested.mkv" target)))
       (should-not (file-exists-p (expand-file-name "skip.txt" target))))))
 
 (ert-deftest zr-rclone-real-dry-run-and-temporary-command-results ()
   (zr-rclone-test--with-server
-    (let* ((file (expand-file-name "preserved.txt" local))
-           (zr-rclone-dry-run t))
+    (let ((file (expand-file-name "preserved.txt" local)))
+      (setf (zr-rclone-connection-dry-run connection) t)
       (write-region "keep" nil file nil 'silent)
       (zr-rclone-test--wait
        (zr-rclone--submit "operations/deletefile"
@@ -281,9 +284,9 @@
       (make-directory target)
       (write-region "source" nil (expand-file-name "a.txt" source) nil 'silent)
       (write-region "obsolete" nil (expand-file-name "old.txt" target) nil 'silent)
-      (setq zr-rclone-current-path (concat remote "/source")
-            zr-rclone-target-path (concat remote "/target")
-            zr-rclone-bisync-options
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/source")
+            (zr-rclone-connection-target-path connection) (concat remote "/target")
+            (zr-rclone-connection-bisync-options connection)
             (list (cons 'workdir (expand-file-name "bisync-state" local))))
       (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
         (let ((job (zr-rclone-sync)))
@@ -316,7 +319,7 @@
         (unwind-protect
             (with-current-buffer jobs-buffer
               (zr-rclone-jobs-mode)
-              (setq zr-rclone--connection connection)
+              (setq zr-rclone--jobs-connection connection)
               (cl-letf (((symbol-function 'zr-rclone--job-at-point) (lambda () job)))
                 (zr-rclone-cancel-job))
               (zr-rclone-test--wait job connection)
@@ -350,21 +353,25 @@
           (zr-rclone--previous-webdav-headers nil)
           (zr-tramp-webdav-backend 'curl))
       (write-region "0123456789" nil (expand-file-name name local) nil 'silent)
-      (zr-rclone-refresh)
       (zr-rclone-serve-webdav)
       (let* ((mapping (car (zr-rclone-connection-mappings connection)))
-             (entry (car zr-rclone--entries))
-             (media (zr-rclone--media connection entry nil))
-             (rc-media (zr-rclone--media connection entry t)))
+             (files (zr-rclone-list-files))
+             (media (car (zr-rclone-file-urls files connection)))
+             (rc-media (zr-rclone--media connection (car files) t)))
         (unwind-protect
             (progn
+              (let (playlist)
+                (cl-letf (((symbol-function 'zr-rclone--launch-mpv)
+                           (lambda (items) (setq playlist items))))
+                  (zr-rclone-play))
+                (should (equal playlist (list media))))
               (should (equal (zr-rclone-test--get (car media) (cdr media) "bytes=2-5")
                              '(206 . "2345")))
               (should (equal (zr-rclone-test--get (car rc-media) (cdr rc-media))
                              '(200 . "0123456789")))
               (save-window-excursion
                 (save-current-buffer
-                  (zr-rclone-open-current-webdav)
+                  (zr-rclone-open-webdav)
                   (let ((dav-buffer (current-buffer)))
                     (unwind-protect
                         (progn
@@ -468,32 +475,30 @@
 
 (ert-deftest zr-rclone-mount-reads-path-on-the-correct-machine ()
   (dolist (local-p '(nil t))
-    (with-temp-buffer
-      (zr-rclone-dired-mode)
-      (setq zr-rclone--connection (zr-rclone--make-connection
-                                   :connected t :local-p local-p)
-            zr-rclone-current-path "drive:music"
-            zr-rclone-mount-options '((vfsOpt . ((CacheMode . "writes")))))
-      (let (reader request)
-        (cl-letf (((symbol-function 'read-directory-name)
-                   (lambda (&rest _) (setq reader 'local) "/mnt/local path"))
-                  ((symbol-function 'read-string)
-                   (lambda (&rest _) (setq reader 'server) "/mnt/server path"))
-                  ((symbol-function 'zr-rclone--submit)
-                   (lambda (method params &rest _) (setq request (cons method params)))))
-          (zr-rclone-mount))
-        (should (eq reader (if local-p 'local 'server)))
-        (should (equal (car request) "mount/mount"))
-        (should (equal (alist-get 'fs (cdr request)) "drive:music"))
-        (should (equal (alist-get 'mountPoint (cdr request))
-                       (if local-p "/mnt/local path" "/mnt/server path")))))))
+    (let ((zr-rclone--connection
+           (zr-rclone--make-connection
+            :connected t :local-p local-p :current-path "drive:music"
+            :mount-options '((vfsOpt . ((CacheMode . "writes"))))))
+          reader request)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (&rest _) (setq reader 'local) "/mnt/local path"))
+                ((symbol-function 'read-string)
+                 (lambda (&rest _) (setq reader 'server) "/mnt/server path"))
+                ((symbol-function 'zr-rclone--submit)
+                 (lambda (method params &rest _) (setq request (cons method params)))))
+        (zr-rclone-mount))
+      (should (eq reader (if local-p 'local 'server)))
+      (should (equal (car request) "mount/mount"))
+      (should (equal (alist-get 'fs (cdr request)) "drive:music"))
+      (should (equal (alist-get 'mountPoint (cdr request))
+                     (if local-p "/mnt/local path" "/mnt/server path"))))))
 
 (ert-deftest zr-rclone-cancel-does-not-overwrite-a-concurrent-completion ()
   (with-temp-buffer
     (zr-rclone-jobs-mode)
     (let* ((connection (zr-rclone--make-connection :connected t))
            (job (list :id 1 :instance "instance" :finished nil :state "running")))
-      (setq zr-rclone--connection connection)
+      (setq zr-rclone--jobs-connection connection)
       (cl-letf (((symbol-function 'zr-rclone--job-at-point) (lambda () job))
                 ((symbol-function 'zr-rclone--server-instance)
                  (lambda (_connection)
@@ -508,7 +513,7 @@
   (with-temp-buffer
     (zr-rclone-jobs-mode)
     (let ((job (list :id 1 :instance "old" :finished nil)))
-      (setq zr-rclone--connection (zr-rclone--make-connection :connected t))
+      (setq zr-rclone--jobs-connection (zr-rclone--make-connection :connected t))
       (cl-letf (((symbol-function 'zr-rclone--job-at-point) (lambda () job))
                 ((symbol-function 'zr-rclone--server-instance) (lambda (_) "new"))
                 ((symbol-function 'zr-rclone--call)
@@ -516,34 +521,65 @@
         (should-error (zr-rclone-cancel-job))))))
 
 (ert-deftest zr-rclone-stop-refuses-an-unowned-daemon ()
-  (with-temp-buffer
-    (zr-rclone-dired-mode)
-    (setq zr-rclone--connection (zr-rclone--make-connection :connected t))
+  (let ((zr-rclone--connection (zr-rclone--make-connection :connected t)))
     (cl-letf (((symbol-function 'zr-rclone--call)
                (lambda (&rest _) (ert-fail "Attempted to stop an unowned daemon"))))
       (should-error (zr-rclone-stop-daemon)))))
 
 (ert-deftest zr-rclone-connections-isolate-path-and-option-state ()
-  (let* ((a (zr-rclone--make-connection :url "http://one.invalid/"))
-         (b (zr-rclone--make-connection :url "http://two.invalid/"))
-         (first (zr-rclone--buffer a))
-         (second (zr-rclone--buffer b)))
-    (unwind-protect
-        (progn
-          (with-current-buffer first
-            (setq zr-rclone-current-path "one:source"
-                  zr-rclone-target-path "one:target" zr-rclone-dry-run t))
-          (with-current-buffer second
-            (should-not zr-rclone-current-path)
-            (should-not zr-rclone-target-path)
-            (should-not zr-rclone-dry-run)
-            (setq zr-rclone-current-path "two:source"))
-          (with-current-buffer first
-            (should (equal zr-rclone-current-path "one:source"))
-            (should (equal zr-rclone-target-path "one:target"))
-            (should zr-rclone-dry-run)))
-      (kill-buffer first)
-      (kill-buffer second))))
+  (let ((a (zr-rclone--make-connection :url "http://one.invalid/"))
+        (b (zr-rclone--make-connection :url "http://two.invalid/")))
+    (let ((zr-rclone--connection a))
+      (zr-rclone-cd "one:source")
+      (zr-rclone-set-target "one:target")
+      (zr-rclone-toggle-dry-run)
+      (with-temp-buffer
+        (should (equal (zr-rclone-connection-current-path (zr-rclone--context)) "one:source"))
+        (zr-rclone-toggle-recursive)))
+    (let ((zr-rclone--connection b))
+      (should-not (zr-rclone-connection-current-path (zr-rclone--context)))
+      (should-not (zr-rclone-connection-dry-run (zr-rclone--context)))
+      (zr-rclone-cd "two:source")
+      (zr-rclone-toggle-media-source))
+    (should (equal (zr-rclone-connection-current-path a) "one:source"))
+    (should (equal (zr-rclone-connection-target-path a) "one:target"))
+    (should (zr-rclone-connection-dry-run a))
+    (should (zr-rclone-connection-list-recursive a))
+    (should-not (zr-rclone-connection-media-rc-serve a))
+    (should-not (zr-rclone-connection-target-path b))
+    (should (zr-rclone-connection-media-rc-serve b))))
+
+(ert-deftest zr-rclone-file-selection-preserves-paths-and-order ()
+  (let* ((connection (zr-rclone--make-connection :connected t :current-path "drive:dir"))
+         (files '("drive:dir/a,comma.mkv" "drive:dir/b\nnewline.mkv"
+                  "drive:dir/c space.mkv")))
+    (cl-letf (((symbol-function 'zr-rclone-list-files) (lambda (&rest _) files))
+              ((symbol-function 'completing-read-multiple)
+               (lambda (_prompt choices &rest _)
+                 (should (equal crm-separator "\n"))
+                 (should-not (string-match-p "\n" (car (nth 1 choices))))
+                 (list (car (nth 1 choices)) (caar choices) (caar choices)))))
+      (should (equal (zr-rclone--consumer-files connection t) (butlast files))))
+    (cl-letf (((symbol-function 'zr-rclone-list-files) (lambda (&rest _) nil)))
+      (should-error (zr-rclone--consumer-files connection nil)))))
+
+(ert-deftest zr-rclone-jobs-keep-their-connection-after-switching ()
+  (let* ((a (zr-rclone--make-connection :connected t))
+         (b (zr-rclone--make-connection :connected t))
+         (job (list :id 1 :group "owned-by-a"))
+         (zr-rclone--connection b)
+         polled)
+    (setf (zr-rclone-connection-jobs a) (list job))
+    (with-temp-buffer
+      (zr-rclone-jobs-mode)
+      (setq zr-rclone--jobs-connection a)
+      (cl-letf (((symbol-function 'tabulated-list-get-id) (lambda () "owned-by-a"))
+                ((symbol-function 'zr-rclone--poll-jobs)
+                 (lambda (connection) (setq polled connection))))
+        (should (eq (zr-rclone--job-at-point) job))
+        (zr-rclone-refresh-jobs)
+        (should (eq polled a))
+        (should (eq (zr-rclone--context) b))))))
 
 (provide 'zr-rclone-test)
 ;;; zr-rclone-test.el ends here
