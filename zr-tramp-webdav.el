@@ -29,6 +29,8 @@
 ;; Supports visiting/saving files, completion, Dired, directory creation,
 ;; deletion, copying and renaming, including transfers to/from local files.
 ;; Directory listings use PROPFIND; same-server copies/moves use COPY/MOVE.
+;; Background completion and mode-line checks use cached metadata without
+;; starting synchronous HTTP requests.
 ;; File contents are staged locally to preserve Emacs coding conventions.
 ;; ETags (or Last-Modified) guard saves and read/modify/write appends when
 ;; the server supplies them.  Exclusive creation uses If-None-Match.
@@ -321,7 +323,7 @@ Use the final header block, skipping proxy and informational responses."
   "Send a WebDAV METHOD request for FILE with HEADERS and DATA.
 Return a plist containing :status, :headers, :body and the final :url.
 HTTP error codes are left to the caller; transport errors are signaled."
-  (when non-essential (throw 'non-essential 'non-essential))
+  (when non-essential (throw 'zr-tramp-webdav--non-essential nil))
   (unless (and (numberp zr-tramp-webdav-timeout) (> zr-tramp-webdav-timeout 0))
     (signal 'file-error '("WebDAV timeout must be positive")))
   (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
@@ -557,8 +559,15 @@ Encoded slashes and dot components are rejected to preserve hierarchy."
 
 (defun zr-tramp-webdav--directory-files (directory &optional full match nosort count)
   "Implement `directory-files' with its usual arguments."
-  (mapcar #'car (zr-tramp-webdav--directory-files-and-attributes
-                directory full match nosort nil count)))
+  (setq directory (file-name-as-directory (expand-file-name directory)))
+  (let (result)
+    ;; Callers such as project discovery only need names.  Constructing
+    ;; attributes would expand and dissect every child's remote path.
+    (dolist (entry (zr-tramp-webdav--directory-entries directory))
+      (when (or (not match) (string-match-p match (car entry)))
+        (push (if full (concat directory (car entry)) (car entry)) result)))
+    (setq result (if nosort (nreverse result) (sort result #'string<)))
+    (if (natnump count) (seq-take result count) result)))
 
 (defun zr-tramp-webdav--all-completions (file directory)
   "Return completions for FILE in DIRECTORY."
@@ -998,9 +1007,14 @@ DIRECTORY permits replacing an empty directory.  Return overwrite consent."
 
 (defun zr-tramp-webdav-file-name-handler (operation &rest args)
   "Dispatch TRAMP OPERATION with ARGS to the WebDAV implementation."
-  (if-let* ((handler (alist-get operation zr-tramp-webdav-file-name-handler-alist)))
-      (save-match-data (apply handler args))
-    (tramp-run-real-handler operation args)))
+  (save-match-data
+    ;; A background cache miss must unwind past the cache setters without
+    ;; storing nil as "missing".  Use a private tag: TRAMP's `non-essential'
+    ;; fallback forces a level-10 backtrace, even with `tramp-verbose' zero.
+    (catch 'zr-tramp-webdav--non-essential
+      (if-let* ((handler (alist-get operation zr-tramp-webdav-file-name-handler-alist)))
+          (apply handler args)
+        (tramp-run-real-handler operation args)))))
 
 ;;;###autoload
 (defun zr-tramp-webdav-clear-cache ()
