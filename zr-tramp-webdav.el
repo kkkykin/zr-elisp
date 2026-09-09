@@ -8,7 +8,8 @@
 ;; WebDAV file access without GVFS, FUSE, or a remote shell:
 ;;
 ;;   (require 'zr-tramp-webdav)
-;;   (setq zr-tramp-webdav-backend 'url) ; Built in; alternatively `curl'.
+;;   (setq zr-tramp-webdav-backend 'curl) ; Default; alternatively `url'.
+;;   (setq zr-tramp-webdav-curl-arguments '("--ipv4"))
 ;;   (find-file "/webdavs:alice@example.org:/dav/notes.txt")
 ;;   (dired "/webdav:alice@localhost#8080:/dav/")
 ;;
@@ -55,14 +56,20 @@
   "Portable WebDAV file access through TRAMP."
   :group 'tramp)
 
-(defcustom zr-tramp-webdav-backend 'url
+(defcustom zr-tramp-webdav-backend 'curl
   "HTTP transport used for WebDAV requests."
-  :type '(choice (const :tag "Emacs URL library" url)
-                 (const :tag "curl executable" curl)))
+  :type '(choice (const :tag "curl executable" curl)
+                 (const :tag "Emacs URL library" url)))
 
 (defcustom zr-tramp-webdav-curl-program "curl"
   "Executable used when `zr-tramp-webdav-backend' is `curl'."
   :type 'file)
+
+(defcustom zr-tramp-webdav-curl-arguments nil
+  "Extra command-line arguments for curl, as a list or a function.
+The function is called with the remote file name and must return
+a list of strings.  Arguments are inserted before the request URL."
+  :type '(choice (repeat string) function))
 
 (defcustom zr-tramp-webdav-timeout 30
   "Maximum number of seconds to wait for one HTTP request."
@@ -195,7 +202,7 @@ Use the final header block, skipping proxy and informational responses."
       (signal 'file-error '("Invalid HTTP response from WebDAV server")))
     (list :status status :headers (nreverse headers))))
 
-(defun zr-tramp-webdav--url-request (method url headers data)
+(defun zr-tramp-webdav--url-request (_file method url headers data)
   "Send METHOD to URL with HEADERS and byte string DATA using `url'."
   (let ((default-directory tramp-compat-temporary-file-directory)
         (url-request-method method)
@@ -261,7 +268,16 @@ Use the final header block, skipping proxy and informational responses."
         (create-lockfiles nil))
     (write-region data nil file nil 'silent)))
 
-(defun zr-tramp-webdav--curl-request (method url headers data)
+(defun zr-tramp-webdav--curl-arguments (file)
+  "Return extra curl command-line arguments for FILE."
+  (let ((args (if (functionp zr-tramp-webdav-curl-arguments)
+                  (funcall zr-tramp-webdav-curl-arguments file)
+                zr-tramp-webdav-curl-arguments)))
+    (unless (and (listp args) (cl-every #'stringp args))
+      (signal 'file-error '("WebDAV curl arguments must be a list of strings")))
+    args))
+
+(defun zr-tramp-webdav--curl-request (file method url headers data)
   "Send METHOD to URL with HEADERS and byte string DATA using curl."
   (let* ((default-directory tramp-compat-temporary-file-directory)
          (request-file (make-temp-file "zr-webdav-headers-"))
@@ -289,6 +305,7 @@ Use the final header block, skipping proxy and informational responses."
                                "--header" (concat "@" request-file)
                                "--dump-header" response-file)
                          (when data (list "--data-binary" (concat "@" data-file)))
+                         (zr-tramp-webdav--curl-arguments file)
                          (list "--url" url)))))
             (unless (equal status 0)
               (signal 'file-error
@@ -297,8 +314,8 @@ Use the final header block, skipping proxy and informational responses."
             (plist-put (zr-tramp-webdav--parse-headers
                         (zr-tramp-webdav--read-bytes response-file))
                        :body (buffer-string))))
-      (dolist (file (list request-file response-file error-file data-file))
-        (when file (delete-file file))))))
+      (dolist (temp-file (list request-file response-file error-file data-file))
+        (when temp-file (delete-file temp-file))))))
 
 (defun zr-tramp-webdav--request (file method &optional headers data)
   "Send a WebDAV METHOD request for FILE with HEADERS and DATA.
@@ -327,7 +344,7 @@ HTTP error codes are left to the caller; transport errors are signaled."
       (push (cons "Authorization" authorization) headers))
     (zr-tramp-webdav--check-headers headers)
     (while (not finished)
-      (setq response (funcall transport method url headers data))
+      (setq response (funcall transport file method url headers data))
       (let ((status (plist-get response :status)))
         (cond
          ((and (= status 401) (not authorization)
