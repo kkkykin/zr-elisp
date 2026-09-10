@@ -119,6 +119,130 @@
   (should (equal (zr-rclone--relative-to "drive:music/a" "drive:music") "a"))
   (should-error (zr-rclone--resolve-path "relative")))
 
+(ert-deftest zr-rclone-path-completion-keeps-roots-with-a-base ()
+  (let ((connection (zr-rclone--make-connection)))
+    (cl-letf (((symbol-function 'zr-rclone--call)
+               (lambda (_connection method &optional _params)
+                 (pcase method
+                   ("config/listremotes" '((remotes . ["drive" "backup"])))
+                   ("operations/list"
+                    '((list . [((Name . "drive-local") (IsDir . t))
+                               ((Name . "drive.txt") (IsDir . :false))])))))))
+      (dolist (base '(nil "/srv/local" "C:/local" "//host/share/local" "backup:local"))
+        (dolist (directories-only '(nil t))
+          (let ((table (completion-table-dynamic
+                        (lambda (input)
+                          (zr-rclone--path-completions
+                           connection input base directories-only)))))
+            (ert-info ((format "Base %S, directories-only %S" base directories-only))
+              (should (member "drive:" (all-completions "" table)))
+              (should (member "/" (all-completions "" table)))
+              (should (member "drive:" (all-completions "dr" table)))
+              (when base
+                (should (member "drive-local/" (all-completions "dr" table)))
+                (if directories-only
+                    (should-not (member "drive.txt" (all-completions "dr" table)))
+                  (should (member "drive.txt" (all-completions "dr" table))))))))))))
+
+(ert-deftest zr-rclone-path-completion-keeps-directory-scope ()
+  (let ((connection (zr-rclone--make-connection)) calls)
+    (cl-letf (((symbol-function 'zr-rclone--call)
+               (lambda (_connection method &optional _params)
+                 (push method calls)
+                 '((list . [((Name . "docs") (IsDir . t))])))))
+      (dolist (prefix '("/srv/local/" "C:/local/" "//host/share/" "drive:"
+                        "drive:/" "./" "../" "sub/"))
+        (dolist (leaf '("" "do"))
+          (setq calls nil)
+          (should (equal (zr-rclone--path-completions
+                          connection (concat prefix leaf) "/srv/local" t)
+                         (list (concat prefix "docs/"))))
+          (should (equal calls '("operations/list"))))))))
+
+(ert-deftest zr-rclone-path-completion-table-has-component-boundaries ()
+  (let ((table (zr-rclone--path-completion-table
+                (zr-rclone--make-connection) "/srv/local" nil)))
+    (dolist (prefix '("" "drive:" "drive:/music/" "/srv/local/" "C:\\Music\\"
+                      "//host/share/" "./" "../"
+                      ":webdav,url='https://host:8443/dav':"))
+      (should (equal (completion-boundaries (concat prefix "fi") table nil "le/next")
+                     (cons (length prefix) 2)))
+      (should (= (car (completion-boundaries prefix table nil "")) (length prefix))))
+    (should (= (car (completion-boundaries "drive:music/a:b" table nil ""))
+               (length "drive:music/")))
+    (cl-letf (((symbol-function 'zr-rclone--list-entries)
+               (lambda (_connection path)
+                 (if path '((:name "music" :directory t))
+                   '((:path "drive:" :name "drive:" :directory t))))))
+      (should (equal (try-completion "dr" table) "drive:"))
+      (should (equal (all-completions "drive:mu" table) '("music/")))
+      (should (equal (try-completion "drive:mu" table) "drive:music/")))))
+
+(defun zr-rclone-test--drive-path-reader (mode initial directories-only driver)
+  "Run DRIVER inside a path minibuffer using MODE and INITIAL input.
+DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
+  (require 'icomplete)
+  (let ((icomplete-mode nil) (fido-mode nil)
+        (minibuffer-setup-hook nil) (completion-in-region-mode-hook nil)
+        (zr-rclone-path-history nil)
+        (enable-recursive-minibuffers t)
+        ;; Batch Emacs uses stdin unless a keyboard macro is active on entry.
+        (executing-kbd-macro "") unread-command-events failure result)
+    (funcall mode 1)
+    (setq result
+          (minibuffer-with-setup-hook
+              (lambda ()
+                ;; Allow the real icomplete/Fido setup hooks to run normally.
+                (setq executing-kbd-macro nil)
+                (use-local-map (copy-keymap (current-local-map)))
+                (local-set-key
+                 [zr-rclone-test-input]
+                 (lambda ()
+                   (interactive)
+                   (condition-case err
+                       (progn (funcall driver) (error "Path driver did not exit"))
+                     (error (setq failure err) (exit-minibuffer)))))
+                (setq unread-command-events '(zr-rclone-test-input)))
+            (zr-rclone--read-path "Path: " initial directories-only)))
+    (when failure (signal (car failure) (cdr failure)))
+    result))
+
+(ert-deftest zr-rclone-icomplete-enters-directories-before-accepting-paths ()
+  (let ((zr-rclone--connection
+         (zr-rclone--make-connection :connected t :current-path "/srv/local")))
+    (cl-letf (((symbol-function 'zr-rclone--list-entries)
+               (lambda (_connection path)
+                 (pcase path
+                   ('nil '((:path "drive:" :name "drive:" :directory t)))
+                   ("drive:" '((:name "music" :directory t)))
+                   ("drive:music" '((:name "live" :directory t)))
+                   ("drive:music/live" '((:name "track.mkv" :directory nil)))))))
+      (dolist (mode '(icomplete-mode fido-mode))
+        (dolist (directories-only '(nil t))
+          (ert-info ((format "Mode %S, directories-only %S" mode directories-only))
+            (let ((result
+                   (zr-rclone-test--drive-path-reader
+                    mode "dr" directories-only
+                    (lambda ()
+                      (cl-letf (((symbol-function 'file-directory-p)
+                                 (lambda (&rest _)
+                                   (ert-fail "Rclone completion used Emacs's filesystem"))))
+                        (call-interactively (key-binding (kbd "RET")))
+                        (should (equal (minibuffer-contents-no-properties) "drive:"))
+                        (insert "mu")
+                        (call-interactively (key-binding (kbd "RET")))
+                        (should (equal (minibuffer-contents-no-properties) "drive:music/"))
+                        (insert "li")
+                        (call-interactively (key-binding (kbd "RET")))
+                        (should (equal (minibuffer-contents-no-properties)
+                                       "drive:music/live/"))
+                        (if directories-only
+                            (call-interactively (key-binding (kbd "M-j")))
+                          (insert "tra")
+                          (call-interactively (key-binding (kbd "RET")))))))))
+              (should (equal result (if directories-only "drive:music/live"
+                                     "drive:music/live/track.mkv"))))))))))
+
 (ert-deftest zr-rclone-command-quoting-is-not-shell-evaluation ()
   (should (equal (zr-rclone--command-words
                   "copy '源 file' \"target file\" --include='*.mkv' '' a\\ b")
@@ -223,6 +347,29 @@
       (setf (zr-rclone-connection-target-path connection)
             (concat (zr-rclone-connection-current-path connection) "/nested"))
       (should-error (zr-rclone-copy)))))
+
+(ert-deftest zr-rclone-real-path-prompts-can-switch-from-local-to-remote ()
+  (zr-rclone-test--with-server
+    (make-directory (expand-file-name "fixture-local" local))
+    (write-region "file" nil (expand-file-name "fixture.txt" local) nil 'silent)
+    (dolist (command '(zr-rclone-cd zr-rclone-set-target))
+      (zr-rclone-cd local)
+      (zr-rclone-set-target local)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table _predicate _require-match initial &rest _)
+                   (should (equal initial local))
+                   (should (member "fixture:" (all-completions "" table)))
+                   (should (member "fixture:" (all-completions "fix" table)))
+                   (should (member "fixture-local/" (all-completions "fix" table)))
+                   (should-not (member "fixture.txt" (all-completions "fix" table)))
+                   (should (member (concat name "/")
+                                   (all-completions "fixture:case-" table)))
+                   remote)))
+        (call-interactively command))
+      (should (equal (if (eq command 'zr-rclone-cd)
+                        (zr-rclone-connection-current-path connection)
+                      (zr-rclone-connection-target-path connection))
+                     remote)))))
 
 (ert-deftest zr-rclone-real-file-lists-filter-recursion-and-consumer ()
   (zr-rclone-test--with-server

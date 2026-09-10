@@ -452,48 +452,101 @@ shares, and quoted connection-string parameters."
 
 (defun zr-rclone--path-completions (connection input base directories-only)
   "Complete INPUT relative to BASE on CONNECTION.
+Offer roots alongside relative entries for empty INPUT or a bare name.
 When DIRECTORIES-ONLY is non-nil, omit files.  No TRAMP access is used."
-  (condition-case nil
-      (let* ((absolute (zr-rclone--resolve-path (if (string-empty-p input) "." input)
-                                               base))
-             (trailing (or (string-empty-p input) (string-suffix-p "/" input)
-                           (string-suffix-p ":" input)))
-             (directory (if trailing absolute (zr-rclone--parent absolute)))
-             (leaf (and (not trailing) (zr-rclone--basename absolute)))
-             (typed-prefix (if trailing input
-                             (substring input 0 (max 0 (- (length input)
-                                                          (length leaf)))))))
-        (if directory
-            (mapcar
-             (lambda (entry)
-               (concat typed-prefix (plist-get entry :name)
-                       (when (plist-get entry :directory) "/")))
-             (cl-remove-if-not
-              (lambda (entry) (or (not directories-only)
-                                  (plist-get entry :directory)))
-              (zr-rclone--list-entries connection directory)))
-          (mapcar (lambda (entry) (plist-get entry :path))
-                  (zr-rclone--list-entries connection nil))))
-    (error
-     (condition-case nil
-         (mapcar (lambda (entry) (plist-get entry :path))
-                 (zr-rclone--list-entries connection nil))
-       (error nil)))))
+  (cl-flet ((roots ()
+              (condition-case nil
+                  (mapcar (lambda (entry) (plist-get entry :path))
+                          (zr-rclone--list-entries connection nil))
+                (error nil))))
+    (condition-case nil
+        (let* ((absolute (zr-rclone--resolve-path (if (string-empty-p input) "." input)
+                                                 base))
+               (trailing (or (string-empty-p input) (string-suffix-p "/" input)
+                             (string-suffix-p ":" input)))
+               (directory (if trailing absolute (zr-rclone--parent absolute)))
+               (leaf (and (not trailing) (zr-rclone--basename absolute)))
+               (typed-prefix (if trailing input
+                               (substring input 0 (max 0 (- (length input)
+                                                            (length leaf)))))))
+          (if directory
+              (append
+               (mapcar
+                (lambda (entry)
+                  (concat typed-prefix (plist-get entry :name)
+                          (when (plist-get entry :directory) "/")))
+                (cl-remove-if-not
+                 (lambda (entry) (or (not directories-only)
+                                     (plist-get entry :directory)))
+                 (zr-rclone--list-entries connection directory)))
+               (unless (string-match-p "[:/\\\\]" input) (roots)))
+            (roots)))
+      (error (roots)))))
+
+(defun zr-rclone--path-completion-prefix (input)
+  "Return the root and directory prefix already entered in INPUT."
+  (let* ((parts (zr-rclone--split-path input))
+         (relative (if parts (cdr parts) input))
+         (slash (string-match "/[^/]*\\'" relative))
+         (end (+ (length (car parts)) (if slash (1+ slash) 0))))
+    (substring input 0 (min end (length input)))))
+
+(defun zr-rclone--path-completion-table (connection base directories-only)
+  "Return a cached, component-wise RC completion table for CONNECTION.
+Resolve relative paths against BASE and omit files if DIRECTORIES-ONLY.
+Use a separate category because these paths belong to the rcd machine."
+  (let ((cache (make-hash-table :test #'equal)))
+    (lambda (input predicate action)
+      (let ((prefix (zr-rclone--path-completion-prefix input)))
+        (cond
+         ((eq action 'metadata) '(metadata (category . zr-rclone-path)))
+         ((eq (car-safe action) 'boundaries)
+          `(boundaries ,(length prefix) . ,(string-match "/" (cdr action))))
+         (t
+          (let ((candidates (gethash input cache 'missing)))
+            (when (eq candidates 'missing)
+              (setq candidates
+                    (puthash input
+                             (zr-rclone--path-completions
+                              connection input base directories-only) cache)))
+            (completion-table-with-context
+             prefix
+             (cl-loop for path in candidates
+                      when (string-prefix-p prefix path)
+                      collect (substring path (length prefix)))
+             (substring input (length prefix)) predicate action))))))))
+
+(defun zr-rclone--path-enter ()
+  "Insert the selected path, continuing completion when it is a directory.
+Use `exit-minibuffer' on M-j to accept the current directory or a new path."
+  (interactive)
+  (let ((before (minibuffer-contents-no-properties)))
+    (when (car (completion-all-sorted-completions))
+      (minibuffer-force-complete nil nil 'dont-cycle))
+    (let ((input (minibuffer-contents-no-properties)))
+      (when (or (equal input before)
+                (< (car (completion-boundaries
+                         input minibuffer-completion-table
+                         minibuffer-completion-predicate ""))
+                   (length input)))
+        (exit-minibuffer)))))
 
 (defun zr-rclone--read-path (prompt initial &optional directories-only)
-  "Read an rclone path with RC completion using PROMPT and INITIAL."
+  "Read an rclone path with RC completion using PROMPT and INITIAL.
+With icomplete or Fido, RET enters directories and M-j accepts the input."
   (let* ((connection (zr-rclone--connected))
          (base (zr-rclone-connection-current-path connection))
-         (cache (make-hash-table :test #'equal))
-         (table
-          (completion-table-dynamic
-           (lambda (input)
-             (or (gethash input cache)
-                 (puthash input
-                          (zr-rclone--path-completions
-                           connection input base directories-only) cache)))))
-         (input (completing-read prompt table nil nil initial
-                                 'zr-rclone-path-history))
+         (table (zr-rclone--path-completion-table connection base directories-only))
+         (input
+          (minibuffer-with-setup-hook
+              (:append
+               (lambda ()
+                 (when (bound-and-true-p icomplete-mode)
+                   (use-local-map (copy-keymap (current-local-map)))
+                   (local-set-key (kbd "RET") #'zr-rclone--path-enter)
+                   (local-set-key (kbd "M-j") #'exit-minibuffer))))
+            (completing-read prompt table nil nil initial
+                             'zr-rclone-path-history)))
          (path (zr-rclone--resolve-path input base)))
     (if (and (not directories-only) (string-suffix-p "/" input)
              (not (string-suffix-p "/" path)))
