@@ -55,6 +55,12 @@
 For example, (\"--rc-serve\") also enables HTTP access to remote objects."
   :type '(repeat string))
 
+(defcustom zr-rclone-password #'zr-rclone--new-password
+  "Password for new owned rcd and WebDAV servers.
+The value is a non-empty string or a function called without arguments
+for each new service to return a non-empty password string."
+  :type '(choice string function))
+
 (defcustom zr-rclone-config-file nil
   "Optional rclone config file for new connections.
 This is a path on the rcd machine.  It is also passed explicitly to
@@ -158,15 +164,20 @@ excluded.  The default consumer converts them to URLs and starts mpv."
               (concat (car credentials) ":" (cdr credentials)) 'utf-8) t))))
 
 (defun zr-rclone--new-password ()
-  "Generate a password from the OS random source, or read one interactively."
-  (if (file-readable-p "/dev/urandom")
-      (with-temp-buffer
-        (set-buffer-multibyte nil)
-        (insert-file-contents-literally "/dev/urandom" nil 0 32)
-        (secure-hash 'sha256 (current-buffer)))
-    (let ((password (read-passwd "Password for the new rclone service: " t)))
-      (when (string-empty-p password) (user-error "A password is required"))
-      password)))
+  "Generate a 64-character hexadecimal password using `random'."
+  (let ((password (make-string 64 ?0)))
+    (dotimes (index (length password))
+      (aset password index (aref "0123456789abcdef" (random 16))))
+    password))
+
+(defun zr-rclone--password ()
+  "Return a password for a new service using `zr-rclone-password'."
+  (let ((password (if (functionp zr-rclone-password)
+                      (funcall zr-rclone-password)
+                    zr-rclone-password)))
+    (unless (and (stringp password) (not (string-empty-p password)))
+      (user-error "zr-rclone-password must provide a non-empty string"))
+    password))
 
 (defun zr-rclone--http-request (connection method params callback)
   "Send METHOD and PARAMS over HTTP; call CALLBACK with (RESULT ERROR).
@@ -632,7 +643,8 @@ With prefix LOCAL-P, paths share Emacs's filesystem."
           (unless (string-empty-p path) path))))
 
 (defun zr-rclone-start-daemon (address)
-  "Start an owned local rcd listening at ADDRESS, with generated credentials."
+  "Start an owned local rcd listening at ADDRESS.
+The password is determined by `zr-rclone-password'."
   (interactive (list (read-string "Local rcd listen address: " "127.0.0.1:5572")))
   (when (string-suffix-p ":0" address)
     (user-error "Choose a fixed RC port; WebDAV servers may use port zero"))
@@ -644,7 +656,7 @@ With prefix LOCAL-P, paths share Emacs's filesystem."
          (default-directory temporary-file-directory)
          (process-environment (copy-sequence process-environment))
          (user "zr-rclone")
-         (password (zr-rclone--new-password)))
+         (password (zr-rclone--password)))
     (when (process-live-p (zr-rclone-connection-process connection))
       (user-error "This rcd is already running"))
     (setenv "RCLONE_RC_USER" user)
@@ -1234,7 +1246,8 @@ to explicit mappings or rclone's own WebDAV server."
 
 (defun zr-rclone-serve-webdav ()
   "Start a WebDAV server for the current path through serve/start.
-Local servers use a generated password and an automatically assigned port.
+The password is determined by `zr-rclone-password'.
+Local servers use an automatically assigned port.
 For remote servers, ask separately for the listening and accessible addresses."
   (interactive)
   (let* ((connection (zr-rclone--connected))
@@ -1248,7 +1261,7 @@ For remote servers, ask separately for the listening and accessible addresses."
                       (read-string "WebDAV URL reachable from Emacs: ")))))
     (zr-rclone--require-method connection "serve/start")
     (let* ((user "zr-rclone")
-           (password (zr-rclone--new-password))
+           (password (zr-rclone--password))
            (result
             (zr-rclone--call
              connection "serve/start"
