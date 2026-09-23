@@ -66,6 +66,7 @@ it is serialized into a chunk message."
         (setq start end)))
     (nreverse chunks)))
 
+;;;###autoload
 (defun zr-wezterm-send-json (object)
   "Send OBJECT to WezTerm as JSON.
 Return non-nil once the last message has been sent."

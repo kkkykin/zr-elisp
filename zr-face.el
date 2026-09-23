@@ -50,7 +50,7 @@
                   (name target font-spec &optional frame add))
 (declare-function w32-read-registry "w32fns.c" (root key name))
 (declare-function xterm--query "xterm")
-(declare-function zr-wezterm-send-json "zr-wezterm")
+(autoload 'zr-wezterm-send-json "zr-wezterm")
 
 (defvar custom-enabled-themes)
 (defvar custom-known-themes)
