@@ -369,53 +369,61 @@ Avoids selecting the most recently used theme."
 
 ;;; Appearance
 
+(defcustom zr-face-wezterm-theme "Google (light) (terminal.sexy)"
+  "Theme to apply to WezTerm terminal frames.
+Can be a theme name string, a function returning a theme name,
+or nil to disable WezTerm theme updates."
+  :group 'zr-face
+  :type '(choice (string :tag "Theme name")
+                 (function :tag "Theme generator")
+                 (const :tag "Disabled" nil)))
+
 (defvar zr-face-appearance-should-setup-p t
-  "Non-nil means `zr-face-appearance-setup' should initialize appearance.
+  "Non-nil means graphical appearance still needs initial setup.
+Set to nil after the first graphical frame is configured.")
 
-When non-nil, `zr-face-appearance-setup' configures the font and theme
-for the current environment.  It is set to nil after successful
-graphical display setup to avoid repeated initialization.")
+(defun zr-face-appearance-setup (&optional frame)
+  "Initialize font and theme configuration for FRAME.
+When FRAME is nil, defaults to `selected-frame'.
 
-(defvar zr-face-appearance-wezterm-setup-p nil
-  "Non-nil means the current terminal already received its WezTerm theme.")
+In a graphical display:
+- Configures global font and theme once via `zr-face-font-shuffle-set'
+  and `zr-face-theme-shuffle-set'.
 
-(defun zr-face-appearance-setup ()
-  "Initialize font and theme configuration.
-
-When running in a graphical display:
-1. Calls `zr-face-font-shuffle-set' to select and apply an appropriate font.
-2. Calls `zr-face-theme-shuffle-set' to select and apply an appropriate theme.
-
-When running in WezTerm without a graphical display, schedules a
-terminal theme update by sending a JSON command to WezTerm, provided
-`zr-wezterm-send-json' is available.
-
-This function only performs setup once while
-`zr-face-appearance-should-setup-p' is non-nil."
-  (when zr-face-appearance-should-setup-p
-    (if (display-graphic-p)
-        (progn
+In a WezTerm terminal without a graphical display:
+- Configures the WezTerm terminal theme via `zr-wezterm-send-json'
+  once per terminal connection."
+  (interactive)
+  (let ((frame (or frame (selected-frame))))
+    (if (display-graphic-p frame)
+        (when zr-face-appearance-should-setup-p
           (zr-face-font-shuffle-set)
           (zr-face-theme-shuffle-set)
           (setq zr-face-appearance-should-setup-p nil))
-      (when (and (not zr-face-appearance-wezterm-setup-p)
-                 (equal (getenv "TERM_PROGRAM") "WezTerm")
+      (when (and (equal (or (getenv "TERM_PROGRAM" frame)
+                            (getenv "TERM_PROGRAM"))
+                        "WezTerm")
+                 (not (terminal-parameter frame 'zr-face-wezterm-setup))
                  (fboundp 'zr-wezterm-send-json))
-        (zr-wezterm-send-json
-         '((type . "set_theme")
-           (theme . "Google (light) (terminal.sexy)")))
-        (setq zr-face-appearance-wezterm-setup-p t)))))
+        (with-selected-frame frame
+          (when-let* ((theme (if (functionp zr-face-wezterm-theme)
+                                 (funcall zr-face-wezterm-theme)
+                               zr-face-wezterm-theme)))
+            (zr-wezterm-send-json
+             `((type . "set_theme")
+               (theme . ,theme)))))
+        (set-terminal-parameter frame 'zr-face-wezterm-setup t)))))
 
 ;;;###autoload
-(defun zr-face-setup ()
-  "Look up fonts and themes, then apply one of each.
+(defun zr-face-setup (&optional frame)
+  "Look up fonts and themes, then apply one of each for FRAME.
 Run `zr-face-font-find-available-font', `zr-face-theme-list-update' and
-`zr-face-appearance-setup'.  Meant for `window-setup-hook' or
-`server-after-make-frame-hook'; Android has no server frame, so
-`window-setup-hook' is the hook to use there."
+`zr-face-appearance-setup'.  Meant for `window-setup-hook',
+`server-after-make-frame-hook' or `after-make-frame-functions'; Android
+has no server frame, so `window-setup-hook' is the hook to use there."
   (zr-face-font-find-available-font)
   (zr-face-theme-list-update)
-  (zr-face-appearance-setup)
+  (zr-face-appearance-setup frame)
   (when zr-face-buffer-alist
     (zr-face-buffer-setup-all)))
 

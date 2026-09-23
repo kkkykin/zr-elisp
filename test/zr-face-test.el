@@ -68,18 +68,22 @@
                                 :family))))))
 
 (ert-deftest zr-face-test-terminal-appearance-setup-runs-once ()
-  "A successful WezTerm update does not repeat on later hook calls."
-  (let ((zr-face-appearance-should-setup-p t)
-        (zr-face-appearance-wezterm-setup-p nil)
+  "A successful WezTerm update does not repeat on later hook calls for the same terminal."
+  (let ((zr-face-appearance-should-setup-p nil)
         (calls 0))
-    (cl-letf (((symbol-function 'display-graphic-p) (lambda () nil))
+    (set-terminal-parameter nil 'zr-face-wezterm-setup nil)
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) nil))
               ((symbol-function 'getenv)
-               (lambda (name) (and (equal name "TERM_PROGRAM") "WezTerm")))
+               (lambda (name &optional _) (and (equal name "TERM_PROGRAM") "WezTerm")))
               ((symbol-function 'zr-wezterm-send-json)
                (lambda (_) (setq calls (1+ calls)))))
       (zr-face-appearance-setup)
-      (zr-face-appearance-setup))
-    (should (= 1 calls))))
+      (zr-face-appearance-setup)
+      (should (= 1 calls))
+      ;; New terminal connection triggers setup
+      (set-terminal-parameter nil 'zr-face-wezterm-setup nil)
+      (zr-face-appearance-setup)
+      (should (= 2 calls)))))
 
 (ert-deftest zr-face-test-spec-attrs ()
   "Extracting attributes handles plists and display conditions."
