@@ -89,6 +89,24 @@ With FAIL-P, fail while sending the second chunk."
                                         chunks))))
     (should (equal "end" (plist-get (car (last messages)) :op)))))
 
+(ert-deftest zr-wezterm-test-send-json-non-ascii-unibyte ()
+  "Payloads containing non-ASCII text serialize correctly even when
+the underlying `json-serialize' returns a unibyte string (as in Emacs 30)."
+  (let ((orig-json-serialize (symbol-function 'json-serialize)))
+    (cl-letf (((symbol-function 'json-serialize)
+               (lambda (obj &rest args)
+                 ;; Emulate Emacs 30: return unibyte string with UTF-8 bytes
+                 (let ((res (apply orig-json-serialize obj args)))
+                   (if (and (consp obj) (assq 'op obj))
+                       ;; Outer chunk envelope
+                       res
+                     ;; Inner payload: force unibyte UTF-8
+                     (encode-coding-string res 'utf-8 t))))))
+      (should (zr-wezterm-test--send
+               '((type . "mpv")
+                 (stdin . "/path/to/菲比珂莱塔 - V.mp4"))
+               64)))))
+
 (ert-deftest zr-wezterm-test-send-json-aborts ()
   "A failure halfway through aborts the transfer and is signalled."
   (should-error (zr-wezterm-test--send '((type . "ping")) 4 t))

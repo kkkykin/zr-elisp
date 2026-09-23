@@ -72,7 +72,10 @@ it is serialized into a chunk message."
 Return non-nil once the last message has been sent."
   (unless (fboundp 'org-id-new)
     (require 'org-id))
-  (let* ((payload (json-serialize object))
+  (let* ((raw-payload (json-serialize object))
+         (payload (if (multibyte-string-p raw-payload)
+                      raw-payload
+                    (decode-coding-string raw-payload 'utf-8)))
          (chunks (zr-wezterm--chunks payload))
          (id (org-id-new))
          (total (length chunks))
