@@ -218,11 +218,16 @@
 
 (ert-deftest zr-proxy-test-http-proxy-mode-and-transform-bypass ()
   "Test that HTTP proxy mode configures url-proxy-services and bypasses transform rules."
-  (let ((url-proxy-services nil)
+  (let ((process-environment (copy-sequence process-environment))
+        (url-proxy-services nil)
         (url-proxy-locator #'url-default-find-proxy-for-url)
         (zr-proxy-http-proxy "127.0.0.1:7890")
         (zr-proxy-transform-alist '(("https://github.com" . "https://xget.xi-xu.me/gh")))
         (zr-proxy-http-proxy-mode nil))
+    ;; Ensure clean initial environment
+    (dolist (v '("http_proxy" "https_proxy" "all_proxy" "no_proxy"
+                 "HTTP_PROXY" "HTTPS_PROXY" "ALL_PROXY" "NO_PROXY"))
+      (setenv v nil))
 
     ;; Before enabling: transform rule is active
     (should (equal "https://xget.xi-xu.me/gh/user/repo"
@@ -234,6 +239,10 @@
     (should (zr-proxy-http-proxy-active-p))
     (should (equal "127.0.0.1:7890" (alist-get "http" url-proxy-services nil nil #'equal)))
     (should (equal "127.0.0.1:7890" (alist-get "https" url-proxy-services nil nil #'equal)))
+    ;; Environment variables set for external processes
+    (should (equal "http://127.0.0.1:7890" (getenv "http_proxy")))
+    (should (equal "http://127.0.0.1:7890" (getenv "https_proxy")))
+    (should (equal "http://127.0.0.1:7890" (getenv "all_proxy")))
 
     ;; CRUCIAL: In HTTP proxy mode, transform rules must NOT take effect!
     (should (equal "https://github.com/user/repo"
@@ -243,6 +252,10 @@
     (zr-proxy-http-proxy-disable)
     (should-not (zr-proxy-http-proxy-active-p))
     (should (null url-proxy-services))
+    ;; Environment variables restored
+    (should (null (getenv "http_proxy")))
+    (should (null (getenv "https_proxy")))
+    (should (null (getenv "all_proxy")))
 
     ;; Transform rules active again
     (should (equal "https://xget.xi-xu.me/gh/user/repo"
@@ -250,26 +263,23 @@
 
 (ert-deftest zr-proxy-test-http-proxy-environment-detection ()
   "Test resolution of proxy settings from environment variables."
-  (let ((url-proxy-services nil)
+  (let ((process-environment (copy-sequence process-environment))
+        (url-proxy-services nil)
         (zr-proxy-http-proxy nil)
         (zr-proxy-https-proxy nil)
         (zr-proxy-no-proxy nil)
         (zr-proxy-http-proxy-mode nil))
-    (cl-letf (((symbol-function 'getenv)
-               (lambda (var)
-                 (pcase var
-                   ("all_proxy" "socks5://127.0.0.1:1080")
-                   ("http_proxy" "http://10.0.0.1:3128")
-                   ("https_proxy" "http://10.0.0.1:3129")
-                   ("no_proxy" "localhost,127.0.0.1")
-                   (_ nil)))))
-      (zr-proxy-http-proxy-enable)
-      (unwind-protect
-          (progn
-            (should (equal "10.0.0.1:3128" (alist-get "http" url-proxy-services nil nil #'equal)))
-            (should (equal "10.0.0.1:3129" (alist-get "https" url-proxy-services nil nil #'equal)))
-            (should (equal "localhost,127.0.0.1" (alist-get "no_proxy" url-proxy-services nil nil #'equal))))
-        (zr-proxy-http-proxy-disable)))))
+    (setenv "all_proxy" "socks5://127.0.0.1:1080")
+    (setenv "http_proxy" "http://10.0.0.1:3128")
+    (setenv "https_proxy" "http://10.0.0.1:3129")
+    (setenv "no_proxy" "localhost,127.0.0.1")
+    (zr-proxy-http-proxy-enable)
+    (unwind-protect
+        (progn
+          (should (equal "10.0.0.1:3128" (alist-get "http" url-proxy-services nil nil #'equal)))
+          (should (equal "10.0.0.1:3129" (alist-get "https" url-proxy-services nil nil #'equal)))
+          (should (equal "localhost,127.0.0.1" (alist-get "no_proxy" url-proxy-services nil nil #'equal))))
+      (zr-proxy-http-proxy-disable))))
 
 (ert-deftest zr-proxy-test-http-proxy-mode-toggle ()
   "Test `zr-proxy-http-proxy-mode' toggling and transform bypass."

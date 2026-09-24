@@ -94,6 +94,9 @@ When nil, falls back to `url-proxy-services' or env (no_proxy, NO_PROXY)."
 (defvar zr-proxy--saved-proxy-locator 'unset
   "Saved `url-proxy-locator' prior to enabling HTTP proxy mode.")
 
+(defvar zr-proxy--saved-env-vars 'unset
+  "Saved environment variables prior to enabling HTTP proxy mode.")
+
 ;;; Xget Platform Catalog
 
 (defconst zr-proxy-xget-platforms
@@ -393,23 +396,45 @@ When active, `zr-proxy-transform-url' returns URLs unchanged."
                        (getenv "NO_PROXY"))))
     (unless (or http https)
       (user-error "No HTTP proxy specified or detected in environment"))
-    ;; Save current proxy configuration before modifying
+    ;; Save current proxy configuration and environment before modifying
     (unless (bound-and-true-p zr-proxy-http-proxy-mode)
       (setq zr-proxy--saved-proxy-services (copy-alist url-proxy-services)
-            zr-proxy--saved-proxy-locator url-proxy-locator))
+            zr-proxy--saved-proxy-locator url-proxy-locator
+            zr-proxy--saved-env-vars
+            (mapcar (lambda (v) (cons v (getenv v)))
+                    '("http_proxy" "https_proxy" "all_proxy" "no_proxy"
+                      "HTTP_PROXY" "HTTPS_PROXY" "ALL_PROXY" "NO_PROXY"))))
     (when http
-      (setf (alist-get "http" url-proxy-services nil nil #'equal) http))
+      (setf (alist-get "http" url-proxy-services nil nil #'equal) http)
+      (let ((url (if (string-match-p "\\`[a-zA-Z0-9]+://" http)
+                     http
+                   (concat "http://" http))))
+        (setenv "http_proxy" url)
+        (setenv "HTTP_PROXY" url)))
     (when https
-      (setf (alist-get "https" url-proxy-services nil nil #'equal) https))
+      (setf (alist-get "https" url-proxy-services nil nil #'equal) https)
+      (let ((url (if (string-match-p "\\`[a-zA-Z0-9]+://" https)
+                     https
+                   (concat "http://" https))))
+        (setenv "https_proxy" url)
+        (setenv "HTTPS_PROXY" url)))
+    (when (and http (equal http https))
+      (let ((url (if (string-match-p "\\`[a-zA-Z0-9]+://" http)
+                     http
+                   (concat "http://" http))))
+        (setenv "all_proxy" url)
+        (setenv "ALL_PROXY" url)))
     (when no-proxy
-      (setf (alist-get "no_proxy" url-proxy-services nil nil #'equal) no-proxy))
+      (setf (alist-get "no_proxy" url-proxy-services nil nil #'equal) no-proxy)
+      (setenv "no_proxy" no-proxy)
+      (setenv "NO_PROXY" no-proxy))
     (setq url-proxy-locator #'url-default-find-proxy-for-url
           zr-proxy-http-proxy-mode t)
     (message "zr-proxy: HTTP proxy enabled (HTTP: %s, HTTPS: %s); transform rules bypassed"
              (or http "none") (or https "none"))))
 
 (defun zr-proxy-http-proxy-disable ()
-  "Disable HTTP proxy mode and restore previous proxy settings.
+  "Disable HTTP proxy mode and restore previous proxy settings and environment.
 Transform rules will resume taking effect."
   (interactive)
   (unless (eq zr-proxy--saved-proxy-services 'unset)
@@ -418,6 +443,10 @@ Transform rules will resume taking effect."
   (unless (eq zr-proxy--saved-proxy-locator 'unset)
     (setq url-proxy-locator zr-proxy--saved-proxy-locator
           zr-proxy--saved-proxy-locator 'unset))
+  (unless (eq zr-proxy--saved-env-vars 'unset)
+    (dolist (pair zr-proxy--saved-env-vars)
+      (setenv (car pair) (cdr pair)))
+    (setq zr-proxy--saved-env-vars 'unset))
   (setq zr-proxy-http-proxy-mode nil)
   (message "zr-proxy: HTTP proxy mode disabled; transform rules active"))
 
