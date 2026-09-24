@@ -58,6 +58,11 @@ If nil, the IPC server option is omitted when launching mpv."
   :type '(choice (const :tag "Disabled" nil) string)
   :group 'zr-mpv)
 
+(defcustom zr-mpv-windows-ipc-program "powershell.exe"
+  "PowerShell executable used to connect to mpv's Windows named pipe."
+  :type 'string
+  :group 'zr-mpv)
+
 (defcustom zr-mpv-backend 'auto
   "Playback backend to use.
 When `auto', detects between `android', `wezterm', `http', and `local'.
@@ -216,10 +221,10 @@ FILES can be a list of paths/URLs, a buffer, or a newline-delimited string."
                   raw-list))))
 
 (defun zr-mpv-format-playlist (files)
-  "Format FILES into an M3U playlist string."
-  (let ((items (zr-mpv-normalize-files files)))
-    (concat "#EXTM3U\n"
-            (if items (concat (string-join items "\n") "\n") ""))))
+  "Format a list of normalized FILES into an M3U playlist string.
+Call `zr-mpv-normalize-files' before this function to transform raw input."
+  (concat "#EXTM3U\n"
+          (if files (concat (string-join files "\n") "\n") "")))
 
 (defun zr-mpv--split-args (args)
   "Normalize ARGS into a list of strings."
@@ -318,7 +323,7 @@ Encodes payload with `args' and `stdin' and sends via `zr-wezterm-send-json'."
         (setq headers (append headers zr-mpv-http-extra-headers)))
       (let ((url-request-method "POST")
             (url-request-extra-headers headers)
-            (url-request-data payload))
+            (url-request-data (encode-coding-string payload 'utf-8 t)))
         (url-retrieve
          zr-mpv-http-url
          (lambda (status)
@@ -331,7 +336,8 @@ Encodes payload with `args' and `stdin' and sends via `zr-wezterm-send-json'."
   "Start a temporary HTTP server providing an M3U8 playlist of FILES.
 The server automatically terminates after TIMEOUT seconds (default
 `zr-mpv-android-server-timeout').  Returns the server process."
-  (let* ((items (zr-mpv-normalize-files files))
+  (let* ((items (or (zr-mpv-normalize-files files)
+                    (user-error "No files to play")))
          (body (zr-mpv-format-playlist items))
          (encoded-body (encode-coding-string body 'utf-8 t))
          (body-bytes (string-bytes encoded-body))
@@ -367,19 +373,16 @@ The server automatically terminates after TIMEOUT seconds (default
 
 (defun zr-mpv-play-android (files &optional _args)
   "Play FILES on Android via mpv-android and `zr-mpv-android-am-program'."
-  (let ((items (zr-mpv-normalize-files files)))
-    (unless items
-      (user-error "No files to play"))
-    (let* ((server (zr-mpv-serve-playlist items))
-           (port (process-contact server :service))
-           (url (format "http://127.0.0.1:%d" port)))
-      (apply #'call-process
-             zr-mpv-android-am-program nil 0 nil
-             "start" "-a" "android.intent.action.VIEW"
-             "-t" "video/any"
-             "-p" zr-mpv-android-package
-             "-d" url
-             nil))))
+  (let* ((server (zr-mpv-serve-playlist files))
+         (port (process-contact server :service))
+         (url (format "http://127.0.0.1:%d" port)))
+    (apply #'call-process
+           zr-mpv-android-am-program nil 0 nil
+           "start" "-a" "android.intent.action.VIEW"
+           "-t" "video/any"
+           "-p" zr-mpv-android-package
+           "-d" url
+           nil)))
 
 ;;; Backend Selection & Dispatcher
 
@@ -392,7 +395,9 @@ Returns one of `local', `wezterm', `http', or `android'."
              (not (getenv "DISPLAY"))
              (not (getenv "WAYLAND_DISPLAY"))))
     'android)
-   ((string= (getenv "TERM_PROGRAM") "WezTerm")
+   ((string= (or (getenv "TERM_PROGRAM" (selected-frame))
+                 (getenv "TERM_PROGRAM"))
+             "WezTerm")
     'wezterm)
    ((or (getenv "SSH_CONNECTION" (selected-frame))
         (getenv "SSH_CLIENT" (selected-frame))
@@ -424,6 +429,37 @@ BACKEND defaults to `zr-mpv-backend' (or auto-detected)."
 
 ;;; IPC Control
 
+(defun zr-mpv--ipc-send-windows (payload server)
+  "Send UTF-8 JSON PAYLOAD to the Windows named pipe SERVER.
+Use PowerShell's .NET pipe client; Emacs pipe processes are anonymous.
+Pass the pipe name and payload as JSON on stdin, never as script code."
+  (let ((prefix "\\\\.\\pipe\\"))
+    (unless (string-prefix-p prefix server t)
+      (error "Expected a Windows named pipe path: %s" server))
+    (with-temp-buffer
+      (insert (json-serialize `((pipe . ,(substring server (length prefix)))
+				(payload . ,payload))))
+      (let* ((coding-system-for-read 'utf-8-unix)
+             (coding-system-for-write 'utf-8-unix)
+             (status
+              (call-process-region
+               (point-min) (point-max) zr-mpv-windows-ipc-program t t nil
+               "-NoProfile" "-NonInteractive" "-Command"
+               (concat
+                "$ErrorActionPreference = 'Stop'; "
+                "[Console]::InputEncoding = [Text.UTF8Encoding]::new($false); "
+                "$request = ConvertFrom-Json ([Console]::In.ReadToEnd()); "
+                "$pipe = [IO.Pipes.NamedPipeClientStream]::new("
+                "'.', [string]$request.pipe, [IO.Pipes.PipeDirection]::Out); "
+                "try { $pipe.Connect(1000); "
+                "$bytes = [Text.Encoding]::UTF8.GetBytes([string]$request.payload); "
+                "$pipe.Write($bytes, 0, $bytes.Length); $pipe.Flush() } "
+                "finally { $pipe.Dispose() }"))))
+        (unless (eq status 0)
+          (error "Windows IPC helper failed (%s): %s"
+                 status (string-trim (buffer-string))))
+        t))))
+
 (defun zr-mpv-ipc-send (command &optional ipc-server)
   "Send JSON-IPC COMMAND to mpv IPC socket/pipe.
 COMMAND is a list of strings/values, e.g. (\'(\"cycle\" \"pause\")).
@@ -431,25 +467,23 @@ Returns non-nil on success."
   (let ((server (or ipc-server zr-mpv-ipc-server)))
     (unless server
       (user-error "`zr-mpv-ipc-server' is not configured"))
-    (let* ((payload (concat (json-serialize `((command . ,(vconcat command)))) "\n"))
-           (proc
-            (condition-case err
-                (if (eq system-type 'windows-nt)
-                    (make-pipe-process
-                     :name "zr-mpv-ipc"
-                     :pipe server)
-                  (make-network-process
-                   :name "zr-mpv-ipc"
-                   :family 'local
-                   :service (expand-file-name server)))
-              (error
-               (message "Cannot connect to mpv IPC server %s: %s"
-                        server (error-message-string err))
-               nil))))
-      (when proc
-        (process-send-string proc payload)
-        (delete-process proc)
-        t))))
+    (let ((payload (concat (json-serialize `((command . ,(vconcat command)))) "\n")))
+      (condition-case err
+          (if (eq system-type 'windows-nt)
+              (zr-mpv--ipc-send-windows payload server)
+            (let ((proc (make-network-process
+                         :name "zr-mpv-ipc"
+                         :family 'local
+                         :coding 'utf-8-unix
+                         :noquery t
+                         :service (expand-file-name server))))
+              (unwind-protect
+                  (progn (process-send-string proc payload) t)
+                (delete-process proc))))
+        (error
+         (message "Cannot send to mpv IPC server %s: %s"
+                  server (error-message-string err))
+         nil)))))
 
 ;;;###autoload
 (defun zr-mpv-toggle-pause ()

@@ -40,13 +40,18 @@
                       (base64-decode-string encoded) 'utf-8 t))))))
 
 (ert-deftest zr-wezterm-test-chunks-count-utf8-bytes ()
-  "Chunk limits apply to UTF-8 bytes without splitting characters."
-  (let ((zr-wezterm-chunk-size 4)
-        (json "a中文😀b"))
-    (let ((chunks (zr-wezterm--chunks json)))
-      (should (equal json (string-join chunks "")))
-      (dolist (chunk chunks)
-        (should (<= (length (encode-coding-string chunk 'utf-8 t)) 4))))))
+  "Encoded chunks respect their byte limit and preserve Unicode text."
+  (let* ((zr-wezterm-chunk-size 128)
+         (json (apply #'concat (make-list 40 "a中文😀\\\"b")))
+         (chunks (zr-wezterm--chunks json "test-id")))
+    (should (> (length chunks) 1))
+    (should (equal json
+                   (mapconcat (lambda (chunk)
+                                (plist-get (json-parse-string chunk :object-type 'plist)
+                                           :data))
+                              chunks "")))
+    (dolist (chunk chunks)
+      (should (<= (length (zr-wezterm--encode-osc chunk)) zr-wezterm-chunk-size)))))
 
 (defun zr-wezterm-test--send (object chunk-size &optional fail-p)
   "Send OBJECT in chunks of CHUNK-SIZE, returning non-nil on success.
@@ -75,15 +80,17 @@ With FAIL-P, fail while sending the second chunk."
 
 (ert-deftest zr-wezterm-test-send-json-chunks ()
   "A payload longer than the chunk size is sent as chunks."
-  (should (zr-wezterm-test--send '((type . "ping")) 4))
+  (should (zr-wezterm-test--send `((text . ,(make-string 256 ?x))) 128))
   (let* ((messages zr-wezterm-test--messages)
          (chunks (seq-filter
                   (lambda (message) (equal "chunk" (plist-get message :op)))
                   messages)))
     (should (equal "begin" (plist-get (car messages) :op)))
-    (should (equal 4 (plist-get (car messages) :total)))
+    (should (> (length chunks) 1))
+    (should (equal (length chunks) (plist-get (car messages) :total)))
     (should (equal "test-id" (plist-get (car messages) :id)))
-    (should (equal '(0 1 2 3) (mapcar (lambda (c) (plist-get c :seq)) chunks)))
+    (should (equal (number-sequence 0 (1- (length chunks)))
+                   (mapcar (lambda (c) (plist-get c :seq)) chunks)))
     (should (equal zr-wezterm-test--payload
                    (string-join (mapcar (lambda (c) (plist-get c :data))
                                         chunks))))
@@ -105,14 +112,57 @@ the underlying `json-serialize' returns a unibyte string (as in Emacs 30)."
       (should (zr-wezterm-test--send
                '((type . "mpv")
                  (stdin . "/path/to/菲比珂莱塔 - V.mp4"))
-               64)))))
+               128)))))
 
 (ert-deftest zr-wezterm-test-send-json-aborts ()
   "A failure halfway through aborts the transfer and is signalled."
-  (should-error (zr-wezterm-test--send '((type . "ping")) 4 t))
+  (should-error (zr-wezterm-test--send `((text . ,(make-string 256 ?x))) 128 t))
   (let ((last (car (last zr-wezterm-test--messages))))
     (should (equal "abort" (plist-get last :op)))
     (should (equal "test-id" (plist-get last :id)))))
+
+(ert-deftest zr-wezterm-test-wire-size-and-round-trip ()
+  "Every actual OSC fits the limit and reassembles to the original object."
+  (dolist (limit '(160 32768))
+    (let* ((zr-wezterm-chunk-size limit)
+           (object `((text . ,(apply #'concat
+                                    (make-list (if (= limit 160) 100 10000)
+                                               "中文😀\"\\\n")))))
+           messages)
+      (cl-letf (((symbol-function 'org-id-new)
+                 (lambda () "12345678-1234-1234-1234-123456789012"))
+                ((symbol-function 'send-string-to-terminal)
+                 (lambda (sequence)
+                   (should (<= (string-bytes sequence) limit))
+                   (push (json-parse-string
+                          (decode-coding-string
+                           (base64-decode-string
+                            (substring sequence (length "\e]1337;SetUserVar=ZRTransport=") -1))
+                           'utf-8)
+                          :object-type 'plist)
+                         messages))))
+        (should (zr-wezterm-send-json object)))
+      (setq messages (nreverse messages))
+      (let ((chunks (seq-filter (lambda (msg) (equal (plist-get msg :op) "chunk"))
+                                messages)))
+        (should (> (length chunks) 1))
+        (should (= (length chunks) (plist-get (car messages) :total)))
+        (should (equal (number-sequence 0 (1- (length chunks)))
+                       (mapcar (lambda (msg) (plist-get msg :seq)) chunks)))
+        (should (equal object
+                       (json-parse-string
+                        (mapconcat (lambda (msg) (plist-get msg :data)) chunks "")
+                        :object-type 'alist)))))))
+
+(ert-deftest zr-wezterm-test-too-small-limit-sends-nothing ()
+  "An impossible limit fails instead of sending an oversized character."
+  (let ((zr-wezterm-chunk-size 4)
+        sent)
+    (cl-letf (((symbol-function 'org-id-new) (lambda () "test-id"))
+              ((symbol-function 'send-string-to-terminal)
+               (lambda (_) (setq sent t))))
+      (should-error (zr-wezterm-send-json '((text . "中"))))
+      (should-not sent))))
 
 (provide 'zr-wezterm-test)
 ;;; zr-wezterm-test.el ends here

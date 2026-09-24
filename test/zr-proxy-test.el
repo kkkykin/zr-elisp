@@ -61,6 +61,21 @@
     (should (equal "https://git.example.com/123#v=1"
                    (zr-proxy-transform-url "https://git.example.com/123")))))
 
+(ert-deftest zr-proxy-test-non-regexp-string-replacement ()
+  "Non-regexp rules replace the whole URL without stale match data."
+  (save-match-data
+    (set-match-data '(2 4))
+    (let ((zr-proxy-transform-alist
+           '((t . "https://cache/\\&"))))
+      (should (equal "https://cache/HTTP://EXAMPLE.COM"
+                     (zr-proxy-transform-url "HTTP://EXAMPLE.COM")))
+      (should (equal '(2 4) (match-data))))
+    (let ((zr-proxy-transform-alist
+           `((,(lambda (_url) (string-match "a" "abc"))
+              . "https://cache/\\&"))))
+      (should (equal "https://cache/https://example.com"
+                     (zr-proxy-transform-url "https://example.com"))))))
+
 (ert-deftest zr-proxy-test-transform-cascading-order ()
   "Test that transformation rules cascade sequentially."
   (let ((zr-proxy-transform-alist
@@ -278,12 +293,17 @@
         (progn
           (should (equal "10.0.0.1:3128" (alist-get "http" url-proxy-services nil nil #'equal)))
           (should (equal "10.0.0.1:3129" (alist-get "https" url-proxy-services nil nil #'equal)))
-          (should (equal "localhost,127.0.0.1" (alist-get "no_proxy" url-proxy-services nil nil #'equal))))
+          (dolist (host '("localhost" "127.0.0.1"))
+            (should (equal "DIRECT"
+                           (url-default-find-proxy-for-url
+                            (url-generic-parse-url (concat "http://" host)) host))))
+          (should (equal "localhost,127.0.0.1" (getenv "no_proxy"))))
       (zr-proxy-http-proxy-disable))))
 
 (ert-deftest zr-proxy-test-http-proxy-mode-toggle ()
   "Test `zr-proxy-http-proxy-mode' toggling and transform bypass."
-  (let ((url-proxy-services nil)
+  (let ((process-environment (copy-sequence process-environment))
+        (url-proxy-services nil)
         (zr-proxy-http-proxy "127.0.0.1:8080")
         (zr-proxy-transform-alist '((".*" . "http://transformed.org")))
         (zr-proxy-http-proxy-mode nil))
@@ -305,6 +325,79 @@
                          (zr-proxy-transform-url "http://original.org"))))
       (when zr-proxy-http-proxy-mode
         (zr-proxy-http-proxy-mode -1)))))
+
+(defmacro zr-proxy-test--with-proxy-state (&rest body)
+  "Run BODY without changing global proxy configuration or environment."
+  (declare (indent 0) (debug t))
+  `(let ((process-environment nil)
+         (url-proxy-services nil)
+         (url-proxy-locator #'ignore)
+         (zr-proxy-http-proxy nil)
+         (zr-proxy-https-proxy nil)
+         (zr-proxy-no-proxy nil)
+         (zr-proxy-http-proxy-mode nil)
+         (zr-proxy--saved-proxy-services 'unset)
+         (zr-proxy--saved-proxy-locator 'unset)
+         (zr-proxy--saved-env-vars 'unset))
+     ,@body))
+
+(ert-deftest zr-proxy-test-mode-restores-original-state ()
+  "Mode entry, repeated enables and disable preserve the initial state."
+  (zr-proxy-test--with-proxy-state
+    (setq url-proxy-services '(("http" . "old:80") ("no_proxy" . "\\`old\\'"))
+          process-environment '("http_proxy=http://old:80" "NO_PROXY=old")
+          zr-proxy-http-proxy "new:8080")
+    (let ((services (copy-tree url-proxy-services))
+          (env (copy-sequence process-environment)))
+      (zr-proxy-http-proxy-mode 1)
+      (zr-proxy-http-proxy-mode 1)
+      (zr-proxy-http-proxy-enable "another:8081")
+      (zr-proxy-http-proxy-mode -1)
+      (should-not zr-proxy-http-proxy-mode)
+      (should (equal services url-proxy-services))
+      (should (eq #'ignore url-proxy-locator))
+      (should (equal (sort env #'string<)
+                     (sort (copy-sequence process-environment) #'string<)))
+      (should (eq 'unset zr-proxy--saved-proxy-services)))))
+
+(ert-deftest zr-proxy-test-mode-enable-error-rolls-back ()
+  "Missing configuration must not leave transformation bypass enabled."
+  (zr-proxy-test--with-proxy-state
+    (should-error (zr-proxy-http-proxy-mode 1) :type 'user-error)
+    (should-not zr-proxy-http-proxy-mode)
+    (should-not url-proxy-services)
+    (should-not process-environment)
+    (should (eq #'ignore url-proxy-locator))))
+
+(ert-deftest zr-proxy-test-no-proxy-host-list-and-regexp ()
+  "Environment lists match host boundaries and remain lists for subprocesses."
+  (zr-proxy-test--with-proxy-state
+    (setenv "NO_PROXY" " localhost, 127.0.0.1, .example.com ")
+    (zr-proxy-http-proxy-enable "proxy:8080")
+    (dolist (host '("localhost" "127.0.0.1" "example.com" "sub.example.com"))
+      (should (equal "DIRECT"
+                     (url-default-find-proxy-for-url
+                      (url-generic-parse-url (concat "https://" host)) host))))
+    (dolist (host '("notlocalhost" "notexample.com" "example.com.evil" "exampleXcom"))
+      (should (equal "PROXY proxy:8080"
+                     (url-default-find-proxy-for-url
+                      (url-generic-parse-url (concat "https://" host)) host))))
+    (should (equal " localhost, 127.0.0.1, .example.com " (getenv "no_proxy")))
+    (zr-proxy-http-proxy-disable)
+    (setq zr-proxy-no-proxy "\\`internal[0-9]+\\'")
+    (zr-proxy-http-proxy-enable "proxy:8080")
+    (should (equal zr-proxy-no-proxy
+                   (alist-get "no_proxy" url-proxy-services nil nil #'equal)))
+    (should (equal " localhost, 127.0.0.1, .example.com " (getenv "no_proxy")))))
+
+(ert-deftest zr-proxy-test-no-proxy-wildcard ()
+  "The conventional wildcard bypasses every host."
+  (zr-proxy-test--with-proxy-state
+    (setenv "no_proxy" "*")
+    (zr-proxy-http-proxy-enable "proxy:8080")
+    (should (equal "DIRECT"
+                   (url-default-find-proxy-for-url
+                    (url-generic-parse-url "https://example.com") "example.com")))))
 
 (provide 'zr-proxy-test)
 ;;; zr-proxy-test.el ends here

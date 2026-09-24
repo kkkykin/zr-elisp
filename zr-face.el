@@ -49,12 +49,10 @@
 (declare-function set-fontset-font "fontset.c"
                   (name target font-spec &optional frame add))
 (declare-function w32-read-registry "w32fns.c" (root key name))
-(declare-function xterm--query "xterm")
 (autoload 'zr-wezterm-send-json "zr-wezterm")
 
 (defvar custom-enabled-themes)
 (defvar custom-known-themes)
-(defvar xterm-extra-capabilities nil)
 (defvar zr-face-buffer-alist)
 
 (defgroup zr-face nil
@@ -84,14 +82,14 @@ Stolen from https://github.com/seagle0128/.emacs.d/blob/c9bd6f1bb72486580f55879c
   "List of font configurations for different display resolutions.
 Each entry is a list containing:
 - Font family name as a string
-- List of pixel sizes (large, medium, small) for different resolutions
+- List of pixel sizes for display widths below, equal to, and above 1920
 - URL where the font can be downloaded"
   :group 'zr-face
   :type '(repeat (list (string :tag "Family name")
-                       (list :tag "Sizes for large, medium and small displays"
-                             (integer :tag "Large")
-                             (integer :tag "Medium")
-                             (integer :tag "Small"))
+                       (list :tag "Sizes by display width"
+                             (integer :tag "Below 1920 pixels")
+                             (integer :tag "1920 pixels")
+                             (integer :tag "Above 1920 pixels"))
                        (string :tag "Download URL"))))
 
 (defvar zr-face-font-available-alist nil
@@ -103,9 +101,9 @@ and `emoji', whose values are lists of family names.")
 (defun zr-face-font-find-available-font ()
   "Find available font specifications based on screen resolution.
 Automatically selects appropriate pixel size based on display width:
-- Index 0 (large) for displays > 1920 pixels
-- Index 1 (medium) for displays = 1920 pixels
-- Index 2 (small) for displays < 1920 pixels
+- Index 0 for displays < 1920 pixels
+- Index 1 for displays = 1920 pixels
+- Index 2 for displays > 1920 pixels
 
 Sets `zr-face-font-available-alist' and removes itself from the hooks it was
 run from, so that the fonts are only looked up once."
@@ -134,27 +132,30 @@ run from, so that the fonts are only looked up once."
                                       (emoji . ,emoji)))))
   (remove-hook 'server-after-make-frame-hook #'zr-face-font-find-available-font))
 
-(defun zr-face-font-shuffle-set ()
-  "Randomly selects and applies a font from `zr-face-font-available-alist'."
+(defun zr-face-font-shuffle-set (&optional frame)
+  "Randomly apply a font from `zr-face-font-available-alist'.
+With FRAME non-nil, apply it to that frame only.  This also allows use on
+`after-make-frame-functions'.  Otherwise, change the global default font."
   (interactive)
-  (when-let* ((fonts (alist-get 'default zr-face-font-available-alist)))
-    (let* ((fonts (if (> 2 (length fonts)) fonts
-                    (cl-remove (face-attribute 'default :family)
-                               fonts :key #'car :test #'string=)))
-           (font (seq-random-elt fonts))
-           (symbol (alist-get 'symbol zr-face-font-available-alist))
-           (emoji (alist-get 'emoji zr-face-font-available-alist)))
-      (set-face-attribute 'default nil
-                          :font (font-spec :family (car font)
-                                           :size (cdr font)))
-      (when symbol
-        (set-fontset-font t 'symbol
-                          (font-spec
-                           :family (seq-random-elt symbol))))
-      (when emoji
-        (set-fontset-font t 'emoji
-                          (font-spec
-                           :family (seq-random-elt emoji)))))))
+  (with-selected-frame (or frame (selected-frame))
+    (when-let* ((fonts (alist-get 'default zr-face-font-available-alist)))
+      (let* ((fonts (if (> 2 (length fonts)) fonts
+                      (cl-remove (face-attribute 'default :family)
+				 fonts :key #'car :test #'string=)))
+             (font (seq-random-elt fonts))
+             (symbol (alist-get 'symbol zr-face-font-available-alist))
+             (emoji (alist-get 'emoji zr-face-font-available-alist)))
+	(set-face-attribute 'default frame
+                            :font (font-spec :family (car font)
+                                             :size (cdr font)))
+	(when symbol
+          (set-fontset-font t 'symbol
+                            (font-spec
+                             :family (seq-random-elt symbol)) frame))
+	(when emoji
+          (set-fontset-font t 'emoji
+                            (font-spec
+                             :family (seq-random-elt emoji)) frame))))))
 
 
 ;;; Themes
@@ -245,7 +246,8 @@ Each entry is an alist mapping theme symbols to face specifications.")
   "Enable THEMES exclusively, disabling all other active themes.
 When called interactively, prompts for a single theme to enable.
 
-THEMES can be a single theme symbol or a list of theme symbols.
+THEMES can be a single theme symbol or a list of theme symbols, highest
+priority first, as in `custom-enabled-themes'.
 With optional TMP non-nil, don't update `zr-face-theme-last-list'.
 
 Loads any unloaded themes and applies custom face specifications
@@ -258,7 +260,7 @@ from `zr-face-theme-customize'."
       (disable-theme item))
     (dolist (theme unloaded)
       (load-theme theme t t))
-    (dolist (theme themes-to-enable)
+    (dolist (theme (reverse themes-to-enable))
       (apply #'custom-theme-set-faces theme
              (alist-get theme zr-face-theme-customize))
       (enable-theme theme))
@@ -295,7 +297,7 @@ was run from."
 When THEME is provided, temporarily enables it to check its properties.
 Restores the previous theme state after checking."
   (if theme
-      (let ((enabled custom-enabled-themes)
+      (let ((enabled (copy-sequence custom-enabled-themes))
             result)
         (unwind-protect
             (progn
@@ -307,18 +309,16 @@ Restores the previous theme state after checking."
 
 (defun zr-face-system-dark-mode-enabled-p ()
   "Check if system-wide dark mode is enabled.
-Returns non-nil if dark mode is active:
+On terminals, use the background mode already detected by Emacs.
+On graphical displays, return non-nil if dark mode is active:
 - Windows: Checks registry key for dark app theme
 - Linux: Checks DBus interface for dark color scheme
 - Other systems: Returns nil
 
 ref: https://github.com/LionyxML/auto-dark-emacs/blob/master/auto-dark.el"
   (if (eq t (framep (selected-frame)))
-      ;; stolen from xterm--init
-      (when (and (memq 'reportBackground xterm-extra-capabilities)
-                 (fboundp 'xterm--query))
-        (xterm--query "\e]11;?\e\\"
-                      '(("\e]11;" .  xterm--report-background-handler))))
+      (eq 'dark (or (terminal-parameter nil 'background-mode)
+                    (frame-parameter nil 'background-mode)))
     (pcase system-type
       ('windows-nt
        (eq 0 (w32-read-registry

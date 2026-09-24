@@ -47,6 +47,8 @@ PATTERN matches against the URL string and can be:
 REPLACEMENT specifies how to produce the transformed URL and can be:
   - a replacement string (supports \\&, \\1, etc. as in `replace-match')
   - a function called with (URL [MATCH-DATA]) returning the transformed string.
+For `t' and predicate patterns, the match is the entire URL; regexp
+patterns additionally provide captured subexpressions.
 
 Rules are applied sequentially in order.  When HTTP proxy mode is active
 \(see `zr-proxy-http-proxy-active-p'), transformations are bypassed."
@@ -79,8 +81,11 @@ When nil, falls back to `zr-proxy-http-proxy' or environment variables
   :group 'zr-proxy)
 
 (defcustom zr-proxy-no-proxy nil
-  "Hosts or domain regex that bypass the proxy.
-When nil, falls back to `url-proxy-services' or env (no_proxy, NO_PROXY)."
+  "Host regexp that bypasses the proxy for Emacs URL requests.
+When nil, use the regexp in `url-proxy-services', or convert the comma-
+separated host/domain list in no_proxy or NO_PROXY to a regexp.
+Subprocesses use the no_proxy/NO_PROXY host list from the environment;
+this Emacs regexp is never exported as an environment variable."
   :type '(choice (const :tag "From Environment or url-proxy-services" nil)
                  (string :tag "No-proxy Pattern"))
   :group 'zr-proxy)
@@ -250,25 +255,28 @@ For each rule (PATTERN . REPLACEMENT):
   (if (or (not (stringp url))
           (zr-proxy-http-proxy-active-p))
       url
-    (let ((result url))
-      (dolist (transform zr-proxy-transform-alist result)
-        (let ((pattern (car transform))
-              (repl (cdr transform)))
-          (when (cond
-                 ((eq pattern t) t)
-                 ((stringp pattern) (string-match pattern result))
-                 ((functionp pattern) (funcall pattern result))
-                 (t nil))
-            (setq result
-                  (cond
-                   ((stringp repl)
-                    (replace-match repl nil nil result))
-                   ((functionp repl)
-                    (condition-case nil
-                        (funcall repl result (match-data))
-                      (wrong-number-of-arguments
-                       (funcall repl result))))
-                   (t result)))))))))
+    (save-match-data
+      (let ((result url))
+	(dolist (transform zr-proxy-transform-alist result)
+          (let ((pattern (car transform))
+		(repl (cdr transform)))
+            (when (cond
+                   ((eq pattern t) t)
+                   ((stringp pattern) (string-match pattern result))
+                   ((functionp pattern) (funcall pattern result))
+                   (t nil))
+              (unless (stringp pattern)
+		(set-match-data (list 0 (length result))))
+              (setq result
+                    (cond
+                     ((stringp repl)
+                      (replace-match repl (not (stringp pattern)) nil result))
+                     ((functionp repl)
+                      (condition-case nil
+                          (funcall repl result (match-data))
+			(wrong-number-of-arguments
+			 (funcall repl result))))
+                     (t result))))))))))
 
 ;;; Advice Macro for URL-Consuming Functions
 
@@ -366,6 +374,19 @@ In this mode, requests are routed through `url-proxy-services' and
 URL transform rules do not take effect."
   (bound-and-true-p zr-proxy-http-proxy-mode))
 
+(defun zr-proxy--no-proxy-regexp (value)
+  "Convert the no_proxy host/domain list VALUE into an Emacs regexp.
+Match domain suffixes on label boundaries.  A lone * bypasses all hosts."
+  (when-let* ((value)
+              (hosts (split-string value "[, \t\r\n]+" t)))
+    (if (member "*" hosts)
+        ".*"
+      (concat "\\(?:\\`\\|\\.\\)"
+              (regexp-opt (mapcar (lambda (host)
+                                   (string-remove-prefix "." host))
+                                 hosts))
+              "\\'"))))
+
 (defun zr-proxy-http-proxy-enable (&optional proxy)
   "Enable HTTP proxy mode, routing requests through PROXY or environment settings.
 When PROXY is provided, it overrides custom variables and environment.
@@ -390,14 +411,14 @@ When active, `zr-proxy-transform-url' returns URLs unchanged."
                                               (getenv "HTTPS_PROXY")
                                               (getenv "all_proxy")
                                               (getenv "ALL_PROXY")))))
-         (no-proxy (or (zr-proxy-parse-proxy zr-proxy-no-proxy)
+         (no-proxy-env (or (getenv "no_proxy") (getenv "NO_PROXY")))
+         (no-proxy (or zr-proxy-no-proxy
                        (alist-get "no_proxy" url-proxy-services nil nil #'equal)
-                       (getenv "no_proxy")
-                       (getenv "NO_PROXY"))))
+                       (zr-proxy--no-proxy-regexp no-proxy-env))))
     (unless (or http https)
       (user-error "No HTTP proxy specified or detected in environment"))
     ;; Save current proxy configuration and environment before modifying
-    (unless (bound-and-true-p zr-proxy-http-proxy-mode)
+    (when (eq zr-proxy--saved-proxy-services 'unset)
       (setq zr-proxy--saved-proxy-services (copy-alist url-proxy-services)
             zr-proxy--saved-proxy-locator url-proxy-locator
             zr-proxy--saved-env-vars
@@ -425,9 +446,10 @@ When active, `zr-proxy-transform-url' returns URLs unchanged."
         (setenv "all_proxy" url)
         (setenv "ALL_PROXY" url)))
     (when no-proxy
-      (setf (alist-get "no_proxy" url-proxy-services nil nil #'equal) no-proxy)
-      (setenv "no_proxy" no-proxy)
-      (setenv "NO_PROXY" no-proxy))
+      (setf (alist-get "no_proxy" url-proxy-services nil nil #'equal) no-proxy))
+    (when no-proxy-env
+      (setenv "no_proxy" no-proxy-env)
+      (setenv "NO_PROXY" no-proxy-env))
     (setq url-proxy-locator #'url-default-find-proxy-for-url
           zr-proxy-http-proxy-mode t)
     (message "zr-proxy: HTTP proxy enabled (HTTP: %s, HTTPS: %s); transform rules bypassed"
@@ -445,7 +467,9 @@ Transform rules will resume taking effect."
           zr-proxy--saved-proxy-locator 'unset))
   (unless (eq zr-proxy--saved-env-vars 'unset)
     (dolist (pair zr-proxy--saved-env-vars)
-      (setenv (car pair) (cdr pair)))
+      (setenv (car pair) (cdr pair))
+      (unless (cdr pair)
+        (setq process-environment (delete (car pair) process-environment))))
     (setq zr-proxy--saved-env-vars 'unset))
   (setq zr-proxy-http-proxy-mode nil)
   (message "zr-proxy: HTTP proxy mode disabled; transform rules active"))
@@ -460,7 +484,11 @@ While this mode is active, URL transform rules do not take effect."
   :global t
   :group 'zr-proxy
   (if zr-proxy-http-proxy-mode
-      (zr-proxy-http-proxy-enable)
+      (condition-case err
+          (zr-proxy-http-proxy-enable)
+        (error
+         (zr-proxy-http-proxy-disable)
+         (signal (car err) (cdr err))))
     (zr-proxy-http-proxy-disable)))
 
 (provide 'zr-proxy)

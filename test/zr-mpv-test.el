@@ -129,12 +129,25 @@
   (cl-letf (((symbol-function 'getenv) (lambda (&rest _) nil)))
     (should (eq 'local (zr-mpv-detect-backend)))))
 
+(ert-deftest zr-mpv-test-detect-backend-client-environment ()
+  "The client frame's terminal takes precedence over the daemon environment."
+  (dolist (case '(("WezTerm" nil wezterm)
+                  ("Other" "WezTerm" local)
+                  (nil "WezTerm" wezterm)))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil))
+              ((symbol-function 'getenv)
+               (lambda (name &optional frame)
+                 (when (equal name "TERM_PROGRAM")
+                   (if frame (nth 0 case) (nth 1 case))))))
+      (should (eq (nth 2 case) (zr-mpv-detect-backend))))))
+
 ;;; Local Backend
 
 (ert-deftest zr-mpv-test-play-local-command-and-pipe ()
   "Test local process invocation with arguments, IPC server, and stdin."
   (let ((zr-mpv-program "fake-mpv")
         (zr-mpv-ipc-server "/tmp/fake-mpv.sock")
+        (zr-mpv-path-transform-alist '(("\\`" . "/prefix")))
         (zr-mpv-default-arguments '("--terminal=no"))
         recorded-args
         sent-payload
@@ -159,7 +172,7 @@
                          "--volume=80"
                          "--playlist=-")
                        recorded-args))
-        (should (equal "#EXTM3U\n/path/a.mp4\n/path/b.mkv\n" sent-payload))
+        (should (equal "#EXTM3U\n/prefix/path/a.mp4\n/prefix/path/b.mkv\n" sent-payload))
         (should eof-called)))
     ;; Error on empty files
     (should-error (zr-mpv-play-local nil) :type 'user-error)))
@@ -204,22 +217,45 @@
                        method-called url-request-method
                        headers-called url-request-extra-headers
                        data-called url-request-data))))
-      (zr-mpv-play-http '("/video/1.mp4") "--pause")
+      (zr-mpv-play-http '("/video/中文😀.mp4") "--pause")
       (should (equal "http://example.com/mpv/" url-called))
       (should (equal "POST" method-called))
       (should (equal "application/json" (cdr (assoc "Content-Type" headers-called))))
       (should (equal "ssh://testhost" (cdr (assoc "Origin" headers-called))))
       (should (equal (concat "Basic " (base64-encode-string "alice:secret123" t))
                      (cdr (assoc "Authorization" headers-called))))
-      (let ((parsed (json-parse-string data-called :object-type 'alist)))
+      (should (= (length data-called) (string-bytes data-called)))
+      (let ((parsed (json-parse-string (decode-coding-string data-called 'utf-8)
+                                      :object-type 'alist)))
         (should (equal ["--no-audio" "--pause"] (cdr (assoc 'args parsed))))
-        (should (equal "/video/1.mp4" (cdr (assoc 'stdin parsed))))))))
+        (should (equal "/video/中文😀.mp4" (cdr (assoc 'stdin parsed))))))))
 
 ;;; Android Playlist Server & Playback
 
+(defun zr-mpv-test--read-playlist (server)
+  "Read the actual HTTP playlist response from SERVER."
+  (let* ((response "")
+         (client (make-network-process
+                  :name "zr-mpv-test-client"
+                  :host "127.0.0.1"
+                  :service (process-contact server :service)
+                  :coding 'utf-8-unix
+                  :noquery t
+                  :filter (lambda (_proc text)
+                            (setq response (concat response text)))))
+         (deadline (+ (float-time) 2)))
+    (unwind-protect
+        (progn
+          (while (and (process-live-p client) (< (float-time) deadline))
+            (accept-process-output nil 0.05))
+          response)
+      (when (process-live-p client)
+        (delete-process client)))))
+
 (ert-deftest zr-mpv-test-serve-playlist-and-android-proc ()
   "Test M3U8 temporary server provides valid HTTP response and android am call."
-  (let* ((server (zr-mpv-serve-playlist '("http://stream/1.mp4") 10))
+  (let* ((zr-mpv-path-transform-alist '(("\\`http://" . "http://cache/")))
+         (server (zr-mpv-serve-playlist '("http://stream/1.mp4") 10))
          (port (process-contact server :service))
          received-response)
     (unwind-protect
@@ -235,28 +271,31 @@
           (delete-process client)
           (should (string-prefix-p "HTTP/1.1 200 OK\r\n" received-response))
           (should (string-search "application/vnd.apple.mpegurl" received-response))
-          (should (string-search "#EXTM3U\nhttp://stream/1.mp4\n" received-response)))
+          (should (string-search "#EXTM3U\nhttp://cache/stream/1.mp4\n" received-response)))
       (when (process-live-p server)
         (delete-process server))))
 
   ;; Test zr-mpv-play-android command call
-  (let (call-args)
+  (let ((zr-mpv-path-transform-alist '(("\\`http://" . "http://cache/")))
+        (serve (symbol-function 'zr-mpv-serve-playlist))
+        server call-args)
     (cl-letf (((symbol-function 'zr-mpv-serve-playlist)
-               (lambda (_files &optional _timeout)
-                 (let ((proc (make-network-process
-                              :name "fake-srv"
-                              :server t
-                              :service t
-                              :host "127.0.0.1")))
-                   proc)))
+               (lambda (files &optional timeout)
+                 (setq server (funcall serve files (or timeout 0)))))
               ((symbol-function 'call-process)
                (lambda (prog &rest args)
                  (setq call-args (cons prog args))
                  0)))
-      (zr-mpv-play-android '("http://stream/1.mp4"))
-      (should (equal "termux-am" (car call-args)))
-      (should (member "android.intent.action.VIEW" call-args))
-      (should (member "is.xyz.mpv.ytdl" call-args)))))
+      (unwind-protect
+          (progn
+            (zr-mpv-play-android '("http://stream/中文.mp4"))
+            (should (equal "termux-am" (car call-args)))
+            (should (member "android.intent.action.VIEW" call-args))
+            (should (member "is.xyz.mpv.ytdl" call-args))
+            (should (string-search "#EXTM3U\nhttp://cache/stream/中文.mp4\n"
+                                   (zr-mpv-test--read-playlist server))))
+        (when (and server (process-live-p server))
+          (delete-process server))))))
 
 ;;; DWIM File Collection
 
@@ -311,6 +350,51 @@
       (should (zr-mpv-ipc-send '("cycle" "pause")))
       (should (equal "/tmp/mock-mpv.sock" connected))
       (should (equal "{\"command\":[\"cycle\",\"pause\"]}\n" sent-string)))))
+
+(ert-deftest zr-mpv-test-ipc-windows-helper ()
+  "Windows IPC sends the pipe and Unicode command as data to its helper."
+  (let ((server "\\\\.\\pipe\\mpv-'quoted'")
+        (command '("loadfile" "C:/中文/$(literal).mp4"))
+        request script)
+    (cl-letf (((symbol-function 'call-process-region)
+               (lambda (start end program delete destination _display &rest args)
+                 (should (equal program "test-powershell"))
+                 (should delete)
+                 (should (eq destination t))
+                 (setq request (json-parse-string (buffer-substring start end)
+                                                  :object-type 'alist)
+                       script (car (last args)))
+                 (erase-buffer)
+                 0)))
+      (let ((system-type 'windows-nt)
+            (zr-mpv-windows-ipc-program "test-powershell"))
+        (should (zr-mpv-ipc-send command server))))
+    (should (equal "mpv-'quoted'" (alist-get 'pipe request)))
+    (should-not (string-search "mpv-'quoted'" script))
+    (should-not (string-search "$(literal)" script))
+    (let ((payload (alist-get 'payload request)))
+      (should (string-suffix-p "\n" payload))
+      (should (equal (vconcat command)
+                     (alist-get 'command (json-parse-string payload :object-type 'alist)))))))
+
+(ert-deftest zr-mpv-test-ipc-windows-failure ()
+  "A failed named-pipe connection must not report success."
+  (cl-letf (((symbol-function 'call-process-region)
+             (lambda (&rest _)
+               (erase-buffer)
+               (insert "Pipe connection timed out")
+               1)))
+    (let ((system-type 'windows-nt))
+      (should-not (zr-mpv-ipc-send '("cycle" "pause") "\\\\.\\pipe\\missing")))))
+
+(ert-deftest zr-mpv-test-ipc-send-error-closes-connection ()
+  "A socket send error still releases its connection."
+  (let (deleted)
+    (cl-letf (((symbol-function 'make-network-process) (lambda (&rest _) 'test-ipc))
+              ((symbol-function 'process-send-string) (lambda (&rest _) (error "Broken pipe")))
+              ((symbol-function 'delete-process) (lambda (proc) (setq deleted proc))))
+      (should-not (zr-mpv-ipc-send '("cycle" "pause") "/tmp/review-mpv.sock"))
+      (should (eq deleted 'test-ipc)))))
 
 ;;; Dispatcher
 

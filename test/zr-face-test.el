@@ -36,9 +36,52 @@
 (defvar zr-face-buffer-mode)
 
 (ert-deftest zr-face-test-system-dark-mode-is-safe-in-terminal ()
-  "Dark-mode detection returns a boolean without terminal capabilities."
-  (let ((xterm-extra-capabilities nil))
-    (should (booleanp (zr-face-system-dark-mode-enabled-p)))))
+  "Use the detected terminal background, falling back to the frame."
+  (dolist (case '((dark light t) (light dark nil)
+                  (nil dark t) (nil light nil) (nil nil nil)))
+    (cl-letf (((symbol-function 'framep) (lambda (_) t))
+              ((symbol-function 'terminal-parameter)
+               (lambda (&rest _) (nth 0 case)))
+              ((symbol-function 'frame-parameter)
+               (lambda (&rest _) (nth 1 case))))
+      (should (eq (nth 2 case) (zr-face-system-dark-mode-enabled-p))))))
+
+(ert-deftest zr-face-test-font-shuffle-frame-hook ()
+  "The documented frame hook applies the selected font to its frame."
+  (let ((after-make-frame-functions '(zr-face-font-shuffle-set))
+        (zr-face-font-available-alist '((default . (("Zr Mono" . 18)))))
+        applied)
+    (cl-letf (((symbol-function 'set-face-attribute)
+               (lambda (face frame &rest attrs)
+                 (setq applied (list face frame (plist-get attrs :font))))))
+      (run-hook-with-args 'after-make-frame-functions (selected-frame)))
+    (should (eq (car applied) 'default))
+    (should (eq (cadr applied) (selected-frame)))
+    (should (= (font-get (nth 2 applied) :size) 18))))
+
+(ert-deftest zr-face-test-theme-probe-preserves-priority ()
+  "Probing another theme preserves both active order and visible faces."
+  (deftheme zr-face-test-light)
+  (deftheme zr-face-test-dark)
+  (custom-theme-set-faces 'zr-face-test-light
+                         '(default ((t (:background "white")))))
+  (custom-theme-set-faces 'zr-face-test-dark
+                         '(default ((t (:background "black")))))
+  (let ((original (copy-sequence custom-enabled-themes))
+        (themes '(zr-face-test-dark zr-face-test-light)))
+    (unwind-protect
+        (progn
+          (zr-face-theme-enable-only themes t)
+          (should (equal themes custom-enabled-themes))
+          (should-not (zr-face-theme-dark-p 'zr-face-test-light))
+          (should (equal themes custom-enabled-themes))
+          (should (equal "black" (face-attribute 'default :background)))
+          (cl-letf (((symbol-function 'color-name-to-rgb)
+                     (lambda (_) (error "Failed to inspect color"))))
+            (should-error (zr-face-theme-dark-p 'zr-face-test-light)))
+          (should (equal themes custom-enabled-themes))
+          (should (equal "black" (face-attribute 'default :background))))
+      (zr-face-theme-enable-only original t))))
 
 (ert-deftest zr-face-test-font-families-prefer-available ()
   "Fonts of `zr-face-font-available-alist' are offered before the rest."
