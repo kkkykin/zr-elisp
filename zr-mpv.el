@@ -245,49 +245,103 @@ Call `zr-mpv-normalize-files' before this function to transform raw input."
 
 ;;; Playback Backends
 
-(defun zr-mpv-play-local (files &optional args)
+(defvar zr-mpv--temp-configs nil
+  "Private mpv config files awaiting process cleanup.")
+
+(defun zr-mpv--delete-temp-config (file)
+  "Remove the private mpv config FILE, if present."
+  (when file
+    (when (file-exists-p file) (delete-file file))
+    (setq zr-mpv--temp-configs (delete file zr-mpv--temp-configs))))
+
+(add-hook 'kill-emacs-hook
+          (lambda ()
+            (dolist (file (copy-sequence zr-mpv--temp-configs))
+              (ignore-errors (zr-mpv--delete-temp-config file)))))
+
+(defun zr-mpv--format-headers (headers)
+  "Normalize HEADERS into a list of \"Name: Value\" strings."
+  (cond
+   ((null headers) nil)
+   ((stringp headers) (list headers))
+   ((listp headers)
+    (delq nil
+          (mapcar (lambda (item)
+                    (cond
+                     ((consp item)
+                      (format "%s: %s" (car item) (cdr item)))
+                     ((stringp item) item)
+                     (t nil)))
+                  headers)))))
+
+(defun zr-mpv-play-local (files &optional args headers)
   "Play FILES locally by spawning the mpv executable.
 FILES is normalized via `zr-mpv-normalize-files' and passed via stdin.
-ARGS specifies additional command-line arguments."
+ARGS specifies additional command-line arguments.
+HEADERS is an optional alist or list of HTTP header strings."
   (let ((items (zr-mpv-normalize-files files)))
     (unless items
       (user-error "No files to play"))
-    (let* ((extra (zr-mpv--split-args args))
-           (cmd (append (list zr-mpv-program)
-                        (when zr-mpv-ipc-server
-                          (list (concat "--input-ipc-server=" zr-mpv-ipc-server)))
-                        zr-mpv-default-arguments
-                        extra
-                        (list "--playlist=-")))
-           (buffer (get-buffer-create zr-mpv-buffer-name))
-           (playlist (zr-mpv-format-playlist items))
-           (proc (make-process
-                  :name "zr-mpv"
-                  :buffer buffer
-                  :command cmd
-                  :connection-type 'pipe
-                  :coding 'utf-8-unix
-                  :noquery t
-                  :sentinel
-                  (lambda (p _event)
-                    (when (memq (process-status p) '(exit signal))
-                      (unless (zerop (process-exit-status p))
-                        (message "mpv exited with code %s; see %s"
-                                 (process-exit-status p)
-                                 (buffer-name (process-buffer p)))))))))
-      (process-send-string proc playlist)
-      (process-send-eof proc)
-      proc)))
+    (let* ((formatted-headers (zr-mpv--format-headers headers))
+           (extra (zr-mpv--split-args args))
+           config proc)
+      (unwind-protect
+          (progn
+            (when formatted-headers
+              (setq config (make-temp-file "zr-mpv-" nil ".conf"))
+              (push config zr-mpv--temp-configs)
+              (set-file-modes config #o600)
+              (let ((coding-system-for-write 'utf-8-unix))
+                (write-region
+                 (format "http-header-fields=\"%s\"\n"
+                         (string-join formatted-headers ","))
+                 nil config nil 'silent)))
+            (let ((cmd (append (list zr-mpv-program)
+                               (when zr-mpv-ipc-server
+                                 (list (concat "--input-ipc-server=" zr-mpv-ipc-server)))
+                               (when config
+                                 (list (concat "--include=" config)))
+                               zr-mpv-default-arguments
+                               extra
+                               (list "--playlist=-")))
+                  (buffer (get-buffer-create zr-mpv-buffer-name))
+                  (playlist (zr-mpv-format-playlist items)))
+              (setq proc
+                    (make-process
+                     :name "zr-mpv"
+                     :buffer buffer
+                     :command cmd
+                     :connection-type 'pipe
+                     :coding 'utf-8-unix
+                     :noquery t
+                     :sentinel
+                     (lambda (p _event)
+                       (when (memq (process-status p) '(exit signal))
+                         (when config (zr-mpv--delete-temp-config config))
+                         (unless (zerop (process-exit-status p))
+                           (message "mpv exited with code %s; see %s"
+                                    (process-exit-status p)
+                                    (buffer-name (process-buffer p))))))))
+              (process-send-string proc playlist)
+              (process-send-eof proc)
+              proc))
+        (unless proc
+          (when config (zr-mpv--delete-temp-config config)))))))
 
-(defun zr-mpv-play-wezterm (files &optional args)
+(defun zr-mpv-play-wezterm (files &optional args headers)
   "Play FILES via WezTerm terminal escape sequence.
-Encodes payload with `args' and `stdin' and sends via `zr-wezterm-send-json'."
+Encodes payload with `args' and `stdin' and sends via `zr-wezterm-send-json'.
+HEADERS is an optional alist or list of HTTP header strings."
   (let ((items (zr-mpv-normalize-files files)))
     (unless items
       (user-error "No files to play"))
     (unless (fboundp 'zr-wezterm-send-json)
       (require 'zr-wezterm))
-    (let* ((all-args (append zr-mpv-default-arguments (zr-mpv--split-args args)))
+    (let* ((formatted-headers (zr-mpv--format-headers headers))
+           (header-args (when formatted-headers
+                          (list (format "--http-header-fields=%s"
+                                        (string-join formatted-headers ",")))))
+           (all-args (append zr-mpv-default-arguments (zr-mpv--split-args args) header-args))
            (msg `((args . ,(vconcat all-args))
                   (type . "mpv")
                   (stdin . ,(string-join items "\n")))))
@@ -303,26 +357,31 @@ Encodes payload with `args' and `stdin' and sends via `zr-wezterm-send-json'."
             (base64-encode-string
              (encode-coding-string (format "%s:%s" user secret) 'utf-8) t))))
 
-(defun zr-mpv-play-http (files &optional args)
-  "Play FILES via HTTP POST to remote mpv daemon at `zr-mpv-http-url'."
+(defun zr-mpv-play-http (files &optional args headers)
+  "Play FILES via HTTP POST to remote mpv daemon at `zr-mpv-http-url'.
+HEADERS is an optional alist or list of HTTP header strings."
   (let ((items (zr-mpv-normalize-files files)))
     (unless items
       (user-error "No files to play"))
-    (let* ((all-args (append zr-mpv-default-arguments (zr-mpv--split-args args)))
+    (let* ((formatted-headers (zr-mpv--format-headers headers))
+           (header-args (when formatted-headers
+                          (list (format "--http-header-fields=%s"
+                                        (string-join formatted-headers ",")))))
+           (all-args (append zr-mpv-default-arguments (zr-mpv--split-args args) header-args))
            (payload (json-serialize `((args . ,(vconcat all-args))
                                       (stdin . ,(string-join items "\n")))))
-           (headers `(("Content-Type" . "application/json")))
+           (req-headers `(("Content-Type" . "application/json")))
            (origin (or zr-mpv-http-origin
                        (when (or (getenv "SSH_CONNECTION") (getenv "SSH_CLIENT"))
                          (concat "ssh://" (system-name))))))
       (when origin
-        (push `("Origin" . ,(encode-coding-string origin 'utf-8)) headers))
+        (push `("Origin" . ,(encode-coding-string origin 'utf-8)) req-headers))
       (when-let* ((auth (zr-mpv--auth-header zr-mpv-http-auth-host)))
-        (push `("Authorization" . ,auth) headers))
+        (push `("Authorization" . ,auth) req-headers))
       (when zr-mpv-http-extra-headers
-        (setq headers (append headers zr-mpv-http-extra-headers)))
+        (setq req-headers (append req-headers zr-mpv-http-extra-headers)))
       (let ((url-request-method "POST")
-            (url-request-extra-headers headers)
+            (url-request-extra-headers req-headers)
             (url-request-data (encode-coding-string payload 'utf-8 t)))
         (url-retrieve
          zr-mpv-http-url
@@ -371,7 +430,7 @@ The server automatically terminates after TIMEOUT seconds (default
                          (delete-process server-proc))))))
     server-proc))
 
-(defun zr-mpv-play-android (files &optional _args)
+(defun zr-mpv-play-android (files &optional _args _headers)
   "Play FILES on Android via mpv-android and `zr-mpv-android-am-program'."
   (let* ((server (zr-mpv-serve-playlist files))
          (port (process-contact server :service))
@@ -413,18 +472,38 @@ Returns one of `local', `wezterm', `http', or `android'."
     zr-mpv-backend))
 
 ;;;###autoload
-(defun zr-mpv-play (files &optional args backend)
-  "Play FILES using BACKEND with optional ARGS.
+(defun zr-mpv-play (files &optional args backend headers)
+  "Play FILES using BACKEND with optional ARGS and HEADERS.
 FILES can be a list of paths/URLs or a newline-separated string.
 ARGS can be a list of strings or a shell command argument string.
-BACKEND defaults to `zr-mpv-backend' (or auto-detected)."
+BACKEND defaults to `zr-mpv-backend' (or auto-detected).
+HEADERS is an optional alist of (NAME . VALUE) or list of \"Name: Value\"
+HTTP header strings to pass to mpv."
   (let ((be (or backend (zr-mpv-get-backend))))
     (pcase be
-      ('local (zr-mpv-play-local files args))
-      ('wezterm (zr-mpv-play-wezterm files args))
-      ('http (zr-mpv-play-http files args))
-      ('android (zr-mpv-play-android files args))
-      ((pred functionp) (funcall be files args))
+      ('local
+       (if headers
+           (zr-mpv-play-local files args headers)
+         (zr-mpv-play-local files args)))
+      ('wezterm
+       (if headers
+           (zr-mpv-play-wezterm files args headers)
+         (zr-mpv-play-wezterm files args)))
+      ('http
+       (if headers
+           (zr-mpv-play-http files args headers)
+         (zr-mpv-play-http files args)))
+      ('android
+       (if headers
+           (zr-mpv-play-android files args headers)
+         (zr-mpv-play-android files args)))
+      ((pred functionp)
+       (condition-case nil
+           (if headers
+               (funcall be files args headers)
+             (funcall be files args))
+         (wrong-number-of-arguments
+          (funcall be files args))))
       (_ (error "Unknown zr-mpv backend: %S" be)))))
 
 ;;; IPC Control

@@ -10,7 +10,7 @@
 ;; HTTP and rclone rc send the same JSON requests; transfers are RC jobs.
 ;; core/command is a separate entry for manually entered rclone arguments.
 ;;
-;; File listings feed external consumers such as mpv.  This package does
+;; File listings feed external consumers such as zr-mpv.  This package does
 ;; not provide a file browser.  Open the current path with zr-tramp-webdav
 ;; when ordinary Emacs file access or file management is needed.
 
@@ -67,14 +67,6 @@ This is a path on the rcd machine.  It is also passed explicitly to
 core/command, whose subprocess does not inherit the daemon's CLI flags."
   :type '(choice (const nil) file))
 
-(defcustom zr-rclone-mpv-program "mpv"
-  "Executable used to play files returned by RC listing."
-  :type 'file)
-
-(defcustom zr-rclone-mpv-arguments nil
-  "Additional mpv arguments."
-  :type '(repeat string))
-
 (defvar zr-rclone-url-history nil)
 (defvar zr-rclone-path-history nil)
 (defvar zr-rclone-command-history nil)
@@ -89,7 +81,7 @@ core/command, whose subprocess does not inherit the daemon's CLI flags."
 (defcustom zr-rclone-file-list-function #'zr-rclone-play-files
   "Function called by zr-rclone-send-file-list with FILES and CONNECTION.
 FILES is an ordered list of full rclone path strings, with directories
-excluded.  The default consumer converts them to URLs and starts mpv."
+excluded.  The default consumer converts them to URLs and starts `zr-mpv'."
   :type 'function)
 
 (cl-defstruct (zr-rclone-connection (:constructor zr-rclone--make-connection))
@@ -1472,19 +1464,7 @@ For remote servers, ask separately for the listening and accessible addresses."
 
 ;;; Playback
 
-(defvar zr-rclone--mpv-configs nil
-  "Private mpv config files awaiting process cleanup.")
-
-(defun zr-rclone--delete-mpv-config (file)
-  "Remove the private mpv config FILE, if present."
-  (when file
-    (when (file-exists-p file) (delete-file file))
-    (setq zr-rclone--mpv-configs (delete file zr-rclone--mpv-configs))))
-
-(add-hook 'kill-emacs-hook
-          (lambda ()
-            (dolist (file (copy-sequence zr-rclone--mpv-configs))
-              (ignore-errors (zr-rclone--delete-mpv-config file)))))
+(declare-function zr-mpv-play "zr-mpv" (files &optional args backend headers))
 
 (defun zr-rclone--media (connection path rc-serve)
   "Return (URL . CREDENTIALS) for full rclone PATH on CONNECTION.
@@ -1506,50 +1486,23 @@ RC-SERVE uses HTTP object serving on the RC port instead of WebDAV."
     (list (url-type parsed) (downcase (url-host parsed)) (url-port parsed))))
 
 (defun zr-rclone--launch-mpv (media)
-  "Pipe MEDIA URLs to mpv as an M3U playlist.
-Keep Basic authentication out of argv and URLs using a private config file."
+  "Play MEDIA URLs through `zr-mpv' with HTTP Basic authentication.
+MEDIA is a list of (URL . CREDENTIALS) pairs."
   (unless media (user-error "No files to play"))
+  (unless (require 'zr-mpv nil t)
+    (user-error "zr-mpv is not available on load-path"))
   (let ((credentials (cdar media))
-        (origin (zr-rclone--origin (caar media)))
-        (default-directory temporary-file-directory)
-        (buffer (get-buffer-create "*rclone mpv*"))
-        config process)
+        (origin (zr-rclone--origin (caar media))))
     (unless (cl-every (lambda (item)
                         (and (equal (cdr item) credentials)
-                             (equal (zr-rclone--origin (car item)) origin))) media)
+                             (equal (zr-rclone--origin (car item)) origin)))
+                      media)
       (user-error "One playlist must use one origin and authentication identity"))
-    (unwind-protect
-        (progn
-          (when credentials
-            (setq config (make-temp-file "zr-rclone-mpv-" nil ".conf"))
-            (push config zr-rclone--mpv-configs)
-            (set-file-modes config #o600)
-            (let ((coding-system-for-write 'utf-8-unix))
-              (write-region
-               (concat "http-header-fields=\"Authorization: "
-                       (zr-rclone--basic-header credentials) "\"\n")
-               nil config nil 'silent)))
-          (setq process
-                (make-process
-                 :name "zr-rclone-mpv" :buffer buffer
-                 :command (append
-                           (list zr-rclone-mpv-program "--input-terminal=no")
-                           (when config (list (concat "--include=" config)))
-                           zr-rclone-mpv-arguments (list "--playlist=-"))
-                 :connection-type 'pipe :coding 'utf-8-unix :noquery t
-                 :sentinel
-                 (lambda (proc _event)
-                   (when (memq (process-status proc) '(exit signal))
-                     (zr-rclone--delete-mpv-config config)
-                     (unless (zerop (process-exit-status proc))
-                       (message "mpv exited with an error; see *rclone mpv*"))))))
-          (process-send-string process
-                               (concat "#EXTM3U\n" (string-join (mapcar #'car media) "\n")
-                                       "\n"))
-          (process-send-eof process)
-          process)
-      (unless process
-        (zr-rclone--delete-mpv-config config)))))
+    (let ((urls (mapcar #'car media))
+          (headers (when credentials
+                     (list (cons "Authorization"
+                                 (zr-rclone--basic-header credentials))))))
+      (zr-mpv-play urls nil nil headers))))
 
 ;;; File lists for external consumers
 
@@ -1627,12 +1580,12 @@ WebDAV or RC HTTP media source."
           files))
 
 (defun zr-rclone-play-files (files connection)
-  "Play full rclone FILES on CONNECTION through mpv.
-Use this as a zr-rclone-file-list-function consumer."
+  "Play full rclone FILES on CONNECTION through `zr-mpv'.
+Use this as a `zr-rclone-file-list-function' consumer."
   (zr-rclone--launch-mpv (zr-rclone-file-urls files connection)))
 
 (defun zr-rclone-play (&optional select)
-  "List matching files and play them through mpv.
+  "List matching files and play them through `zr-mpv'.
 With prefix SELECT, choose a subset using minibuffer completion."
   (interactive "P")
   (let ((connection (zr-rclone--connected)))

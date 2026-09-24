@@ -555,11 +555,13 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
 
 (ert-deftest zr-rclone-mpv-receives-playlist-and-private-auth ()
   (unless (executable-find "python3") (ert-skip "Python 3 is required"))
+  (require 'zr-mpv)
   (let* ((directory (make-temp-file "zr-rclone-mpv-test-" t))
          (program (expand-file-name "fake mpv" directory))
          (capture (expand-file-name "capture.json" directory))
-         (zr-rclone-mpv-program program)
-         (zr-rclone-mpv-arguments nil)
+         (zr-mpv-program program)
+         (zr-mpv-default-arguments nil)
+         (zr-mpv-backend 'local)
          process)
     (unwind-protect
         (progn

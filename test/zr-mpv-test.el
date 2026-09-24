@@ -177,6 +177,42 @@
     ;; Error on empty files
     (should-error (zr-mpv-play-local nil) :type 'user-error)))
 
+(ert-deftest zr-mpv-test-play-local-with-headers ()
+  "Test local process invocation creates temp config with 0600 mode for HTTP headers."
+  (let ((zr-mpv-program "fake-mpv")
+        (zr-mpv-ipc-server nil)
+        (zr-mpv-default-arguments nil)
+        recorded-args
+        sentinel-fn
+        created-config)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest plist)
+                 (setq recorded-args (plist-get plist :command)
+                       sentinel-fn (plist-get plist :sentinel))
+                 (let ((inc (cl-find-if (lambda (arg) (string-prefix-p "--include=" arg))
+                                        recorded-args)))
+                   (when inc
+                     (setq created-config (substring inc (length "--include=")))))
+                 'fake-process))
+              ((symbol-function 'process-send-string) #'ignore)
+              ((symbol-function 'process-send-eof) #'ignore)
+              ((symbol-function 'process-status) (lambda (_p) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_p) 0)))
+      (let ((res (zr-mpv-play-local '("http://example.com/video.mp4")
+                                    nil
+                                    '(("Authorization" . "Basic secret-token")))))
+        (should (equal 'fake-process res))
+        (should created-config)
+        (should (file-exists-p created-config))
+        (should (= (file-modes created-config) #o600))
+        (should (equal (with-temp-buffer
+                         (insert-file-contents created-config)
+                         (buffer-string))
+                       "http-header-fields=\"Authorization: Basic secret-token\"\n"))
+        ;; Trigger sentinel to verify cleanup
+        (funcall sentinel-fn 'fake-process "finished\n")
+        (should-not (file-exists-p created-config))))))
+
 ;;; WezTerm Backend
 
 (ert-deftest zr-mpv-test-play-wezterm ()
@@ -402,20 +438,23 @@
   "Test `zr-mpv-play' dispatches to appropriate backend or custom function."
   (let (dispatched)
     (cl-letf (((symbol-function 'zr-mpv-play-local)
-               (lambda (f a) (setq dispatched (list 'local f a))))
+               (lambda (f a &optional h) (setq dispatched (list 'local f a h))))
               ((symbol-function 'zr-mpv-play-wezterm)
-               (lambda (f a) (setq dispatched (list 'wezterm f a))))
+               (lambda (f a &optional h) (setq dispatched (list 'wezterm f a h))))
               ((symbol-function 'zr-mpv-play-http)
-               (lambda (f a) (setq dispatched (list 'http f a)))))
+               (lambda (f a &optional h) (setq dispatched (list 'http f a h)))))
       ;; Local
       (zr-mpv-play '("/f.mp4") "-v" 'local)
-      (should (equal '(local ("/f.mp4") "-v") dispatched))
+      (should (equal '(local ("/f.mp4") "-v" nil) dispatched))
       ;; WezTerm
       (zr-mpv-play '("/f.mp4") nil 'wezterm)
-      (should (equal '(wezterm ("/f.mp4") nil) dispatched))
+      (should (equal '(wezterm ("/f.mp4") nil nil) dispatched))
       ;; HTTP
       (zr-mpv-play '("/f.mp4") nil 'http)
-      (should (equal '(http ("/f.mp4") nil) dispatched))
+      (should (equal '(http ("/f.mp4") nil nil) dispatched))
+      ;; With headers
+      (zr-mpv-play '("/f.mp4") nil 'local '(("Authorization" . "Basic token")))
+      (should (equal '(local ("/f.mp4") nil (("Authorization" . "Basic token"))) dispatched))
       ;; Custom function
       (zr-mpv-play '("/f.mp4") nil (lambda (f _a) (setq dispatched (list 'custom f))))
       (should (equal '(custom ("/f.mp4")) dispatched)))))
