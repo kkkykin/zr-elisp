@@ -525,7 +525,11 @@
             (should (eq (alist-get 'basic data) t))
             (should-not (string-match-p "test-secret"
                                         (string-join (alist-get 'argv data) " ")))
-            (should-not (file-exists-p (alist-get 'config data)))))
+            (let ((config (alist-get 'config data))
+                  (deadline (+ (float-time) 2)))
+              (while (and (file-exists-p config) (< (float-time) deadline))
+                (accept-process-output nil 0.05))
+              (should-not (file-exists-p config)))))
       (when (process-live-p process) (delete-process process))
       (delete-directory directory t))))
 
