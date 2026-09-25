@@ -224,35 +224,38 @@ Use the final header block, skipping proxy and informational responses."
         (coding-system-for-write 'no-conversion)
         (deadline (+ (float-time) zr-tramp-webdav-timeout))
         buffer done callback-status)
-    (unwind-protect
-        (progn
-          (setq buffer
-                (url-retrieve
-                 url (lambda (status)
-                       (setq callback-status status done t)) nil t t))
-          (unless (buffer-live-p buffer)
-            (signal 'file-error (list "Cannot open WebDAV URL" url)))
-          (while (and (not done) (< (float-time) deadline))
-            (accept-process-output nil 0.05))
-          (unless done
-            (signal 'file-error (list "WebDAV request timed out" url)))
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (unless (re-search-forward "\r?\n\r?\n" nil t)
-              (signal 'file-error (list "Incomplete WebDAV HTTP response" url)))
-            (let* ((body-start (point))
-                   (response (zr-tramp-webdav--parse-headers
-                              (buffer-substring-no-properties
-                               (point-min) body-start))))
-              (when (and (plist-get callback-status :error)
-                         (< (plist-get response :status) 300))
-                (signal 'file-error (list "WebDAV transport failed" url)))
-              (plist-put response :body
-                         (buffer-substring-no-properties body-start (point-max))))))
-      (when (buffer-live-p buffer)
-        (when-let* ((process (get-buffer-process buffer)))
-          (delete-process process))
-        (kill-buffer buffer)))))
+    ;; Timers and process output handled while waiting run in the caller's
+    ;; buffer.  Restore its point, which fido relies on while completing.
+    (save-excursion
+      (unwind-protect
+          (progn
+            (setq buffer
+                  (url-retrieve
+                   url (lambda (status)
+                         (setq callback-status status done t)) nil t t))
+            (unless (buffer-live-p buffer)
+              (signal 'file-error (list "Cannot open WebDAV URL" url)))
+            (while (and (not done) (< (float-time) deadline))
+              (accept-process-output nil 0.05))
+            (unless done
+              (signal 'file-error (list "WebDAV request timed out" url)))
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (unless (re-search-forward "\r?\n\r?\n" nil t)
+                (signal 'file-error (list "Incomplete WebDAV HTTP response" url)))
+              (let* ((body-start (point))
+                     (response (zr-tramp-webdav--parse-headers
+                                (buffer-substring-no-properties
+                                 (point-min) body-start))))
+                (when (and (plist-get callback-status :error)
+                           (< (plist-get response :status) 300))
+                  (signal 'file-error (list "WebDAV transport failed" url)))
+                (plist-put response :body
+                           (buffer-substring-no-properties body-start (point-max))))))
+        (when (buffer-live-p buffer)
+          (when-let* ((process (get-buffer-process buffer)))
+            (delete-process process))
+          (kill-buffer buffer))))))
 
 (defun zr-tramp-webdav--read-bytes (file)
   "Read FILE as an unibyte string."

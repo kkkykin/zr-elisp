@@ -107,6 +107,26 @@
     (should-not (plist-get (car entries) :directory))
     (should-not (zr-tramp-webdav--href-path "/dav/a%2fb" "http://example.org/dav/"))))
 
+(ert-deftest zr-tramp-webdav-url-requests-keep-the-callers-point ()
+  (cl-letf (((symbol-function 'url-retrieve)
+             (lambda (_url callback &rest _)
+               (let ((response (generate-new-buffer " *zr-tramp-webdav-test*")))
+                 (with-current-buffer response
+                   (insert "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
+                 ;; Timers run while the request waits, in the caller's buffer.
+                 (run-at-time 0 nil (lambda ()
+                                      (goto-char (point-min))
+                                      (with-current-buffer response
+                                        (funcall callback nil))))
+                 response))))
+    (with-temp-buffer
+      (insert "Find file: /webdav:example.invalid:/dav/")
+      (let ((response (zr-tramp-webdav--url-request
+                       nil "GET" "http://example.invalid/dav/" nil nil)))
+        (should (equal (plist-get response :status) 200))
+        (should (equal (plist-get response :body) "ok")))
+      (should (= (point) (point-max))))))
+
 (ert-deftest zr-tramp-webdav-text-and-binary-roundtrip ()
   (zr-tramp-webdav-test--with-backends
     (let ((file (concat root "中文 %?#&+[].txt"))
