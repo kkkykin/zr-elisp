@@ -94,10 +94,8 @@
                           (hash . "hash87654321")
                           (files . (((path . ,f3) (modified_date . 300))
                                     ((path . ,f4) (modified_date . 150)))))))
-               (params (list :directories (list tmp-dir)
-                             :search-method "HASH"
-                             :buffer-name buf-name)))
-          (zr-czkawka-dup--render-buffer groups params)
+               (params (list :directory tmp-dir)))
+          (zr-czkawka-dup--render-buffer groups params buf-name)
           (with-current-buffer (get-buffer buf-name)
             (should zr-czkawka-dup-mode)
             (should (= (length dired-subdir-alist) 2))
@@ -129,8 +127,8 @@
                           (files . (((path . ,f1) (modified_date . 100))
                                     ((path . ,f2) (modified_date . 300))
                                     ((path . ,f3) (modified_date . 200)))))))
-               (params (list :directories (list tmp-dir) :buffer-name buf-name)))
-          (zr-czkawka-dup--render-buffer groups params)
+               (params (list :directory tmp-dir)))
+          (zr-czkawka-dup--render-buffer groups params buf-name)
           (with-current-buffer (get-buffer buf-name)
             ;; Test keep newest: f2 is newest (mtime 300), f1 and f3 should be flagged
             (zr-czkawka-dup-flag-all-except-newest)
@@ -179,8 +177,8 @@
            (lambda (data)
              (setq result-groups (zr-czkawka-dup--parse-json data))
              (zr-czkawka-dup--render-buffer result-groups
-                                            (list :directories (list tmp-dir)
-                                                  :buffer-name buf-name))
+                                            (list :directory tmp-dir)
+                                            buf-name)
              (setq done t)))
           (while (not done)
             (accept-process-output nil 0.1))
@@ -217,8 +215,8 @@
                           (size . 4)
                           (files . (((path . ,f3) (modified_date . 200))
                                     ((path . ,f4) (modified_date . 100)))))))
-               (params (list :directories (list tmp-dir) :buffer-name buf-name)))
-          (zr-czkawka-dup--render-buffer groups params)
+               (params (list :directory tmp-dir)))
+          (zr-czkawka-dup--render-buffer groups params buf-name)
           (with-current-buffer (get-buffer buf-name)
             ;; Point is on f1 (Group 1)
             (goto-char (point-min))
@@ -247,8 +245,8 @@
                           (size . 9)
                           (files . (((path . ,f1) (modified_date . 100))
                                     ((path . ,f2) (modified_date . 200)))))))
-               (params (list :directories (list tmp-dir) :buffer-name buf-name)))
-          (zr-czkawka-dup--render-buffer groups params)
+               (params (list :directory tmp-dir)))
+          (zr-czkawka-dup--render-buffer groups params buf-name)
           (with-current-buffer (get-buffer buf-name)
             (goto-char (point-min))
             (dired-next-line 1)
@@ -267,6 +265,179 @@
   (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% n")) #'zr-czkawka-dup-flag-all-except-newest))
   (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% o")) #'zr-czkawka-dup-flag-all-except-oldest))
   (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% f")) #'zr-czkawka-dup-flag-all-except-first)))
+
+;;; Regression tests
+
+(defmacro zr-czkawka-test--with-dup-buffer (spec &rest body)
+  "Render duplicate groups in a temporary Virtual Dired buffer.
+SPEC is (FILES-VAR GROUPS-FORM), where FILES-VAR is bound to a list of
+four fresh files before GROUPS-FORM is evaluated.  Run BODY in the
+buffer and clean up afterwards."
+  (declare (indent 1))
+  (let ((files-var (car spec)))
+    `(let* ((tmp-dir (make-temp-file "zr-czkawka-test" t))
+            (,files-var (mapcar (lambda (n) (expand-file-name n tmp-dir))
+                                '("1.txt" "2.txt" "3.txt" "4.txt")))
+            (buf-name "*test-zr-czkawka*"))
+       (dolist (f ,files-var) (with-temp-file f (insert "dup")))
+       (unwind-protect
+           (progn
+             (zr-czkawka-dup--render-buffer ,(cadr spec)
+                                            (list :directory tmp-dir
+                                                  :args '("-d" "/tmp"))
+                                            buf-name)
+             (with-current-buffer buf-name ,@body))
+         (when (get-buffer buf-name) (kill-buffer buf-name))
+         (delete-directory tmp-dir t)))))
+
+(defun zr-czkawka-test--flagged ()
+  "Return the sorted list of files flagged for deletion."
+  (let (files)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (eq (char-after) dired-del-marker)
+          (push (dired-get-filename) files))
+        (forward-line 1)))
+    (sort files #'string<)))
+
+(defun zr-czkawka-test--group (id &rest files)
+  "Build group ID of FILES, each a (PATH MTIME [REFERENCE])."
+  `((id . ,id) (size . 3)
+    (files . ,(mapcar (lambda (f)
+                        `(,@(and (nth 2 f) '((reference . t)))
+                          (path . ,(car f)) (modified_date . ,(cadr f))))
+                      files))))
+
+(ert-deftest zr-czkawka-test-flag-skips-deleted-files ()
+  "Files deleted after the scan must not count as the kept copy."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 300) (list (nth 1 fs) 100))))
+    ;; The newest copy disappears from disk: the last one must survive.
+    (delete-file (nth 0 fs))
+    (zr-czkawka-dup-flag-all-except-newest)
+    (should-not (zr-czkawka-test--flagged))))
+
+(ert-deftest zr-czkawka-test-flag-skips-removed-lines ()
+  "Files removed from the buffer are no longer part of their group."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 100)
+                                          (list (nth 1 fs) 200)
+                                          (list (nth 2 fs) 300))))
+    (dired-goto-file (nth 0 fs))
+    (dired-kill-line)
+    (zr-czkawka-dup-flag-all-except-first)
+    (should (equal (zr-czkawka-test--flagged) (list (nth 2 fs))))))
+
+(ert-deftest zr-czkawka-test-flag-replaces-previous-flags ()
+  "Flagging again resets the group's flags so one copy is always kept."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 100) (list (nth 1 fs) 200))
+                (zr-czkawka-test--group 2 (list (nth 2 fs) 100) (list (nth 3 fs) 200))))
+    (zr-czkawka-dup-flag-all-except-newest)
+    (zr-czkawka-dup-flag-all-except-oldest)
+    (should (equal (zr-czkawka-test--flagged) (list (nth 1 fs) (nth 3 fs))))
+    ;; Current-group-only leaves other groups' flags alone.
+    (dired-goto-file (nth 0 fs))
+    (zr-czkawka-dup-flag-all-except-newest t)
+    (should (equal (zr-czkawka-test--flagged) (list (nth 0 fs) (nth 3 fs))))))
+
+(ert-deftest zr-czkawka-test-flag-never-flags-reference ()
+  "Reference files are protected and do not replace the kept copy."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 999 t)
+                                          (list (nth 1 fs) 100)
+                                          (list (nth 2 fs) 200))))
+    (zr-czkawka-dup-flag-all-except-newest)
+    (should (equal (zr-czkawka-test--flagged) (list (nth 1 fs))))))
+
+(ert-deftest zr-czkawka-test-parse-json-reference ()
+  "Parse the reference-directory JSON shapes of each search method."
+  (dolist (json '(;; HASH: list of [ref, [files]] per size
+                  "{\"6\":[[{\"path\":\"/r/a\",\"size\":6,\"hash\":\"h\"},[{\"path\":\"/x/a\",\"size\":6,\"hash\":\"h\"},{\"path\":\"/y/a\",\"size\":6,\"hash\":\"h\"}]]]}"
+                  ;; SIZE: a single [ref, [files]] per size
+                  "{\"6\":[{\"path\":\"/r/a\",\"size\":6,\"hash\":\"\"},[{\"path\":\"/x/a\",\"size\":6,\"hash\":\"\"},{\"path\":\"/y/a\",\"size\":6,\"hash\":\"\"}]]}"
+                  ;; NAME: keyed by reference path
+                  "{\"/r/a\":[{\"path\":\"/r/a\",\"size\":6,\"hash\":\"\"},[{\"path\":\"/x/a\",\"size\":6,\"hash\":\"\"},{\"path\":\"/y/a\",\"size\":6,\"hash\":\"\"}]]}"))
+    (let* ((groups (zr-czkawka-dup--parse-json
+                    (json-parse-string json :object-type 'alist :array-type 'list)))
+           (files (alist-get 'files (car groups))))
+      (should (= (length groups) 1))
+      (should (equal (mapcar (lambda (f) (alist-get 'path f)) files)
+                     '("/r/a" "/x/a" "/y/a")))
+      (should (equal (mapcar (lambda (f) (alist-get 'reference f)) files)
+                     '(t nil nil))))))
+
+(ert-deftest zr-czkawka-test-header-line-escapes-percent ()
+  "The `%' key hints must survive mode line %-construct expansion."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))))
+    (should (string-search "[%% n] Keep newest" header-line-format))))
+
+(ert-deftest zr-czkawka-test-default-raw-args-round-trip ()
+  "Default raw arguments must split back into the original directory."
+  (dolist (dir (list (file-name-as-directory (make-temp-file "zr czkawka 中文" t))))
+    (unwind-protect
+        (let ((default-directory dir))
+          (should (equal (cadr (split-string-and-unquote
+                                (zr-czkawka-dup--default-raw-args)))
+                         dir)))
+      (delete-directory dir t))))
+
+(ert-deftest zr-czkawka-test-read-directories-single-mark ()
+  "A single explicitly marked file in Dired must not signal an error."
+  (let ((dir (make-temp-file "zr-czkawka-test-marks" t)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "a" dir))
+          (make-directory (expand-file-name "b" dir))
+          (with-current-buffer (dired-noselect dir)
+            (unwind-protect
+                (cl-letf (((symbol-function 'zr-czkawka--read-directories-interactive)
+                           (lambda () 'interactive))
+                          ((symbol-function 'y-or-n-p) #'always))
+                  (dired-goto-file (expand-file-name "a" dir))
+                  (dired-mark 1)
+                  (should (eq (zr-czkawka--read-directories) 'interactive))
+                  (dired-goto-file (expand-file-name "b" dir))
+                  (dired-mark 1)
+                  (should (equal (zr-czkawka--read-directories)
+                                 (list (expand-file-name "a" dir)
+                                       (expand-file-name "b" dir)))))
+              (kill-buffer))))
+      (delete-directory dir t))))
+
+(ert-deftest zr-czkawka-test-revert-prefix-edits-args ()
+  "Reverting with a prefix argument edits the stored arguments."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))))
+    (let (scanned initial)
+      (cl-letf (((symbol-function 'zr-czkawka-dup--scan)
+                 (lambda (args dir buf) (setq scanned (list args dir buf))))
+                ((symbol-function 'read-string)
+                 (lambda (_prompt init &rest _)
+                   (setq initial init)
+                   "-d \"/a b\" -s size")))
+        (revert-buffer)
+        (should (equal (car scanned) '("-d" "/tmp")))
+        (let ((current-prefix-arg '(4)))
+          (revert-buffer))
+        (should (equal initial "-d /tmp"))
+        (should (equal (car scanned) '("-d" "/a b" "-s" "size")))
+        (should (equal (cadr scanned) tmp-dir))
+        (should (eq (nth 2 scanned) (current-buffer)))))))
+
+(ert-deftest zr-czkawka-test-run-critical-error ()
+  "A czkawka critical error with exit code 0 must go to the error callback."
+  (skip-unless (or (executable-find zr-czkawka-program)
+                   (file-executable-p zr-czkawka-program)))
+  (let (done result)
+    (zr-czkawka-run (list "dup" "-d" "/nonexistent/zr-czkawka-test")
+                    (lambda (_) (setq done t result 'success))
+                    (lambda (_code _buf) (setq done t result 'error)))
+    (with-timeout (30 (error "Timed out"))
+      (while (not done) (accept-process-output nil 0.1)))
+    (should (eq result 'error))))
 
 (provide 'zr-czkawka-test)
 
