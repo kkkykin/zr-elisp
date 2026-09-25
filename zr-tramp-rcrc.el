@@ -31,6 +31,10 @@
 ;; http://HOST:PORT/ and Basic credentials from auth-source, for example:
 ;;   machine 127.0.0.1 port 5572 login zr-rclone password SECRET
 ;;
+;; Like a TRAMP connection, an rcd that is registered or has answered a
+;; request also serves background (`non-essential') requests, such as
+;; fido and icomplete completion, until it cannot be reached.
+;;
 ;; Supports visiting and saving files, completion, Dired, creating and
 ;; deleting directories, and copying or renaming.  Within one rcd,
 ;; copies and renames run on the server (copyfile, movefile, sync/move);
@@ -58,6 +62,11 @@
 (defvar zr-tramp-rcrc--endpoints (make-hash-table :test #'equal)
   "Registered rcd endpoints, keyed by \"HOST#PORT\".
 Each value is a plist with :url, :user and :password.")
+
+(defvar zr-tramp-rcrc--connected (make-hash-table :test #'equal)
+  "\"HOST#PORT\" keys of the rcds that serve `non-essential' requests.
+An rcd is connected once it is registered or answers a request, until a
+request cannot reach it.")
 
 ;;; Rclone paths and file names
 
@@ -149,15 +158,21 @@ A trailing slash is preserved below the root of a file system."
 
 ;;; Endpoints and requests
 
+(defun zr-tramp-rcrc--key (host port)
+  "Return the \"HOST#PORT\" key of the rcd at HOST and PORT."
+  (format "%s#%s" (downcase host) port))
+
 (defun zr-tramp-rcrc-register-endpoint (url &optional user password)
   "Use rcd URL with USER and PASSWORD for file names of its HOST#PORT.
 URL may include https and a reverse proxy path.  Without USER and
 PASSWORD, credentials come from auth-source.  A later registration of
-the same HOST#PORT replaces the earlier one."
-  (let ((address (zr-tramp-rcrc--host-port url)))
-    (puthash (format "%s#%s" (downcase (car address)) (cdr address))
-             (list :url (concat (string-remove-suffix "/" url) "/")
-                   :user user :password password)
+the same HOST#PORT replaces the earlier one.  The rcd counts as
+connected, so background completion may contact it."
+  (let* ((address (zr-tramp-rcrc--host-port url))
+         (key (zr-tramp-rcrc--key (car address) (cdr address))))
+    (puthash key t zr-tramp-rcrc--connected)
+    (puthash key (list :url (concat (string-remove-suffix "/" url) "/")
+                       :user user :password password)
              zr-tramp-rcrc--endpoints)))
 
 (defun zr-tramp-rcrc-credentials (url &optional user password)
@@ -186,15 +201,14 @@ the same HOST#PORT replaces the earlier one."
   "Return the endpoint plist for TRAMP vector VEC."
   (let ((host (tramp-file-name-host vec))
         (port (format "%s" (tramp-file-name-port-or-default vec))))
-    (or (gethash (format "%s#%s" (downcase host) port) zr-tramp-rcrc--endpoints)
+    (or (gethash (zr-tramp-rcrc--key host port) zr-tramp-rcrc--endpoints)
         (list :url (format "http://%s:%s/"
                            (if (string-search ":" host) (concat "[" host "]") host)
                            port)))))
 
-(defun zr-tramp-rcrc--http (vec method path &optional headers data)
+(defun zr-tramp-rcrc--retrieve (vec method path headers data)
   "Send METHOD for PATH below VEC's rcd URL with HEADERS and byte DATA.
 Return (STATUS . BODY), where BODY holds the response bytes."
-  (when non-essential (throw 'zr-tramp-rcrc--non-essential nil))
   (let* ((endpoint (zr-tramp-rcrc--endpoint vec))
          (url (concat (plist-get endpoint :url) path))
          (user (or (tramp-file-name-user vec) (plist-get endpoint :user)))
@@ -219,24 +233,42 @@ Return (STATUS . BODY), where BODY holds the response bytes."
          (coding-system-for-write 'no-conversion)
          (deadline (+ (float-time) zr-tramp-rcrc-timeout))
          buffer done)
-    (unwind-protect
-        (progn
-          (setq buffer (url-retrieve url (lambda (_status) (setq done t)) nil t t))
-          (unless (buffer-live-p buffer)
-            (signal 'file-error (list "Cannot connect to rcd" url)))
-          (while (and (not done) (< (float-time) deadline))
-            (accept-process-output nil 0.05))
-          (unless done (signal 'file-error (list "rcd request timed out" url)))
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (unless (re-search-forward "\r?\n\r?\n" nil t)
-              (signal 'file-error (list "Incomplete rcd response" url)))
-            (cons (or url-http-response-status 0)
-                  (buffer-substring-no-properties (point) (point-max)))))
-      (when (buffer-live-p buffer)
-        (when-let* ((process (get-buffer-process buffer)))
-          (delete-process process))
-        (kill-buffer buffer)))))
+    ;; Timers and process output handled while waiting run in the caller's
+    ;; buffer.  Restore its point, which fido relies on while completing.
+    (save-excursion
+      (unwind-protect
+          (progn
+            (setq buffer (url-retrieve url (lambda (_status) (setq done t)) nil t t))
+            (unless (buffer-live-p buffer)
+              (signal 'file-error (list "Cannot connect to rcd" url)))
+            (while (and (not done) (< (float-time) deadline))
+              (accept-process-output nil 0.05))
+            (unless done (signal 'file-error (list "rcd request timed out" url)))
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (unless (re-search-forward "\r?\n\r?\n" nil t)
+                (signal 'file-error (list "Incomplete rcd response" url)))
+              (cons (or url-http-response-status 0)
+                    (buffer-substring-no-properties (point) (point-max)))))
+        (when (buffer-live-p buffer)
+          (when-let* ((process (get-buffer-process buffer)))
+            (delete-process process))
+          (kill-buffer buffer))))))
+
+(defun zr-tramp-rcrc--http (vec method path &optional headers data)
+  "Like `zr-tramp-rcrc--retrieve' for VEC, METHOD, PATH, HEADERS and DATA.
+A `non-essential' request, such as one of background completion, only
+goes to a connected rcd, as TRAMP then only reuses open connections."
+  (let ((key (zr-tramp-rcrc--key (tramp-file-name-host vec)
+                                  (tramp-file-name-port-or-default vec))))
+    (when (and non-essential (not (gethash key zr-tramp-rcrc--connected)))
+      (throw 'zr-tramp-rcrc--non-essential nil))
+    (condition-case err
+        (prog1 (zr-tramp-rcrc--retrieve vec method path headers data)
+          (puthash key t zr-tramp-rcrc--connected))
+      ;; Quits and input interrupting completion are not errors.
+      (error (remhash key zr-tramp-rcrc--connected)
+             (signal (car err) (cdr err))))))
 
 (defun zr-tramp-rcrc--result (method response)
   "Decode the RC METHOD RESPONSE, signaling a file error on failure."
@@ -703,8 +735,8 @@ DIRECTORY permits replacing an empty directory."
 (defun zr-tramp-rcrc-file-name-handler (operation &rest args)
   "Dispatch TRAMP OPERATION with ARGS to the rclone rc implementation."
   (save-match-data
-    ;; Background completion must not start synchronous requests or cache
-    ;; their absence; see `zr-tramp-rcrc--http'.
+    ;; Background completion must neither contact an rcd that is not
+    ;; connected nor cache the missing answer; see `zr-tramp-rcrc--http'.
     (catch 'zr-tramp-rcrc--non-essential
       (if-let* ((handler (alist-get operation zr-tramp-rcrc-file-name-handler-alist)))
           (apply handler args)

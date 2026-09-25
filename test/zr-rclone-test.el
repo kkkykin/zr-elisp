@@ -307,7 +307,10 @@
                    (let ((top (zr-rclone--file-name connection nil)))
                      (should (equal (zr-tramp-rcrc-rclone-path (concat directory initial))
                                     local))
-                     (should (member "fixture:/" (file-name-all-completions "fix" top)))
+                     ;; fido completes in the background, with `non-essential' bound.
+                     (zr-tramp-rcrc-clear-cache)
+                     (should (member "fixture:/" (let ((non-essential t))
+                                                   (file-name-all-completions "fix" top))))
                      (let ((current (file-name-as-directory (concat directory initial))))
                        (should (member "fixture-local/" (file-name-all-completions
                                                          "fix" current)))

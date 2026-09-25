@@ -52,6 +52,7 @@
 
 (ert-deftest zr-tramp-rcrc-endpoints-and-credentials ()
   (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
         (auth-sources nil))
     (should (equal (plist-get (zr-tramp-rcrc--endpoint
                                (tramp-dissect-file-name "/rcrc:Host#1234:/fx:/"))
@@ -66,6 +67,47 @@
     (should (equal (zr-tramp-rcrc-basic-header '("ü" . "p")) "Basic w7w6cA==")))
   (should (equal (zr-tramp-rcrc-object-url "http://h:1/" "fx:" "a b/%?#.mkv")
                  "http://h:1/%5Bfx%3A%5D/a%20b/%25%3F%23.mkv")))
+
+(ert-deftest zr-tramp-rcrc-background-requests-need-a-connected-rcd ()
+  (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+        (auth-sources nil)
+        (tramp-verbose 0)
+        (requests 0))
+    (cl-letf (((symbol-function 'url-retrieve) (lambda (&rest _) (cl-incf requests) nil)))
+      (cl-flet ((complete ()
+                  ;; fido and icomplete complete with `non-essential' bound.
+                  (let ((non-essential t))
+                    (file-name-all-completions "" "/rcrc:127.0.0.1#9:/"))))
+        (should-not (complete))
+        (should (= requests 0))
+        (zr-tramp-rcrc-register-endpoint "http://127.0.0.1:9/" "u" "p")
+        (should-error (complete) :type 'file-error)
+        ;; An rcd that cannot be reached is no longer contacted.
+        (should-not (complete))
+        (should (= requests 1))))))
+
+(ert-deftest zr-tramp-rcrc-requests-keep-the-callers-point ()
+  (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+        (auth-sources nil)
+        (vec (tramp-dissect-file-name "/rcrc:127.0.0.1#9:/fx:/")))
+    (cl-letf (((symbol-function 'url-retrieve)
+               (lambda (_url callback &rest _)
+                 (let ((response (generate-new-buffer " *zr-tramp-rcrc-test*")))
+                   (with-current-buffer response
+                     (setq-local url-http-response-status 200)
+                     (insert "HTTP/1.1 200 OK\r\n\r\n{\"ok\":1}"))
+                   ;; Timers run while the request waits, in the caller's buffer.
+                   (run-at-time 0 nil (lambda ()
+                                        (goto-char (point-min))
+                                        (with-current-buffer response
+                                          (funcall callback nil))))
+                   response))))
+      (with-temp-buffer
+        (insert "Current path: /rcrc:127.0.0.1#9:/fx:/")
+        (should (equal (zr-tramp-rcrc--call vec "rc/noop") '((ok . 1))))
+        (should (= (point) (point-max)))))))
 
 ;;; Integration
 
@@ -169,6 +211,20 @@
             (with-current-buffer buffer
               (should (string-search name (buffer-string))))
           (kill-buffer buffer))))))
+
+(ert-deftest zr-tramp-rcrc-real-background-completion-reuses-connected-rcds ()
+  (zr-tramp-rcrc-test--with-server
+    (make-directory (expand-file-name "dir" local))
+    (cl-flet ((complete ()
+                (let ((non-essential t)) (file-name-all-completions "d" remote))))
+      ;; The fixture rcd is registered.
+      (should (equal (complete) '("dir/")))
+      (zr-tramp-rcrc-clear-cache)
+      ;; Otherwise it first has to answer an essential request.
+      (let ((zr-tramp-rcrc--connected (make-hash-table :test #'equal)))
+        (should-not (complete))
+        (should (file-directory-p remote))
+        (should (equal (complete) '("dir/")))))))
 
 (ert-deftest zr-tramp-rcrc-real-visit-save-and-append ()
   (zr-tramp-rcrc-test--with-server
