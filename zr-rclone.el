@@ -10,20 +10,23 @@
 ;; HTTP and rclone rc send the same JSON requests; transfers are RC jobs.
 ;; core/command is a separate entry for manually entered rclone arguments.
 ;;
-;; File listings feed external consumers such as zr-mpv.  This package does
-;; not provide a file browser.  Open the current path with zr-tramp-webdav
-;; when ordinary Emacs file access or file management is needed.
+;; Current and target paths may be directories or files.  Paths are
+;; completed through zr-tramp-rcrc on the selected connection, which also
+;; opens the current path for ordinary Emacs file access and Dired.
+;;
+;; File lists feed the consumer selected from `zr-rclone-consumers', by
+;; default zr-mpv playback.  The prefix argument is passed on to it.
 
 ;;; Code:
 
 (require 'auth-source)
 (require 'cl-lib)
-(require 'crm)
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
 (require 'url)
 (require 'url-http)
+(require 'zr-tramp-rcrc)
 (defvar url-http-response-status)
 
 (defgroup zr-rclone nil
@@ -42,7 +45,7 @@
   "Initial RC endpoint, including any reverse proxy path."
   :type 'string)
 
-(defcustom zr-rclone-timeout 30
+(defcustom zr-rclone-timeout 60
   "Timeout in seconds for an individual RC request."
   :type 'number)
 
@@ -50,9 +53,10 @@
   "Seconds between updates of running jobs."
   :type 'number)
 
-(defcustom zr-rclone-rcd-arguments nil
+(defcustom zr-rclone-rcd-arguments '("--rc-serve")
   "Additional arguments for an owned local rcd.
-For example, (\"--rc-serve\") also enables HTTP access to remote objects."
+--rc-serve provides the object access used to read files through
+zr-tramp-rcrc and the RC HTTP media source."
   :type '(repeat string))
 
 (defcustom zr-rclone-password #'zr-rclone--new-password
@@ -68,21 +72,23 @@ core/command, whose subprocess does not inherit the daemon's CLI flags."
   :type '(choice (const nil) file))
 
 (defvar zr-rclone-url-history nil)
-(defvar zr-rclone-path-history nil)
 (defvar zr-rclone-command-history nil)
 (defvar zr-rclone-json-history nil)
 (defvar savehist-additional-variables)
 
 (with-eval-after-load 'savehist
-  (dolist (variable '(zr-rclone-url-history zr-rclone-path-history
-                      zr-rclone-command-history zr-rclone-json-history))
+  (dolist (variable '(zr-rclone-url-history zr-rclone-command-history
+                      zr-rclone-json-history))
     (add-to-list 'savehist-additional-variables variable)))
 
-(defcustom zr-rclone-file-list-function #'zr-rclone-play-files
-  "Function called by zr-rclone-send-file-list with FILES and CONNECTION.
-FILES is an ordered list of full rclone path strings, with directories
-excluded.  The default consumer converts them to URLs and starts `zr-mpv'."
-  :type 'function)
+(defcustom zr-rclone-consumers
+  '(("play" . zr-rclone-play-files)
+    ("copy URLs" . zr-rclone-copy-urls))
+  "Named consumers of file lists; each connection selects one.
+Each function is called with FILES, CONNECTION and the raw prefix ARG.
+FILES is an ordered list of full rclone paths, with directories excluded.
+The first entry is the default."
+  :type '(alist :key-type string :value-type function))
 
 (cl-defstruct (zr-rclone-connection (:constructor zr-rclone--make-connection))
   url (transport zr-rclone-transport) local-p user password
@@ -90,7 +96,7 @@ excluded.  The default consumer converts them to URLs and starts `zr-mpv'."
   connected methods version instance process jobs job-buffer timer mappings
   (status "Disconnected") current-path target-path dry-run
   call-options bisync-options mount-options webdav-options
-  list-recursive media-rc-serve)
+  list-recursive media-rc-serve consumer)
 
 (defvar zr-rclone--connections nil)
 (defvar zr-rclone--serial 0)
@@ -132,28 +138,9 @@ excluded.  The default consumer converts them to URLs and starts `zr-mpv'."
 
 (defun zr-rclone--credentials (connection)
   "Return (USER . PASSWORD) for CONNECTION, without prompting."
-  (let* ((parsed (url-generic-parse-url
-                  (zr-rclone-connection-url connection)))
-         (user (zr-rclone-connection-user connection))
-         (password (zr-rclone-connection-password connection)))
-    (if (and user password)
-        (cons user password)
-      (when-let* ((entry (car (auth-source-search
-                              :host (url-host parsed)
-                              :port (number-to-string (url-port parsed))
-                              :user (or user t) :require '(:user :secret)
-                              :max 1)))
-                  (secret (plist-get entry :secret)))
-        (cons (plist-get entry :user)
-              (if (functionp secret) (funcall secret) secret))))))
-
-(defun zr-rclone--basic-header (credentials)
-  "Build a Basic authorization header from CREDENTIALS."
-  (when credentials
-    (concat "Basic "
-            (base64-encode-string
-             (encode-coding-string
-              (concat (car credentials) ":" (cdr credentials)) 'utf-8) t))))
+  (zr-tramp-rcrc-credentials (zr-rclone-connection-url connection)
+                             (zr-rclone-connection-user connection)
+                             (zr-rclone-connection-password connection)))
 
 (defun zr-rclone--new-password ()
   "Generate a 64-character hexadecimal password using `random'."
@@ -191,7 +178,7 @@ Return a cancellation function.  ERROR is nil or a readable string."
                 (url-request-extra-headers
                  (list '("Content-Type" . "application/json")
                        (cons "Authorization"
-                             (or (zr-rclone--basic-header
+                             (or (zr-tramp-rcrc-basic-header
                                   (zr-rclone--credentials connection)) ""))))
                 (url-request-data
                  (encode-coding-string (zr-rclone--json params) 'utf-8))
@@ -321,36 +308,6 @@ Used for short interactive queries.  Transfers use background RC jobs."
 
 ;;; Rclone paths (no Emacs filesystem expansion)
 
-(defun zr-rclone--split-path (path)
-  "Split absolute rclone PATH into (ROOT . RELATIVE), or return nil.
-Preserve remote: versus remote:/ and support Windows drives, UNC
-shares, and quoted connection-string parameters."
-  (cond
-   ((string-prefix-p "\\\\" path)
-    (zr-rclone--split-path (replace-regexp-in-string "\\\\" "/" path t t)))
-   ((string-match "\\`\\([[:alpha:]]:\\)[/\\\\]" path)
-    (cons (concat (match-string 1 path) "/")
-          (replace-regexp-in-string "\\\\" "/" (substring path 3) t t)))
-   ((string-match "\\`//[^/]+/[^/]+\\(?:/\\|\\'\\)" path)
-    (let ((end (match-end 0)))
-      (cons (concat (string-remove-suffix "/" (substring path 0 end)) "/")
-            (substring path end))))
-   ((string-prefix-p "/" path) (cons "/" (substring path 1)))
-   (t
-    (let ((index (if (string-prefix-p ":" path) 1 0)) quote end stop)
-      (while (and (< index (length path)) (not end) (not stop))
-        (let ((char (aref path index)))
-          (cond
-           (quote (when (= char quote) (setq quote nil)))
-           ((memq char '(?\' ?\")) (setq quote char))
-           ((= char ?:) (setq end (1+ index)))
-           ((= char ?/) (setq stop t))))
-        (setq index (1+ index)))
-      (when end
-        (when (and (< end (length path)) (= (aref path end) ?/))
-          (setq end (1+ end)))
-        (cons (substring path 0 end) (substring path end)))))))
-
 (defun zr-rclone--join (base path)
   "Join rclone BASE and relative PATH without treating either as a file."
   (if (string-empty-p path) base
@@ -359,12 +316,12 @@ shares, and quoted connection-string parameters."
             path)))
 
 (defun zr-rclone--resolve-path (path &optional base)
-  "Resolve user-entered PATH relative to BASE using rclone path syntax."
+  "Resolve user-entered PATH relative to BASE using rclone path syntax.
+A trailing slash, which marks a directory, is preserved."
   (when (or (string-empty-p path) (string-match-p "\0" path))
     (user-error "An rclone path is required"))
-  (let* ((parts (or (zr-rclone--split-path path)
-                    (and base (zr-rclone--split-path
-                               (zr-rclone--join base path)))))
+  (let* ((parts (or (zr-tramp-rcrc-split path)
+                    (and base (zr-tramp-rcrc-split (zr-rclone--join base path)))))
          stack)
     (unless parts
       (user-error "Use remote:path or an absolute path on the rcd machine"))
@@ -372,19 +329,12 @@ shares, and quoted connection-string parameters."
       (cond ((equal part "."))
             ((equal part "..") (pop stack))
             (t (push part stack))))
-    (zr-rclone--join (car parts) (string-join (nreverse stack) "/"))))
-
-(defun zr-rclone--parent (path)
-  "Return the parent of absolute rclone PATH, or nil at its root."
-  (let* ((parts (zr-rclone--split-path path))
-         (relative (and parts (string-remove-suffix "/" (cdr parts))))
-         (slash (and relative (string-match "/[^/]*\\'" relative))))
-    (when (and relative (not (string-empty-p relative)))
-      (zr-rclone--join (car parts) (if slash (substring relative 0 slash) "")))))
+    (concat (zr-rclone--join (car parts) (string-join (reverse stack) "/"))
+            (when (and stack (string-suffix-p "/" path)) "/"))))
 
 (defun zr-rclone--basename (path)
   "Return the last component of rclone PATH."
-  (car (last (split-string (cdr (zr-rclone--split-path path)) "/" t))))
+  (car (last (split-string (cdr (zr-tramp-rcrc-split path)) "/" t))))
 
 (defun zr-rclone--relative-to (path root)
   "Return PATH relative to ROOT, or nil if it is outside ROOT."
@@ -413,152 +363,75 @@ shares, and quoted connection-string parameters."
              (not (assoc method (zr-rclone-connection-methods connection))))
     (user-error "This rclone does not support %s" method)))
 
-(defun zr-rclone--directory (&optional connection)
-  "Return CONNECTION's current directory, requiring a connected session."
+(defun zr-rclone--current (&optional connection)
+  "Return CONNECTION's current path, requiring a connected session."
   (or (zr-rclone-connection-current-path (zr-rclone--connected connection))
       (user-error "Set a current path first")))
+
+(defun zr-rclone--path-type (connection path)
+  "Return `dir' or `file' for rclone PATH on CONNECTION, or nil if missing."
+  (let* ((parts (or (zr-tramp-rcrc-split path)
+                    (user-error "Not an absolute rclone path: %s" path)))
+         (remote (string-remove-suffix "/" (cdr parts))))
+    (if (string-empty-p remote) 'dir
+      (zr-rclone--require-method connection "operations/stat")
+      (when-let* ((item (alist-get 'item (zr-rclone--call
+                                          connection "operations/stat"
+                                          (list (cons 'fs (car parts))
+                                                (cons 'remote remote))))))
+        (if (eq (alist-get 'IsDir item) t) 'dir 'file)))))
+
+(defun zr-rclone--current-directory (&optional connection)
+  "Return CONNECTION's current path, which must be an existing directory."
+  (let* ((connection (zr-rclone--connected connection))
+         (path (zr-rclone--current connection)))
+    (unless (eq (zr-rclone--path-type connection path) 'dir)
+      (user-error "Current path must be an existing directory: %s" path))
+    path))
 
 (defun zr-rclone--status (connection text)
   "Record TEXT as CONNECTION's status."
   (setf (zr-rclone-connection-status connection) text))
 
-(defun zr-rclone--list-entries (connection path)
-  "List PATH for completion, or return CONNECTION's roots when PATH is nil."
-  (if path
-      (mapcar (lambda (entry)
-                (list :name (alist-get 'Name entry)
-                      :directory (eq (alist-get 'IsDir entry) t)))
-              (alist-get 'list (zr-rclone--call
-                               connection "operations/list"
-                               (list (cons 'fs path) '(remote . "")
-                                     '(opt . ((noMimeType . t)))))))
-    (let* ((remotes (alist-get 'remotes
-                               (zr-rclone--call connection "config/listremotes")))
-           (disks (if (assoc "core/disks" (zr-rclone-connection-methods connection))
-                      (alist-get 'disks (zr-rclone--call connection "core/disks"))
-                    (if (equal (alist-get 'os (zr-rclone-connection-version connection))
-                               "windows") '("C:/") '("/")))))
-      (mapcar (lambda (path) (list :path path :name path :directory t))
-              (delete-dups (append (mapcar (lambda (name) (concat name ":")) remotes)
-                                   disks nil))))))
+(defun zr-rclone--file-name (connection path)
+  "Return the zr-tramp-rcrc file name of rclone PATH on CONNECTION.
+PATH nil names the top level.  Register the connection's URL and
+credentials so that the name reaches this rcd."
+  (let ((url (zr-rclone-connection-url connection)))
+    (zr-tramp-rcrc-register-endpoint url (zr-rclone-connection-user connection)
+                                     (zr-rclone-connection-password connection))
+    (zr-tramp-rcrc-file-name url path)))
 
-(defun zr-rclone--path-completions (connection input base directories-only)
-  "Complete INPUT relative to BASE on CONNECTION.
-Offer roots alongside relative entries for empty INPUT or a bare name.
-When DIRECTORIES-ONLY is non-nil, omit files.  No TRAMP access is used."
-  (cl-flet ((roots ()
-              (condition-case nil
-                  (mapcar (lambda (entry) (plist-get entry :path))
-                          (zr-rclone--list-entries connection nil))
-                (error nil))))
-    (condition-case nil
-        (let* ((absolute (zr-rclone--resolve-path (if (string-empty-p input) "." input)
-                                                 base))
-               (trailing (or (string-empty-p input) (string-suffix-p "/" input)
-                             (string-suffix-p ":" input)))
-               (directory (if trailing absolute (zr-rclone--parent absolute)))
-               (leaf (and (not trailing) (zr-rclone--basename absolute)))
-               (typed-prefix (if trailing input
-                               (substring input 0 (max 0 (- (length input)
-                                                            (length leaf)))))))
-          (if directory
-              (append
-               (mapcar
-                (lambda (entry)
-                  (concat typed-prefix (plist-get entry :name)
-                          (when (plist-get entry :directory) "/")))
-                (cl-remove-if-not
-                 (lambda (entry) (or (not directories-only)
-                                     (plist-get entry :directory)))
-                 (zr-rclone--list-entries connection directory)))
-               (unless (string-match-p "[:/\\\\]" input) (roots)))
-            (roots)))
-      (error (roots)))))
-
-(defun zr-rclone--path-completion-prefix (input)
-  "Return the root and directory prefix already entered in INPUT."
-  (let* ((parts (zr-rclone--split-path input))
-         (relative (if parts (cdr parts) input))
-         (slash (string-match "/[^/]*\\'" relative))
-         (end (+ (length (car parts)) (if slash (1+ slash) 0))))
-    (substring input 0 (min end (length input)))))
-
-(defun zr-rclone--path-completion-table (connection base directories-only)
-  "Return a cached, component-wise RC completion table for CONNECTION.
-Resolve relative paths against BASE and omit files if DIRECTORIES-ONLY.
-Use a separate category because these paths belong to the rcd machine."
-  (let ((cache (make-hash-table :test #'equal)))
-    (lambda (input predicate action)
-      (let ((prefix (zr-rclone--path-completion-prefix input)))
-        (cond
-         ((eq action 'metadata) '(metadata (category . zr-rclone-path)))
-         ((eq (car-safe action) 'boundaries)
-          `(boundaries ,(length prefix) . ,(string-match "/" (cdr action))))
-         (t
-          (let ((candidates (gethash input cache 'missing)))
-            (when (eq candidates 'missing)
-              (setq candidates
-                    (puthash input
-                             (zr-rclone--path-completions
-                              connection input base directories-only) cache)))
-            (completion-table-with-context
-             prefix
-             (cl-loop for path in candidates
-                      when (string-prefix-p prefix path)
-                      collect (substring path (length prefix)))
-             (substring input (length prefix)) predicate action))))))))
-
-(defun zr-rclone--path-enter ()
-  "Insert the selected path, continuing completion when it is a directory.
-Use `exit-minibuffer' on M-j to accept the current directory or a new path."
-  (interactive)
-  (let ((before (minibuffer-contents-no-properties)))
-    (when (car (completion-all-sorted-completions))
-      (minibuffer-force-complete nil nil 'dont-cycle))
-    (let ((input (minibuffer-contents-no-properties)))
-      (when (or (equal input before)
-                (< (car (completion-boundaries
-                         input minibuffer-completion-table
-                         minibuffer-completion-predicate ""))
-                   (length input)))
-        (exit-minibuffer)))))
-
-(defun zr-rclone--read-path (prompt initial &optional directories-only)
-  "Read an rclone path with RC completion using PROMPT and INITIAL.
-With icomplete or Fido, RET enters directories and M-j accepts the input."
+(defun zr-rclone--read-path (prompt initial)
+  "Read an rclone path on the selected connection using PROMPT and INITIAL.
+Complete through zr-tramp-rcrc; a trailing slash marks a directory."
   (let* ((connection (zr-rclone--connected))
-         (base (zr-rclone-connection-current-path connection))
-         (table (zr-rclone--path-completion-table connection base directories-only))
-         (input
-          (minibuffer-with-setup-hook
-              (:append
-               (lambda ()
-                 (when (bound-and-true-p icomplete-mode)
-                   (use-local-map (copy-keymap (current-local-map)))
-                   (local-set-key (kbd "RET") #'zr-rclone--path-enter)
-                   (local-set-key (kbd "M-j") #'exit-minibuffer))))
-            (completing-read prompt table nil nil initial
-                             'zr-rclone-path-history)))
-         (path (zr-rclone--resolve-path input base)))
-    (if (and (not directories-only) (string-suffix-p "/" input)
-             (not (string-suffix-p "/" path)))
-        (concat path "/") path)))
+         (start (or (and initial (ignore-errors (zr-rclone--file-name connection initial)))
+                    (zr-rclone--file-name connection nil)))
+         (directory (file-name-directory start))
+         (file (expand-file-name
+                (read-file-name prompt directory nil nil (file-name-nondirectory start))
+                directory)))
+    (or (and (equal (file-remote-p file) (file-remote-p start))
+             (zr-tramp-rcrc-rclone-path file))
+        (user-error "Choose a remote or an absolute path on this rcd"))))
 
 (defun zr-rclone-cd (path)
-  "Set the current rclone directory to PATH without listing it."
+  "Set the current rclone path to PATH, a directory or file, without listing it."
   (interactive
    (list (zr-rclone--read-path
-          "Current path: " (zr-rclone-connection-current-path (zr-rclone--context)) t)))
+          "Current path: " (zr-rclone-connection-current-path (zr-rclone--context)))))
   (let ((connection (zr-rclone--context)))
     (setf (zr-rclone-connection-current-path connection)
           (zr-rclone--resolve-path path (zr-rclone-connection-current-path connection)))))
 
 (defun zr-rclone-set-target (path)
-  "Set the target rclone directory to PATH."
+  "Set the target rclone path to PATH, a directory or file.
+A trailing slash makes a missing target a directory for file transfers."
   (interactive
    (list (zr-rclone--read-path
           "Target path: " (or (zr-rclone-connection-target-path (zr-rclone--context))
-                             (zr-rclone-connection-current-path (zr-rclone--context))) t)))
+                             (zr-rclone-connection-current-path (zr-rclone--context))))))
   (let ((connection (zr-rclone--context)))
     (setf (zr-rclone-connection-target-path connection)
           (zr-rclone--resolve-path path (zr-rclone-connection-current-path connection)))))
@@ -572,6 +445,12 @@ With icomplete or Fido, RET enters directories and M-j accepts the input."
       (user-error "Set current and target paths first"))
     (cl-rotatef (zr-rclone-connection-current-path connection)
                 (zr-rclone-connection-target-path connection))))
+
+(defun zr-rclone-open ()
+  "Visit the current path through zr-tramp-rcrc; a directory opens in Dired."
+  (interactive)
+  (let ((connection (zr-rclone--connected)))
+    (find-file (zr-rclone--file-name connection (zr-rclone--current connection)))))
 
 ;;; Connection lifecycle
 
@@ -602,7 +481,6 @@ With icomplete or Fido, RET enters directories and M-j accepts the input."
               (setf (plist-get job :finished) t
                     (plist-get job :state) "stale"
                     (plist-get job :error) "rclone restarted")))
-          (mapc #'zr-rclone--forget-webdav (zr-rclone-connection-mappings connection))
           (setf (zr-rclone-connection-mappings connection) nil))
         (setf (zr-rclone-connection-version connection) version
               (zr-rclone-connection-methods connection)
@@ -725,7 +603,6 @@ The password is determined by `zr-rclone-password'."
                (when (zr-rclone-connection-timer connection)
                  (cancel-timer (zr-rclone-connection-timer connection))
                  (setf (zr-rclone-connection-timer connection) nil))
-               (mapc #'zr-rclone--forget-webdav (zr-rclone-connection-mappings connection))
                (setf (zr-rclone-connection-mappings connection) nil)
                (zr-rclone--status connection (concat "rcd: " (string-trim event)))))))
     (setq zr-rclone--connection connection)
@@ -754,7 +631,6 @@ The password is determined by `zr-rclone-password'."
           (accept-process-output process 0.05)))
       (when (process-live-p process) (delete-process process))
       (zr-rclone-disconnect)
-      (mapc #'zr-rclone--forget-webdav (zr-rclone-connection-mappings connection))
       (setf (zr-rclone-connection-mappings connection) nil))))
 
 ;;; Background jobs
@@ -969,78 +845,109 @@ RAW omits native file-operation options, for services and core/command."
     (zr-rclone--show-result (format "job %s" (plist-get job :group))
                             (plist-get job :output) (plist-get job :error))))
 
-;;; Directory operations
+;;; Transfers
 
 (defun zr-rclone--target ()
-  "Return the selected session's target directory, prompting if unset."
+  "Return the selected session's target path, prompting if unset."
   (or (zr-rclone-connection-target-path (zr-rclone--context))
       (progn (call-interactively #'zr-rclone-set-target)
              (zr-rclone-connection-target-path (zr-rclone--context)))))
 
-(defun zr-rclone--path-pair ()
-  "Return non-overlapping current and target directories."
-  (let ((source (zr-rclone--directory)) (target (zr-rclone--target)))
-    (when (or (zr-rclone--relative-to source target)
-              (zr-rclone--relative-to target source))
-      (user-error "Current and target paths must be different and non-overlapping"))
-    (cons source target)))
+(defun zr-rclone--check-disjoint (source target)
+  "Require directory paths SOURCE and TARGET not to contain each other."
+  (when (or (zr-rclone--relative-to source target)
+            (zr-rclone--relative-to target source))
+    (user-error "Current and target paths must be different and non-overlapping")))
+
+(defun zr-rclone--file-destination (connection source target)
+  "Return where file SOURCE goes when transferred to TARGET on CONNECTION.
+An existing directory, or a TARGET ending in a slash, receives SOURCE's
+name; otherwise TARGET names the new file, like copyto."
+  (if (or (string-suffix-p "/" target) (string-suffix-p ":" target)
+          (eq (zr-rclone--path-type connection target) 'dir))
+      (zr-rclone--join target (zr-rclone--basename source))
+    target))
 
 (defun zr-rclone--transfer (method)
-  "Run directory METHOD from the current path to the target path."
+  "Copy, move or sync (METHOD) the current path to the target path.
+A directory transfers its contents through sync/METHOD.  A file is
+copied or moved by itself; syncing a file copies it."
   (let* ((connection (zr-rclone--connected))
-         (paths (zr-rclone--path-pair))
+         (source (zr-rclone--current connection))
+         (target (zr-rclone--target))
+         (dry-run (zr-rclone-connection-dry-run connection))
          (move (equal method "move")))
-    (when (or (not move) (zr-rclone-connection-dry-run connection)
-              (yes-or-no-p (format "Move contents of %s → %s? " (car paths) (cdr paths))))
-      (zr-rclone--submit
-       (concat "sync/" method)
-       (append (list (cons 'srcFs (car paths)) (cons 'dstFs (cdr paths))
-                     '(createEmptySrcDirs . t))
-               (when move '((deleteEmptySrcDirs . t))))
-       (format "%s %s → %s" method (car paths) (cdr paths))))))
+    (pcase (zr-rclone--path-type connection source)
+      ('file
+       (let* ((destination (zr-rclone--file-destination connection source target))
+              (from (zr-tramp-rcrc-split source))
+              (to (zr-tramp-rcrc-split destination)))
+         (when (equal source destination)
+           (user-error "Current and target paths name the same file"))
+         (when (or (not move) dry-run
+                   (yes-or-no-p (format "Move %s → %s? " source destination)))
+           (zr-rclone--submit
+            (if move "operations/movefile" "operations/copyfile")
+            (list (cons 'srcFs (car from)) (cons 'srcRemote (cdr from))
+                  (cons 'dstFs (car to)) (cons 'dstRemote (cdr to)))
+            (format "%s %s → %s" (if move "move" "copy") source destination)))))
+      ('dir
+       (zr-rclone--check-disjoint source target)
+       (when (eq (zr-rclone--path-type connection target) 'file)
+         (user-error "A directory's contents need a directory target"))
+       (when (or (equal method "copy") dry-run
+                 (yes-or-no-p (if move
+                                  (format "Move contents of %s → %s? " source target)
+                                (format "Sync %s → %s, deleting extra target files? "
+                                        source target))))
+         (zr-rclone--submit
+          (concat "sync/" method)
+          (append (list (cons 'srcFs source) (cons 'dstFs target)
+                        '(createEmptySrcDirs . t))
+                  (when move '((deleteEmptySrcDirs . t))))
+          (format "%s %s → %s" method source target))))
+      (_ (user-error "Current path does not exist: %s" source)))))
 
 (defun zr-rclone-copy ()
-  "Copy current directory contents to the target, preserving extra target files."
+  "Copy the current file, or directory contents, to the target.
+Extra target files are preserved."
   (interactive)
   (zr-rclone--transfer "copy"))
 
 (defun zr-rclone-move ()
-  "Move current directory contents to the target."
+  "Move the current file, or directory contents, to the target."
   (interactive)
   (zr-rclone--transfer "move"))
 
 (defun zr-rclone-sync ()
-  "Sync current directory contents to the target, deleting extra target files."
+  "Sync the current directory to the target, deleting extra target files.
+A current file is copied instead."
   (interactive)
-  (let ((paths (zr-rclone--path-pair)))
-    (when (or (zr-rclone-connection-dry-run (zr-rclone--context))
-              (yes-or-no-p (format "Sync %s → %s, deleting extra target files? "
-                                   (car paths) (cdr paths))))
-      (zr-rclone--submit "sync/sync"
-                        (list (cons 'srcFs (car paths)) (cons 'dstFs (cdr paths))
-                              '(createEmptySrcDirs . t))
-                        (format "sync %s → %s" (car paths) (cdr paths))))))
+  (zr-rclone--transfer "sync"))
 
 (defun zr-rclone-bisync (&optional resync)
-  "Bidirectionally sync current and target paths.
+  "Bidirectionally sync current and target directories.
 With prefix RESYNC, explicitly initialize or rebuild the bisync state."
   (interactive "P")
-  (let* ((connection (zr-rclone--context))
-         (paths (zr-rclone--path-pair))
+  (let* ((connection (zr-rclone--connected))
+         (source (zr-rclone--current-directory connection))
+         (target (zr-rclone--target))
          (dry-run (zr-rclone-connection-dry-run connection)))
+    (zr-rclone--check-disjoint source target)
+    (when (eq (zr-rclone--path-type connection target) 'file)
+      (user-error "Bisync needs a directory target"))
     (when (or dry-run
               (yes-or-no-p (format "%s %s ↔ %s? "
                                    (if resync "Initialize/resync" "Bisync")
-                                   (car paths) (cdr paths))))
+                                   source target)))
       (zr-rclone--submit
        "sync/bisync"
        (zr-rclone--merge
         (zr-rclone-connection-bisync-options connection)
-        (list (cons 'path1 (car paths)) (cons 'path2 (cdr paths))
+        (list (cons 'path1 source) (cons 'path2 target)
               (cons 'resync (if resync t :false))
               (cons 'dryRun (if dry-run t :false))))
-       (format "bisync%s %s ↔ %s" (if resync " --resync" "")
-               (car paths) (cdr paths))))))
+       (format "bisync%s %s ↔ %s" (if resync " --resync" "") source target)))))
 
 (defun zr-rclone-bisync-resync ()
   "Explicitly initialize or rebuild this bisync pair."
@@ -1116,10 +1023,37 @@ No shell is invoked.  Reject unquoted shell operators and incomplete quoting."
     "settier" "size" "sync" "touch" "tree" "version")
   "Completion candidates for temporary CLI commands.")
 
+(defun zr-rclone--command-path-completions (connection input)
+  "Complete rclone path INPUT for a temporary command on CONNECTION.
+Relative input is completed in the current path; a bare name also
+completes remote names."
+  (condition-case nil
+      (let* ((end (cond ((string-match "/[^/]*\\'" input) (1+ (match-beginning 0)))
+                        ((string-match "\\`[^:/]+:" input) (match-end 0))
+                        (t 0)))
+             (prefix (substring input 0 end))
+             (leaf (substring input end))
+             (base (zr-rclone-connection-current-path connection))
+             (directory (if (string-empty-p prefix) base
+                          (zr-rclone--resolve-path prefix base)))
+             (top (zr-rclone--file-name connection nil))
+             (listing (when directory
+                        (file-name-as-directory (zr-rclone--file-name connection directory)))))
+        (append
+         (cl-loop for name in (and listing (file-name-all-completions leaf listing))
+                  ;; The top level also lists remotes, which are not below "/".
+                  unless (or (member name '("./" "../"))
+                             (and (equal listing top) (string-search ":" name)))
+                  collect (concat prefix name))
+         (when (string-empty-p prefix)
+           (cl-loop for name in (file-name-all-completions leaf top)
+                    when (string-suffix-p ":/" name)
+                    collect (string-remove-suffix "/" name)))))
+    (error nil)))
+
 (defun zr-rclone--read-command ()
   "Read a temporary rclone command with command and path completion."
-  (let* ((connection (zr-rclone--connected))
-        (base (zr-rclone-connection-current-path connection)))
+  (let ((connection (zr-rclone--connected)))
     (minibuffer-with-setup-hook
         (lambda ()
           (use-local-map (copy-keymap (current-local-map)))
@@ -1135,7 +1069,7 @@ No shell is invoked.  Reject unquoted shell operators and incomplete quoting."
                       (if (= start (minibuffer-prompt-end)) zr-rclone--commands
                         (completion-table-dynamic
                          (lambda (input)
-                           (zr-rclone--path-completions connection input base nil))))
+                           (zr-rclone--command-path-completions connection input))))
                       :exclusive 'no)))))
           (local-set-key (kbd "TAB") #'completion-at-point))
       (read-string "rclone command (on rcd machine): "
@@ -1183,10 +1117,10 @@ The output is retained in the jobs table, including command failures."
                                 (zr-rclone-connection-mount-options connection)))))
 
 (defun zr-rclone-mount ()
-  "Mount the current path on the rcd machine."
+  "Mount the current directory on the rcd machine."
   (interactive)
   (let* ((connection (zr-rclone--connected))
-         (source (zr-rclone--directory))
+         (source (zr-rclone--current-directory connection))
          (default-directory temporary-file-directory)
          (point (if (zr-rclone-connection-local-p connection)
                     (read-directory-name "Local mount point: ")
@@ -1250,7 +1184,7 @@ The output is retained in the jobs table, including command failures."
 The URL must be reachable from Emacs, including any proxy path."
   (interactive)
   (let* ((connection (zr-rclone--connected))
-         (root (zr-rclone--directory))
+         (root (zr-rclone--current-directory connection))
          (url (zr-rclone--normalize-url
                (read-string "WebDAV URL serving current path: ")))
          (user (read-string "WebDAV user (empty uses auth-source): ")))
@@ -1263,7 +1197,7 @@ The URL must be reachable from Emacs, including any proxy path."
   "Discover a directly configured WebDAV backend for PATH on CONNECTION.
 Aliases, crypt wrappers and backend-specific authentication are left
 to explicit mappings or rclone's own WebDAV server."
-  (let* ((parts (zr-rclone--split-path path))
+  (let* ((parts (zr-tramp-rcrc-split path))
          (root (car parts))
          (name (and root (string-match "\\`\\([^/:,]+\\):\\'" root)
                     (match-string 1 root))))
@@ -1296,7 +1230,7 @@ Local servers use an automatically assigned port.
 For remote servers, ask separately for the listening and accessible addresses."
   (interactive)
   (let* ((connection (zr-rclone--connected))
-         (root (zr-rclone--directory))
+         (root (zr-rclone--current-directory connection))
          (local (zr-rclone-connection-local-p connection))
          (address (if local "127.0.0.1:0"
                     (read-string "WebDAV listen address on rcd machine: "
@@ -1365,116 +1299,25 @@ For remote servers, ask separately for the listening and accessible addresses."
     (unless choices (user-error "No running WebDAV servers"))
     (let ((id (cdr (assoc (completing-read "Stop WebDAV: " choices nil t) choices))))
       (zr-rclone--call connection "serve/stop" (list (cons 'id id)))
-      (dolist (mapping (zr-rclone-connection-mappings connection))
-        (when (equal (plist-get mapping :id) id) (zr-rclone--forget-webdav mapping)))
       (setf (zr-rclone-connection-mappings connection)
             (cl-remove id (zr-rclone-connection-mappings connection)
                        :test #'equal :key (lambda (mapping) (plist-get mapping :id))))
       (message "Stopped WebDAV %s" id))))
 
-(declare-function tramp-make-tramp-file-name "tramp")
-(declare-function tramp-dissect-file-name "tramp")
-(declare-function tramp-file-name-method "tramp")
-(declare-function tramp-file-name-user "tramp")
-(declare-function tramp-file-name-host "tramp")
-(declare-function tramp-file-name-port "tramp")
-(declare-function tramp-file-name-unquote-localname "tramp")
-(defvar zr-tramp-webdav-extra-headers)
-
-(defun zr-rclone--webdav-name (url user)
-  "Convert URL and USER to a zr-tramp-webdav file name."
-  (require 'tramp)
-  (let ((parsed (url-generic-parse-url url)))
-    (tramp-make-tramp-file-name
-     (if (equal (url-type parsed) "https") "webdavs" "webdav")
-     user nil (url-host parsed) (number-to-string (url-port parsed))
-     (decode-coding-string (url-unhex-string (url-filename parsed)) 'utf-8))))
-
-(defun zr-rclone-open-webdav ()
-  "Open the current directory through zr-tramp-webdav for file management."
-  (interactive)
-  (let* ((connection (zr-rclone--connected))
-         (path (zr-rclone--directory connection))
-         (mapping (zr-rclone--mapping connection path))
-         (credentials (zr-rclone--mapping-credentials mapping))
-         (name (zr-rclone--webdav-name
-                (zr-rclone--mapping-url mapping path)
-                (or (car credentials) (plist-get mapping :user)))))
-    (unless (require 'zr-tramp-webdav nil t)
-      (user-error "zr-tramp-webdav is not available on load-path"))
-    (when credentials
-      (zr-rclone--install-webdav-credentials mapping credentials))
-    (find-file (file-name-as-directory name))))
-
-(defvar zr-rclone--webdav-auth nil
-  "Managed WebDAV credentials scoped by origin, path root, and user.")
-(defvar zr-rclone--previous-webdav-headers nil)
-
-(defun zr-rclone--webdav-headers (file)
-  "Supply managed authentication for FILE, preserving existing headers."
-  (let* ((vec (tramp-dissect-file-name file))
-         (secure (equal (tramp-file-name-method vec) "webdavs"))
-         (origin (list (if secure "https" "http")
-                       (downcase (tramp-file-name-host vec))
-                       (if (tramp-file-name-port vec)
-                           (string-to-number (tramp-file-name-port vec))
-                         (if secure 443 80))))
-         (path (tramp-file-name-unquote-localname vec))
-         (match (cl-find-if
-                 (lambda (entry)
-                   (and (equal origin (plist-get entry :origin))
-                        (equal (tramp-file-name-user vec) (plist-get entry :user))
-                        (or (equal path (string-remove-suffix "/" (plist-get entry :root)))
-                            (string-prefix-p (plist-get entry :root) path))))
-                 zr-rclone--webdav-auth))
-         (previous (if (functionp zr-rclone--previous-webdav-headers)
-                       (funcall zr-rclone--previous-webdav-headers file)
-                     zr-rclone--previous-webdav-headers)))
-    (if match
-        (cons (cons "Authorization" (plist-get match :header))
-              (cl-remove "Authorization" previous :key #'car :test #'string-equal-ignore-case))
-      previous)))
-
-(defun zr-rclone--install-webdav-credentials (mapping credentials)
-  "Make MAPPING's CREDENTIALS available to the existing WebDAV handler."
-  (let* ((parsed (url-generic-parse-url (plist-get mapping :url)))
-         (root (decode-coding-string (url-unhex-string (url-filename parsed)) 'utf-8))
-         (origin (zr-rclone--origin (plist-get mapping :url))))
-    (push (list :origin origin :root root :user (car credentials)
-                :header (zr-rclone--basic-header credentials))
-          zr-rclone--webdav-auth)
-    (setq zr-rclone--webdav-auth
-          (sort zr-rclone--webdav-auth
-                (lambda (a b) (> (length (plist-get a :root))
-                                 (length (plist-get b :root)))))))
-  (unless (eq zr-tramp-webdav-extra-headers #'zr-rclone--webdav-headers)
-    (setq zr-rclone--previous-webdav-headers zr-tramp-webdav-extra-headers
-          zr-tramp-webdav-extra-headers #'zr-rclone--webdav-headers)))
-
-(defun zr-rclone--forget-webdav (mapping)
-  "Forget cached credentials for MAPPING's URL root."
-  (let* ((parsed (url-generic-parse-url (plist-get mapping :url)))
-         (root (decode-coding-string (url-unhex-string (url-filename parsed)) 'utf-8))
-         (origin (zr-rclone--origin (plist-get mapping :url))))
-    (setq zr-rclone--webdav-auth
-          (cl-remove-if (lambda (entry)
-                          (and (equal (plist-get entry :origin) origin)
-                               (equal (plist-get entry :root) root)))
-                        zr-rclone--webdav-auth))))
-
 ;;; Playback
 
 (declare-function zr-mpv-play "zr-mpv" (files &optional args backend headers))
+(declare-function zr-mpv-read-arguments "zr-mpv" (&optional prompt initial))
+(defvar zr-mpv-prompt-arguments)
 
 (defun zr-rclone--media (connection path rc-serve)
   "Return (URL . CREDENTIALS) for full rclone PATH on CONNECTION.
 RC-SERVE uses HTTP object serving on the RC port instead of WebDAV."
   (if rc-serve
-      (let ((parts (zr-rclone--split-path path)))
-        (unless parts (user-error "A full rclone path is required"))
-        (cons (concat (zr-rclone-connection-url connection)
-                      (url-hexify-string (format "[%s]" (car parts)))
-                      "/" (zr-rclone--encode-path (cdr parts)))
+      (let ((parts (or (zr-tramp-rcrc-split path)
+                       (user-error "A full rclone path is required"))))
+        (cons (zr-tramp-rcrc-object-url (zr-rclone-connection-url connection)
+                                        (car parts) (cdr parts))
               (zr-rclone--credentials connection)))
     (let ((mapping (zr-rclone--mapping connection path)))
       (cons (zr-rclone--mapping-url mapping path)
@@ -1485,9 +1328,9 @@ RC-SERVE uses HTTP object serving on the RC port instead of WebDAV."
   (let ((parsed (url-generic-parse-url url)))
     (list (url-type parsed) (downcase (url-host parsed)) (url-port parsed))))
 
-(defun zr-rclone--launch-mpv (media)
+(defun zr-rclone--launch-mpv (media &optional args)
   "Play MEDIA URLs through `zr-mpv' with HTTP Basic authentication.
-MEDIA is a list of (URL . CREDENTIALS) pairs."
+MEDIA is a list of (URL . CREDENTIALS) pairs; ARGS are extra mpv arguments."
   (unless media (user-error "No files to play"))
   (unless (require 'zr-mpv nil t)
     (user-error "zr-mpv is not available on load-path"))
@@ -1501,10 +1344,10 @@ MEDIA is a list of (URL . CREDENTIALS) pairs."
     (let ((urls (mapcar #'car media))
           (headers (when credentials
                      (list (cons "Authorization"
-                                 (zr-rclone--basic-header credentials))))))
-      (zr-mpv-play urls nil nil headers))))
+                                 (zr-tramp-rcrc-basic-header credentials))))))
+      (zr-mpv-play urls args nil headers))))
 
-;;; File lists for external consumers
+;;; File lists for consumers
 
 (defun zr-rclone-toggle-recursive ()
   "Toggle recursive file listing for the selected connection."
@@ -1521,54 +1364,56 @@ MEDIA is a list of (URL . CREDENTIALS) pairs."
           (not (zr-rclone-connection-media-rc-serve connection)))))
 
 (defun zr-rclone-list-files (&optional connection)
-  "Return sorted full rclone file paths from CONNECTION's current directory.
-Honor the session's recursion setting and per-call filters.  No buffer is
-created.  Directory entries are omitted."
+  "Return sorted full rclone file paths for CONNECTION's current path.
+A file yields itself.  A directory is listed honoring the session's
+recursion setting and per-call filters, omitting directory entries.
+No buffer is created."
   (let* ((connection (zr-rclone--connected connection))
-         (path (zr-rclone--directory connection))
-         (result
-          (zr-rclone--call
-           connection "operations/list"
-           (zr-rclone--operation-params
-            (list (cons 'fs path) '(remote . "")
-                  (cons 'opt
-                        (list '(filesOnly . t) '(noMimeType . t)
-                              (cons 'recurse
-                                    (if (zr-rclone-connection-list-recursive connection)
-                                        t :false)))))
-            connection))))
-    (sort (mapcar (lambda (entry) (zr-rclone--join path (alist-get 'Path entry)))
-                  (cl-remove-if (lambda (entry) (eq (alist-get 'IsDir entry) t))
-                                (alist-get 'list result)))
-          #'string-lessp)))
+         (path (zr-rclone--current connection)))
+    (pcase (zr-rclone--path-type connection path)
+      ('file (list path))
+      ('dir
+       (let ((result
+              (zr-rclone--call
+               connection "operations/list"
+               (zr-rclone--operation-params
+                (list (cons 'fs path) '(remote . "")
+                      (cons 'opt
+                            (list '(filesOnly . t) '(noMimeType . t)
+                                  (cons 'recurse
+                                        (if (zr-rclone-connection-list-recursive connection)
+                                            t :false)))))
+                connection))))
+         (sort (mapcar (lambda (entry) (zr-rclone--join path (alist-get 'Path entry)))
+                       (cl-remove-if (lambda (entry) (eq (alist-get 'IsDir entry) t))
+                                     (alist-get 'list result)))
+               #'string-lessp)))
+      (_ (user-error "Current path does not exist: %s" path)))))
 
-(defun zr-rclone--consumer-files (connection select)
-  "Get CONNECTION's file list, optionally prompting to SELECT a subset."
-  (let ((files (zr-rclone-list-files connection)))
-    (unless files (user-error "No files matched the current path and filters"))
-    (if (not select) files
-      ;; Display escaped names; match the original paths instead of decoding
-      ;; text entered in the minibuffer.  This also handles commas/newlines.
-      (let* ((root (zr-rclone--directory connection))
-             (print-escape-newlines t)
-             (choices (cl-loop for file in files for index from 1
-                               collect (cons (format "%d %S" index
-                                                     (zr-rclone--relative-to file root))
-                                             file)))
-             (crm-separator "\n")
-             (selected (completing-read-multiple
-                        "Files (TAB completes; C-q C-j separates): " choices nil t))
-             (paths (mapcar (lambda (choice) (cdr (assoc choice choices))) selected)))
-        (unless paths (user-error "No files selected"))
-        (cl-remove-if-not (lambda (file) (member file paths)) files)))))
+(defun zr-rclone--consumer (connection)
+  "Return CONNECTION's selected consumer as (NAME . FUNCTION)."
+  (or (assoc (zr-rclone-connection-consumer connection) zr-rclone-consumers)
+      (car zr-rclone-consumers)
+      (user-error "zr-rclone-consumers is empty")))
 
-(defun zr-rclone-send-file-list (&optional select)
-  "Send matching file paths to zr-rclone-file-list-function.
-With prefix SELECT, choose a subset using minibuffer completion."
+(defun zr-rclone-select-consumer ()
+  "Choose the consumer that receives the selected connection's file lists."
+  (interactive)
+  (let ((connection (zr-rclone--context)))
+    (setf (zr-rclone-connection-consumer connection)
+          (completing-read "Consumer: " zr-rclone-consumers nil t nil nil
+                           (car (zr-rclone--consumer connection))))))
+
+(defun zr-rclone-send-file-list (&optional arg)
+  "Send the current path's files to the connection's selected consumer.
+The raw prefix ARG is passed on; for example, playback then prompts
+for extra mpv arguments."
   (interactive "P")
   (let* ((connection (zr-rclone--connected))
-         (files (zr-rclone--consumer-files connection select)))
-    (funcall zr-rclone-file-list-function files connection)))
+         (consumer (zr-rclone--consumer connection))
+         (files (or (zr-rclone-list-files connection)
+                    (user-error "No files matched the current path and filters"))))
+    (funcall (cdr consumer) files connection arg)))
 
 (defun zr-rclone-file-urls (files connection)
   "Convert full rclone FILES to (URL . CREDENTIALS) pairs on CONNECTION.
@@ -1579,17 +1424,23 @@ WebDAV or RC HTTP media source."
                                (zr-rclone-connection-media-rc-serve connection)))
           files))
 
-(defun zr-rclone-play-files (files connection)
+(defun zr-rclone-play-files (files connection &optional arg)
   "Play full rclone FILES on CONNECTION through `zr-mpv'.
-Use this as a `zr-rclone-file-list-function' consumer."
-  (zr-rclone--launch-mpv (zr-rclone-file-urls files connection)))
+With ARG, or when `zr-mpv-prompt-arguments' is non-nil, read extra
+mpv arguments."
+  (let ((media (zr-rclone-file-urls files connection)))
+    (unless (require 'zr-mpv nil t)
+      (user-error "zr-mpv is not available on load-path"))
+    (zr-rclone--launch-mpv media (when (or arg zr-mpv-prompt-arguments)
+                                   (zr-mpv-read-arguments)))))
 
-(defun zr-rclone-play (&optional select)
-  "List matching files and play them through `zr-mpv'.
-With prefix SELECT, choose a subset using minibuffer completion."
-  (interactive "P")
-  (let ((connection (zr-rclone--connected)))
-    (zr-rclone-play-files (zr-rclone--consumer-files connection select) connection)))
+(defun zr-rclone-copy-urls (files connection &optional arg)
+  "Copy media URLs of FILES on CONNECTION to the kill ring, one per line.
+With ARG, copy the rclone paths instead.  Credentials are not included."
+  (kill-new (string-join (if arg files
+                           (mapcar #'car (zr-rclone-file-urls files connection)))
+                         "\n"))
+  (message "Copied %d %s" (length files) (if arg "rclone paths" "URLs")))
 
 ;;; Transient
 
@@ -1616,8 +1467,7 @@ With prefix SELECT, choose a subset using minibuffer completion."
      ("W" "Stop" zr-rclone-stop-webdav)
      ("v" "List servers" zr-rclone-list-servers)
      ("-w" "Serve options" zr-rclone-set-webdav-options :transient t)
-     ("U" "URL mapping" zr-rclone-set-webdav :transient t)
-     ("o" "Open with TRAMP" zr-rclone-open-webdav)]
+     ("U" "URL mapping" zr-rclone-set-webdav :transient t)]
    [ "Operations"
      ("-o" "Call options" zr-rclone-set-call-options :transient t)
      ("-b" "Bisync options" zr-rclone-set-bisync-options :transient t)]])
@@ -1648,8 +1498,8 @@ With prefix SELECT, choose a subset using minibuffer completion."
                                  "[unset]") 14 nil nil "…")))
      zr-rclone-set-target :transient t)
     ("x" "Swap paths" zr-rclone-swap-paths :transient t)
-    ("C" "Copy contents → target" zr-rclone-copy)
-    ("R" "Move contents → target" zr-rclone-move)
+    ("C" "Copy → target" zr-rclone-copy)
+    ("R" "Move → target" zr-rclone-move)
     ("s" "Sync current → target" zr-rclone-sync)
     ("b" "Bisync current ↔ target" zr-rclone-bisync)
     ("B" "Bisync init / resync" zr-rclone-bisync-resync)
@@ -1662,8 +1512,9 @@ With prefix SELECT, choose a subset using minibuffer completion."
     ("j" "Jobs / output / cancel" zr-rclone-jobs)
     ("!" "Temporary command" zr-rclone-command)
     (":" "Raw RC request" zr-rclone-call)
-    ("l" "List → consumer" zr-rclone-send-file-list)
-    ("P" "List → mpv" zr-rclone-play)
+    ("l" "List → consumer (C-u: args)" zr-rclone-send-file-list)
+    ("-c" (lambda () (format "Consumer: %s" (car (zr-rclone--consumer (zr-rclone--context)))))
+     zr-rclone-select-consumer :transient t)
     ("-r" (lambda () (format "Recursive: %s"
                              (if (zr-rclone-connection-list-recursive (zr-rclone--context))
                                  "on" "off")))
@@ -1674,7 +1525,7 @@ With prefix SELECT, choose a subset using minibuffer completion."
      zr-rclone-toggle-media-source :transient t)
     ("v" "Mount / WebDAV" zr-rclone-services-menu)
     ("w" "Start WebDAV" zr-rclone-serve-webdav)
-    ("o" "Open current via TRAMP" zr-rclone-open-webdav)]])
+    ("o" "Open current via TRAMP" zr-rclone-open)]])
 
 ;;;###autoload
 (defun zr-rclone ()

@@ -109,139 +109,43 @@
                   ("\\\\host\\share\\music" "//host/share/" "music")
                   (":webdav,url='https://host:8443/dav':music"
                    ":webdav,url='https://host:8443/dav':" "music")))
-    (should (equal (zr-rclone--split-path (car case))
+    (should (equal (zr-tramp-rcrc-split (car case))
                    (cons (cadr case) (caddr case)))))
   (should (equal (zr-rclone--resolve-path "../other" "drive:music/live")
                  "drive:music/other"))
-  (should (equal (zr-rclone--parent "drive:/music") "drive:/"))
-  (should-not (zr-rclone--parent "drive:/"))
+  (should (equal (zr-rclone--resolve-path "../other/" "drive:music/live")
+                 "drive:music/other/"))
+  (should (equal (zr-rclone--resolve-path "drive:/" nil) "drive:/"))
+  (should (equal (zr-rclone--basename "drive:music/live/") "live"))
   (should-not (zr-rclone--relative-to "drive:music2/a" "drive:music"))
   (should (equal (zr-rclone--relative-to "drive:music/a" "drive:music") "a"))
   (should-error (zr-rclone--resolve-path "relative")))
 
-(ert-deftest zr-rclone-path-completion-keeps-roots-with-a-base ()
-  (let ((connection (zr-rclone--make-connection)))
-    (cl-letf (((symbol-function 'zr-rclone--call)
-               (lambda (_connection method &optional _params)
-                 (pcase method
-                   ("config/listremotes" '((remotes . ["drive" "backup"])))
-                   ("operations/list"
-                    '((list . [((Name . "drive-local") (IsDir . t))
-                               ((Name . "drive.txt") (IsDir . :false))])))))))
-      (dolist (base '(nil "/srv/local" "C:/local" "//host/share/local" "backup:local"))
-        (dolist (directories-only '(nil t))
-          (let ((table (completion-table-dynamic
-                        (lambda (input)
-                          (zr-rclone--path-completions
-                           connection input base directories-only)))))
-            (ert-info ((format "Base %S, directories-only %S" base directories-only))
-              (should (member "drive:" (all-completions "" table)))
-              (should (member "/" (all-completions "" table)))
-              (should (member "drive:" (all-completions "dr" table)))
-              (when base
-                (should (member "drive-local/" (all-completions "dr" table)))
-                (if directories-only
-                    (should-not (member "drive.txt" (all-completions "dr" table)))
-                  (should (member "drive.txt" (all-completions "dr" table))))))))))))
-
-(ert-deftest zr-rclone-path-completion-keeps-directory-scope ()
-  (let ((connection (zr-rclone--make-connection)) calls)
-    (cl-letf (((symbol-function 'zr-rclone--call)
-               (lambda (_connection method &optional _params)
-                 (push method calls)
-                 '((list . [((Name . "docs") (IsDir . t))])))))
-      (dolist (prefix '("/srv/local/" "C:/local/" "//host/share/" "drive:"
-                        "drive:/" "./" "../" "sub/"))
-        (dolist (leaf '("" "do"))
-          (setq calls nil)
-          (should (equal (zr-rclone--path-completions
-                          connection (concat prefix leaf) "/srv/local" t)
-                         (list (concat prefix "docs/"))))
-          (should (equal calls '("operations/list"))))))))
-
-(ert-deftest zr-rclone-path-completion-table-has-component-boundaries ()
-  (let ((table (zr-rclone--path-completion-table
-                (zr-rclone--make-connection) "/srv/local" nil)))
-    (dolist (prefix '("" "drive:" "drive:/music/" "/srv/local/" "C:\\Music\\"
-                      "//host/share/" "./" "../"
-                      ":webdav,url='https://host:8443/dav':"))
-      (should (equal (completion-boundaries (concat prefix "fi") table nil "le/next")
-                     (cons (length prefix) 2)))
-      (should (= (car (completion-boundaries prefix table nil "")) (length prefix))))
-    (should (= (car (completion-boundaries "drive:music/a:b" table nil ""))
-               (length "drive:music/")))
-    (cl-letf (((symbol-function 'zr-rclone--list-entries)
-               (lambda (_connection path)
-                 (if path '((:name "music" :directory t))
-                   '((:path "drive:" :name "drive:" :directory t))))))
-      (should (equal (try-completion "dr" table) "drive:"))
-      (should (equal (all-completions "drive:mu" table) '("music/")))
-      (should (equal (try-completion "drive:mu" table) "drive:music/")))))
-
-(defun zr-rclone-test--drive-path-reader (mode initial directories-only driver)
-  "Run DRIVER inside a path minibuffer using MODE and INITIAL input.
-DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
-  (require 'icomplete)
-  (let ((icomplete-mode nil) (fido-mode nil)
-        (minibuffer-setup-hook nil) (completion-in-region-mode-hook nil)
-        (zr-rclone-path-history nil)
-        (enable-recursive-minibuffers t)
-        ;; Batch Emacs uses stdin unless a keyboard macro is active on entry.
-        (executing-kbd-macro "") unread-command-events failure result)
-    (funcall mode 1)
-    (setq result
-          (minibuffer-with-setup-hook
-              (lambda ()
-                ;; Allow the real icomplete/Fido setup hooks to run normally.
-                (setq executing-kbd-macro nil)
-                (use-local-map (copy-keymap (current-local-map)))
-                (local-set-key
-                 [zr-rclone-test-input]
-                 (lambda ()
-                   (interactive)
-                   (condition-case err
-                       (progn (funcall driver) (error "Path driver did not exit"))
-                     (error (setq failure err) (exit-minibuffer)))))
-                (setq unread-command-events '(zr-rclone-test-input)))
-            (zr-rclone--read-path "Path: " initial directories-only)))
-    (when failure (signal (car failure) (cdr failure)))
-    result))
-
-(ert-deftest zr-rclone-icomplete-enters-directories-before-accepting-paths ()
-  (let ((zr-rclone--connection
-         (zr-rclone--make-connection :connected t :current-path "/srv/local")))
-    (cl-letf (((symbol-function 'zr-rclone--list-entries)
-               (lambda (_connection path)
-                 (pcase path
-                   ('nil '((:path "drive:" :name "drive:" :directory t)))
-                   ("drive:" '((:name "music" :directory t)))
-                   ("drive:music" '((:name "live" :directory t)))
-                   ("drive:music/live" '((:name "track.mkv" :directory nil)))))))
-      (dolist (mode '(icomplete-mode fido-mode))
-        (dolist (directories-only '(nil t))
-          (ert-info ((format "Mode %S, directories-only %S" mode directories-only))
-            (let ((result
-                   (zr-rclone-test--drive-path-reader
-                    mode "dr" directories-only
-                    (lambda ()
-                      (cl-letf (((symbol-function 'file-directory-p)
-                                 (lambda (&rest _)
-                                   (ert-fail "Rclone completion used Emacs's filesystem"))))
-                        (call-interactively (key-binding (kbd "RET")))
-                        (should (equal (minibuffer-contents-no-properties) "drive:"))
-                        (insert "mu")
-                        (call-interactively (key-binding (kbd "RET")))
-                        (should (equal (minibuffer-contents-no-properties) "drive:music/"))
-                        (insert "li")
-                        (call-interactively (key-binding (kbd "RET")))
-                        (should (equal (minibuffer-contents-no-properties)
-                                       "drive:music/live/"))
-                        (if directories-only
-                            (call-interactively (key-binding (kbd "M-j")))
-                          (insert "tra")
-                          (call-interactively (key-binding (kbd "RET")))))))))
-              (should (equal result (if directories-only "drive:music/live"
-                                     "drive:music/live/track.mkv"))))))))))
+;; zr-rclone-real-path-prompts-complete-through-rcrc drives the real
+;; minibuffer contents; this test covers the name translation alone.
+(ert-deftest zr-rclone-path-prompts-use-rcrc-names-of-the-connection ()
+  (let* ((zr-rclone--connection
+          (zr-rclone--make-connection :url "https://proxy.invalid/rc/" :connected t
+                                      :current-path "drive:music/live"))
+         (prefix "/rcrc:proxy.invalid#443:")
+         answer)
+    (cl-letf (((symbol-function 'read-file-name)
+               (lambda (_prompt directory _default _mustmatch initial &rest _)
+                 (should (equal directory (concat prefix "/drive:/music/")))
+                 (should (equal initial "live"))
+                 answer)))
+      (dolist (case `((,(concat prefix "/drive:/music/live/a b.mkv") . "drive:music/live/a b.mkv")
+                      (,(concat prefix "/drive:/music/other/") . "drive:music/other/")
+                      (,(concat prefix "/srv/local") . "/srv/local")
+                      ;; Relative input is relative to the prompt's directory.
+                      ("../other" . "drive:other")))
+        (setq answer (car case))
+        (should (equal (zr-rclone--read-path "Path: " "drive:music/live") (cdr case))))
+      (dolist (foreign (list (concat prefix "/") "/rcrc:elsewhere#5572:/drive:/x" "/tmp/x"))
+        (setq answer foreign)
+        (should-error (zr-rclone--read-path "Path: " "drive:music/live") :type 'user-error)))
+    (should (equal (plist-get (gethash "proxy.invalid#443" zr-tramp-rcrc--endpoints) :url)
+                   "https://proxy.invalid/rc/"))))
 
 (ert-deftest zr-rclone-command-quoting-is-not-shell-evaluation ()
   (should (equal (zr-rclone--command-words
@@ -283,14 +187,11 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
       (should (equal (zr-rclone-connection-current-path zr-rclone--connection) "backup:target"))
       (should (equal (zr-rclone-connection-target-path zr-rclone--connection) "drive:new")))))
 
-(ert-deftest zr-rclone-webdav-url-mapping-and-tramp-names ()
+(ert-deftest zr-rclone-webdav-url-mapping ()
   (let ((mapping '(:root "drive:media" :url "https://host:8443/dav/")))
     (should (equal (zr-rclone--mapping-url mapping "drive:media/中文 %?#.mkv")
                    "https://host:8443/dav/%E4%B8%AD%E6%96%87%20%25%3F%23.mkv"))
-    (should-not (zr-rclone--mapping-url mapping "drive:media-other/a"))
-    (should (equal (zr-rclone--webdav-name
-                    (zr-rclone--mapping-url mapping "drive:media/中文 %?#.mkv") "alice")
-                   "/webdavs:alice@host#8443:/dav/中文 %?#.mkv"))))
+    (should-not (zr-rclone--mapping-url mapping "drive:media-other/a"))))
 
 (ert-deftest zr-rclone-real-authenticated-transports ()
   (zr-rclone-test--with-server
@@ -323,7 +224,11 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
       (write-region "original bytes" nil (expand-file-name name source) nil 'silent)
       (write-region "preserve extra target" nil (expand-file-name "extra.txt" target) nil 'silent)
       (should (member (concat remote "/source/")
-                      (zr-rclone--path-completions connection (concat remote "/s") nil t)))
+                      (zr-rclone--command-path-completions connection (concat remote "/s"))))
+      (should (member "fixture:" (zr-rclone--command-path-completions connection "fix")))
+      (let ((zr-rclone--connection connection))
+        (zr-rclone-cd (concat remote "/source")))
+      (should (member "empty/" (zr-rclone--command-path-completions connection "em")))
       (setf (zr-rclone-connection-current-path connection) (concat remote "/source")
             (zr-rclone-connection-target-path connection) (concat remote "/target"))
       (dolist (transport '(http cli))
@@ -348,28 +253,75 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
             (concat (zr-rclone-connection-current-path connection) "/nested"))
       (should-error (zr-rclone-copy)))))
 
-(ert-deftest zr-rclone-real-path-prompts-can-switch-from-local-to-remote ()
+(ert-deftest zr-rclone-real-file-paths-copy-move-and-list ()
+  (zr-rclone-test--with-server
+    (let ((source (expand-file-name "source" local))
+          (file (concat remote "/source/a b.mkv")))
+      (make-directory (expand-file-name "sub" source) t)
+      (write-region "one" nil (expand-file-name "a b.mkv" source) nil 'silent)
+      (setf (zr-rclone-connection-current-path connection) file)
+      (should (eq (zr-rclone--path-type connection file) 'file))
+      (should (eq (zr-rclone--path-type connection (concat remote "/source/")) 'dir))
+      (should-not (zr-rclone--path-type connection (concat remote "/missing")))
+      (should (equal (zr-rclone-list-files) (list file)))
+      ;; An existing directory receives the file under its own name.
+      (setf (zr-rclone-connection-target-path connection) (concat remote "/source/sub"))
+      (should (equal (plist-get (zr-rclone-test--wait (zr-rclone-copy) connection) :state)
+                     "done"))
+      (should (file-exists-p (expand-file-name "sub/a b.mkv" source)))
+      ;; A missing target without a slash names the new file; sync copies.
+      (setf (zr-rclone-connection-target-path connection) (concat remote "/renamed.mkv"))
+      (should (equal (plist-get (zr-rclone-test--wait (zr-rclone-sync) connection) :state)
+                     "done"))
+      (should (equal (with-temp-buffer
+                       (insert-file-contents (expand-file-name "renamed.mkv" local))
+                       (buffer-string))
+                     "one"))
+      ;; A trailing slash names a directory that does not exist yet.
+      (setf (zr-rclone-connection-target-path connection) (concat remote "/new/"))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (should (equal (plist-get (zr-rclone-test--wait (zr-rclone-move) connection) :state)
+                       "done")))
+      (should (file-exists-p (expand-file-name "new/a b.mkv" local)))
+      (should-not (file-exists-p (expand-file-name "a b.mkv" source)))
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/new/a b.mkv")
+            (zr-rclone-connection-target-path connection) (concat remote "/new/"))
+      (should-error (zr-rclone-copy) :type 'user-error)
+      (should-error (zr-rclone-mount) :type 'user-error)
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/source")
+            (zr-rclone-connection-target-path connection) (concat remote "/renamed.mkv"))
+      (should-error (zr-rclone-copy) :type 'user-error)
+      (should-error (zr-rclone-bisync) :type 'user-error)
+      (setf (zr-rclone-connection-current-path connection) (concat remote "/missing"))
+      (should-error (zr-rclone-copy) :type 'user-error))))
+
+(ert-deftest zr-rclone-real-path-prompts-complete-through-rcrc ()
   (zr-rclone-test--with-server
     (make-directory (expand-file-name "fixture-local" local))
     (write-region "file" nil (expand-file-name "fixture.txt" local) nil 'silent)
     (dolist (command '(zr-rclone-cd zr-rclone-set-target))
       (zr-rclone-cd local)
       (zr-rclone-set-target local)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (_prompt table _predicate _require-match initial &rest _)
-                   (should (equal initial local))
-                   (should (member "fixture:" (all-completions "" table)))
-                   (should (member "fixture:" (all-completions "fix" table)))
-                   (should (member "fixture-local/" (all-completions "fix" table)))
-                   (should-not (member "fixture.txt" (all-completions "fix" table)))
-                   (should (member (concat name "/")
-                                   (all-completions "fixture:case-" table)))
-                   remote)))
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (_prompt directory _default _mustmatch initial &rest _)
+                   (let ((top (zr-rclone--file-name connection nil)))
+                     (should (equal (zr-tramp-rcrc-rclone-path (concat directory initial))
+                                    local))
+                     (should (member "fixture:/" (file-name-all-completions "fix" top)))
+                     (let ((current (file-name-as-directory (concat directory initial))))
+                       (should (member "fixture-local/" (file-name-all-completions
+                                                         "fix" current)))
+                       (should (member "fixture.txt" (file-name-all-completions
+                                                      "fix" current))))
+                     (should (member (concat name "/")
+                                     (file-name-all-completions
+                                      "case-" (concat top "fixture:/"))))
+                     (concat top "fixture:/" name "/")))))
         (call-interactively command))
       (should (equal (if (eq command 'zr-rclone-cd)
                         (zr-rclone-connection-current-path connection)
                       (zr-rclone-connection-target-path connection))
-                     remote)))))
+                     (concat remote "/"))))))
 
 (ert-deftest zr-rclone-real-file-lists-filter-recursion-and-consumer ()
   (zr-rclone-test--with-server
@@ -387,11 +339,12 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
       (cl-letf (((symbol-function 'read-string)
                  (lambda (&rest _) "{\"_filter\":{\"IncludeRule\":[\"*.mkv\"]}}")))
         (zr-rclone-set-call-options))
-      (let ((zr-rclone-file-list-function
-             (lambda (files owner) (setq received (list files owner)))))
-        (zr-rclone-send-file-list))
-      (should (equal (car received) (list (concat remote "/source/keep.mkv"))))
-      (should (eq (cadr received) connection))
+      (let ((zr-rclone-consumers
+             (list (cons "test" (lambda (files owner arg)
+                                  (setq received (list files owner arg)))))))
+        (zr-rclone-send-file-list '(4)))
+      (should (equal received (list (list (concat remote "/source/keep.mkv"))
+                                    connection '(4))))
       (zr-rclone-toggle-recursive)
       (should (equal (zr-rclone-list-files)
                      (list (concat remote "/source/keep.mkv")
@@ -478,7 +431,7 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
   (let* ((url-request-method "GET")
          (url-request-extra-headers
           (append (when credentials
-                    (list (cons "Authorization" (zr-rclone--basic-header credentials))))
+                    (list (cons "Authorization" (zr-tramp-rcrc-basic-header credentials))))
                   (when range (list (cons "Range" range)))))
          (url-show-status nil)
          (buffer (url-retrieve-synchronously url t t 5)))
@@ -493,12 +446,7 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
 
 (ert-deftest zr-rclone-real-webdav-and-http-playback-urls ()
   (zr-rclone-test--with-server
-    (require 'zr-tramp-webdav)
-    (let ((name "中 文 %?#.txt")
-          (zr-tramp-webdav-extra-headers nil)
-          (zr-rclone--webdav-auth nil)
-          (zr-rclone--previous-webdav-headers nil)
-          (zr-tramp-webdav-backend 'curl))
+    (let ((name "中 文 %?#.txt"))
       (write-region "0123456789" nil (expand-file-name name local) nil 'silent)
       (zr-rclone-serve-webdav)
       (let* ((mapping (car (zr-rclone-connection-mappings connection)))
@@ -509,8 +457,8 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
             (progn
               (let (playlist)
                 (cl-letf (((symbol-function 'zr-rclone--launch-mpv)
-                           (lambda (items) (setq playlist items))))
-                  (zr-rclone-play))
+                           (lambda (items &optional _args) (setq playlist items))))
+                  (zr-rclone-send-file-list))
                 (should (equal playlist (list media))))
               (should (equal (zr-rclone-test--get (car media) (cdr media) "bytes=2-5")
                              '(206 . "2345")))
@@ -518,7 +466,7 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
                              '(200 . "0123456789")))
               (save-window-excursion
                 (save-current-buffer
-                  (zr-rclone-open-webdav)
+                  (zr-rclone-open)
                   (let ((dav-buffer (current-buffer)))
                     (unwind-protect
                         (progn
@@ -528,30 +476,14 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
                             (with-temp-buffer
                               (insert-file-contents file)
                               (should (equal (buffer-string) "0123456789")))
-                            (write-region "saved via WebDAV" nil file nil 'silent)))
+                            (write-region "saved via rcrc" nil file nil 'silent)))
                       (kill-buffer dav-buffer)))))
               (should (equal (with-temp-buffer
                                (insert-file-contents (expand-file-name name local))
                                (buffer-string))
-                             "saved via WebDAV")))
+                             "saved via rcrc")))
           (zr-rclone--call connection "serve/stop" (list (cons 'id (plist-get mapping :id))))
-          (zr-rclone--forget-webdav mapping)
           (setf (zr-rclone-connection-mappings connection) nil))))))
-
-(ert-deftest zr-rclone-webdav-auth-stays-with-origin-root-and-user ()
-  (require 'zr-tramp-webdav)
-  (let ((zr-tramp-webdav-extra-headers '(("X-Test" . "preserved")))
-        (zr-rclone--webdav-auth nil)
-        (zr-rclone--previous-webdav-headers nil)
-        (mapping '(:root "drive:" :url "https://host/dav/")))
-    (zr-rclone--install-webdav-credentials mapping '("alice" . "test-secret"))
-    (should (assoc "Authorization"
-                   (zr-rclone--webdav-headers "/webdavs:alice@host:/dav/file")))
-    (dolist (file '("/webdavs:bob@host:/dav/file" "/webdavs:alice@elsewhere:/dav/file"
-                    "/webdav:alice@host:/dav/file" "/webdavs:alice@host:/dav-other/file"))
-      (should (equal (zr-rclone--webdav-headers file) '(("X-Test" . "preserved")))))
-    (zr-rclone--forget-webdav mapping)
-    (should-not zr-rclone--webdav-auth)))
 
 (ert-deftest zr-rclone-mpv-receives-playlist-and-private-auth ()
   (unless (executable-find "python3") (ert-skip "Python 3 is required"))
@@ -633,6 +565,7 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
                  (lambda (&rest _) (setq reader 'local) "/mnt/local path"))
                 ((symbol-function 'read-string)
                  (lambda (&rest _) (setq reader 'server) "/mnt/server path"))
+                ((symbol-function 'zr-rclone--path-type) (lambda (&rest _) 'dir))
                 ((symbol-function 'zr-rclone--submit)
                  (lambda (method params &rest _) (setq request (cons method params)))))
         (zr-rclone-mount))
@@ -698,19 +631,39 @@ DIRECTORIES-ONLY is passed to the reader.  DRIVER must exit the minibuffer."
     (should-not (zr-rclone-connection-target-path b))
     (should (zr-rclone-connection-media-rc-serve b))))
 
-(ert-deftest zr-rclone-file-selection-preserves-paths-and-order ()
-  (let* ((connection (zr-rclone--make-connection :connected t :current-path "drive:dir"))
-         (files '("drive:dir/a,comma.mkv" "drive:dir/b\nnewline.mkv"
-                  "drive:dir/c space.mkv")))
-    (cl-letf (((symbol-function 'zr-rclone-list-files) (lambda (&rest _) files))
-              ((symbol-function 'completing-read-multiple)
-               (lambda (_prompt choices &rest _)
-                 (should (equal crm-separator "\n"))
-                 (should-not (string-match-p "\n" (car (nth 1 choices))))
-                 (list (car (nth 1 choices)) (caar choices) (caar choices)))))
-      (should (equal (zr-rclone--consumer-files connection t) (butlast files))))
-    (cl-letf (((symbol-function 'zr-rclone-list-files) (lambda (&rest _) nil)))
-      (should-error (zr-rclone--consumer-files connection nil)))))
+(ert-deftest zr-rclone-consumers-receive-the-prefix-argument ()
+  (require 'zr-mpv)
+  (let* ((zr-rclone--connection
+          (zr-rclone--make-connection :url "http://rc.invalid:5572/" :connected t
+                                      :current-path "drive:dir" :media-rc-serve t
+                                      :user "u" :password "p"))
+         (files '("drive:dir/a,comma.mkv" "drive:dir/c space.mkv"))
+         (listed files) launched read)
+    (cl-letf (((symbol-function 'zr-rclone-list-files) (lambda (&rest _) listed))
+              ((symbol-function 'zr-mpv-read-arguments)
+               (lambda (&rest _) (setq read t) "--mute=yes"))
+              ((symbol-function 'zr-rclone--launch-mpv)
+               (lambda (media &optional args) (setq launched (list media args)))))
+      (should (equal (car (zr-rclone--consumer zr-rclone--connection)) "play"))
+      (dolist (case '((nil nil nil) ((4) nil "--mute=yes") (nil t "--mute=yes")))
+        (setq read nil launched nil)
+        (let ((zr-mpv-prompt-arguments (cadr case)))
+          (zr-rclone-send-file-list (car case)))
+        (should (equal (cadr launched) (caddr case)))
+        (should (eq read (and (caddr case) t)))
+        (should (equal (mapcar #'car (car launched))
+                       '("http://rc.invalid:5572/%5Bdrive%3A%5D/dir/a%2Ccomma.mkv"
+                         "http://rc.invalid:5572/%5Bdrive%3A%5D/dir/c%20space.mkv")))
+        (should (equal (cdar (car launched)) '("u" . "p"))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "copy URLs")))
+        (zr-rclone-select-consumer))
+      (let ((kill-ring nil))
+        (zr-rclone-send-file-list)
+        (should (string-prefix-p "http://rc.invalid:5572/" (car kill-ring)))
+        (zr-rclone-send-file-list '(4))
+        (should (equal (car kill-ring) (string-join files "\n"))))
+      (setq listed nil)
+      (should-error (zr-rclone-send-file-list) :type 'user-error))))
 
 (ert-deftest zr-rclone-jobs-keep-their-connection-after-switching ()
   (let* ((a (zr-rclone--make-connection :connected t))
