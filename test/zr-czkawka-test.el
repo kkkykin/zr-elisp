@@ -264,7 +264,8 @@
   "Test key bindings in `zr-czkawka-dup-mode-map'."
   (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% n")) #'zr-czkawka-dup-flag-all-except-newest))
   (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% o")) #'zr-czkawka-dup-flag-all-except-oldest))
-  (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% f")) #'zr-czkawka-dup-flag-all-except-first)))
+  (should (eq (lookup-key zr-czkawka-dup-mode-map (kbd "% f")) #'zr-czkawka-dup-flag-all-except-first))
+  (should (eq (lookup-key zr-czkawka-dup-mode-map [remap revert-buffer]) #'zr-czkawka-dup-rescan)))
 
 ;;; Regression tests
 
@@ -300,6 +301,41 @@ buffer and clean up afterwards."
           (push (dired-get-filename) files))
         (forward-line 1)))
     (sort files #'string<)))
+
+(defun zr-czkawka-test--listed ()
+  "Return the listed files in buffer order.
+Also check that each line is tagged with its own file."
+  (let (files)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        ;; `save-excursion': this moves point in hidden groups.
+        (when-let* ((file (save-excursion (dired-get-filename nil t))))
+          (should (equal (alist-get 'path (zr-czkawka-dup--line-property
+                                           'zr-czkawka-dup-file))
+                         file))
+          (push file files))
+        (forward-line 1)))
+    (nreverse files)))
+
+(defun zr-czkawka-test--hidden-groups ()
+  "Return the sorted ids of the hidden duplicate groups."
+  (save-excursion
+    (sort (cl-loop for (dir . pos) in dired-subdir-alist
+                   when (dired-subdir-hidden-p dir)
+                   collect (progn (goto-char pos)
+                                  (zr-czkawka-dup--line-property
+                                   'zr-czkawka-dup-group)))
+          #'<)))
+
+(defun zr-czkawka-test--shows-inode-p (file)
+  "Return non-nil if the listing line of FILE shows its inode number."
+  (save-excursion
+    (dired-goto-file file)
+    (string-search (number-to-string
+                    (file-attribute-inode-number (file-attributes file)))
+                   (buffer-substring (line-beginning-position)
+                                     (line-end-position)))))
 
 (defun zr-czkawka-test--group (id &rest files)
   "Build group ID of FILES, each a (PATH MTIME [REFERENCE])."
@@ -407,10 +443,11 @@ buffer and clean up afterwards."
               (kill-buffer))))
       (delete-directory dir t))))
 
-(ert-deftest zr-czkawka-test-revert-prefix-edits-args ()
-  "Reverting with a prefix argument edits the stored arguments."
+(ert-deftest zr-czkawka-test-rescan-prefix-edits-args ()
+  "Rescanning with a prefix argument edits the stored arguments."
   (zr-czkawka-test--with-dup-buffer
       (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))))
+    (should (eq (key-binding (kbd "g")) #'zr-czkawka-dup-rescan))
     (let (scanned initial)
       (cl-letf (((symbol-function 'zr-czkawka-dup--scan)
                  (lambda (args dir buf) (setq scanned (list args dir buf))))
@@ -418,14 +455,100 @@ buffer and clean up afterwards."
                  (lambda (_prompt init &rest _)
                    (setq initial init)
                    "-d \"/a b\" -s size")))
-        (revert-buffer)
+        (zr-czkawka-dup-rescan)
         (should (equal (car scanned) '("-d" "/tmp")))
-        (let ((current-prefix-arg '(4)))
-          (revert-buffer))
+        (zr-czkawka-dup-rescan '(4))
         (should (equal initial "-d /tmp"))
         (should (equal (car scanned) '("-d" "/a b" "-s" "size")))
         (should (equal (cadr scanned) tmp-dir))
         (should (eq (nth 2 scanned) (current-buffer)))))))
+
+(ert-deftest zr-czkawka-test-sort-files ()
+  "Files of a group are sorted as `ls' sorts them with the switches."
+  (let* ((dir (make-temp-file "zr-czkawka-test-sort" t))
+         (files (mapcar (lambda (name) `((path . ,(expand-file-name name dir))))
+                        '("b.txt" "a.el" "c.txt")))
+         (sorted (lambda (switches &optional fs)
+                   (mapcar (lambda (f) (file-name-nondirectory (alist-get 'path f)))
+                           (zr-czkawka-dup--sort-files (or fs files) switches)))))
+    (unwind-protect
+        (progn
+          (cl-mapc (lambda (f size mtime)
+                     (with-temp-file (alist-get 'path f)
+                       (insert (make-string size ?x)))
+                     (set-file-times (alist-get 'path f) mtime))
+                   files '(1 3 2) '(200 100 300))
+          (should (equal (funcall sorted "-al") '("a.el" "b.txt" "c.txt")))
+          (should (equal (funcall sorted "-alt") '("c.txt" "b.txt" "a.el")))
+          (should (equal (funcall sorted "-al --sort=time --reverse")
+                         '("a.el" "b.txt" "c.txt")))
+          (should (equal (funcall sorted "-alS") '("a.el" "c.txt" "b.txt")))
+          (should (equal (funcall sorted "-alXr") '("c.txt" "b.txt" "a.el")))
+          (should (equal (funcall sorted "-alU") '("b.txt" "a.el" "c.txt")))
+          ;; Reference files stay first; files no longer on disk are dropped.
+          (delete-file (alist-get 'path (nth 1 files)))
+          (should (equal (funcall sorted "-al"
+                                  (list (nth 0 files) (nth 1 files)
+                                        (cons '(reference . t) (nth 2 files))))
+                         '("c.txt" "b.txt"))))
+      (delete-directory dir t))))
+
+(ert-deftest zr-czkawka-test-sort-switches-redisplay ()
+  "Sorting relists files with the new switches without rescanning.
+Flags, point and hidden groups are kept, and so are the switches when
+new scan results are rendered."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))
+                (zr-czkawka-test--group 2 (list (nth 2 fs) 1) (list (nth 3 fs) 2))))
+    (cl-mapc #'set-file-times fs '(100 200 300 300))
+    (let ((prompts 0))
+      (cl-letf (((symbol-function 'zr-czkawka-dup--scan)
+                 (lambda (&rest _) (error "Unexpected rescan")))
+                ((symbol-function 'read-string)
+                 (lambda (&rest _) (cl-incf prompts) "-ali")))
+        (dired-goto-file (nth 0 fs))
+        (dired-flag-file-deletion 1)
+        (dired-goto-file (nth 2 fs))
+        (dired-hide-subdir 1)
+        (dired-goto-file (nth 0 fs))
+        ;; `s' sorts each group by date, newest first, ties by name.
+        (dired-sort-toggle-or-edit)
+        (should (equal (zr-czkawka-test--listed)
+                       (list (nth 1 fs) (nth 0 fs) (nth 2 fs) (nth 3 fs))))
+        (should (equal (dired-get-filename) (nth 0 fs)))
+        (should (equal (zr-czkawka-test--flagged) (list (nth 0 fs))))
+        (should (equal (zr-czkawka-test--hidden-groups) '(2)))
+        ;; `C-u s' only prompts for the `ls' switches.
+        (let ((current-prefix-arg '(4)))
+          (call-interactively #'dired-sort-toggle-or-edit))
+        (should (= prompts 1))
+        (should (equal dired-actual-switches "-ali"))
+        (should (equal (zr-czkawka-test--listed) fs))
+        (should (zr-czkawka-test--shows-inode-p (nth 0 fs)))
+        (should (equal (dired-get-filename) (nth 0 fs)))
+        (should (equal (zr-czkawka-test--flagged) (list (nth 0 fs))))
+        (should (equal (zr-czkawka-test--hidden-groups) '(2)))
+        ;; New scan results keep the switches.
+        (zr-czkawka-dup--render-buffer zr-czkawka-dup--groups zr-czkawka-dup--params
+                                       (current-buffer))
+        (should (equal dired-actual-switches "-ali"))
+        (should (zr-czkawka-test--shows-inode-p (nth 1 fs)))))))
+
+(ert-deftest zr-czkawka-test-render-with-ls-lisp ()
+  "Files are listed through `insert-directory', so `ls-lisp' works too."
+  (let ((loaded (featurep 'ls-lisp)))
+    (require 'ls-lisp)
+    (unwind-protect
+        (let ((ls-lisp-use-insert-directory-program nil))
+          (zr-czkawka-test--with-dup-buffer
+              (fs (list (zr-czkawka-test--group 1 (list (nth 1 fs) 1) (list (nth 0 fs) 2))))
+            (should (equal (zr-czkawka-test--listed) (list (nth 0 fs) (nth 1 fs))))
+            (dired-sort-other "-ali")
+            (should (zr-czkawka-test--shows-inode-p (nth 0 fs)))
+            (zr-czkawka-dup-flag-all-except-first)
+            (should (equal (zr-czkawka-test--flagged) (list (nth 1 fs))))))
+      (unless loaded
+        (unload-feature 'ls-lisp)))))
 
 (ert-deftest zr-czkawka-test-run-critical-error ()
   "A czkawka critical error with exit code 0 must go to the error callback."

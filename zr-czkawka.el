@@ -20,8 +20,14 @@
 ;;   % o - Flag all duplicates except the oldest in each group.
 ;;   % f - Flag all duplicates except the first in each group.
 ;;   g - Re-run the duplicate scan; with prefix argument, edit arguments.
+;;   s - Sort each group by name or date; with prefix argument, edit
+;;       the `ls' switches.  This redisplays without re-running the scan.
 ;;   d / u / x - Standard Dired flagging, unmarking, and deletion.
 ;;   $ - Collapse or expand a duplicate group.
+;;
+;; Files are listed with `insert-directory' (`ls' or `ls-lisp') using
+;; the Dired listing switches, and each group is sorted as `ls' would
+;; sort it with those switches, reference files first.
 ;;
 ;; The flagging commands only consider files still listed in the buffer
 ;; and present on disk, clear existing flags in the affected groups
@@ -85,6 +91,10 @@ Supported values include \"BLAKE3\", \"CRC32\", \"XXH3\"."
   "Plist of parameters used to generate current duplicate results.
 :args is the list of czkawka dup arguments and :directory is the
 top directory of the Virtual Dired buffer.")
+
+(defvar-local zr-czkawka-dup--groups nil
+  "Duplicate groups of the current results.
+The value is as returned by `zr-czkawka-dup--parse-json'.")
 
 ;;; Process execution
 
@@ -213,6 +223,7 @@ A reference file is listed first with an additional (reference . t)."
     (define-key map (kbd "% n") #'zr-czkawka-dup-flag-all-except-newest)
     (define-key map (kbd "% o") #'zr-czkawka-dup-flag-all-except-oldest)
     (define-key map (kbd "% f") #'zr-czkawka-dup-flag-all-except-first)
+    (define-key map [remap revert-buffer] #'zr-czkawka-dup-rescan)
     ;; (define-key map (kbd "=") #'zr-czkawka-dup-diff)
     map)
   "Keymap for `zr-czkawka-dup-mode'.")
@@ -223,75 +234,179 @@ A reference file is listed first with an additional (reference . t)."
   :lighter " Czkawka-Dup"
   :keymap zr-czkawka-dup-mode-map)
 
-(defun zr-czkawka-dup--file-line (path)
-  "Return a Dired listing line for PATH."
-  (if-let* ((attrs (file-attributes path 'string)))
-      (let ((target (file-attribute-type attrs)))
-        (format "  %s %3d %-8s %-8s %10d %s %s%s\n"
-                (file-attribute-modes attrs)
-                (file-attribute-link-number attrs)
-                (file-attribute-user-id attrs)
-                (file-attribute-group-id attrs)
-                (file-attribute-size attrs)
-                (format-time-string "%Y-%m-%d %H:%M"
-                                    (file-attribute-modification-time attrs))
-                path
-                (if (stringp target) (concat " -> " target) "")))
-    (format "  ----------   0 ?        ?                 0 1970-01-01 00:00 %s\n"
-            path)))
+(defun zr-czkawka-dup--sort-files (files switches)
+  "Return FILES still on disk, sorted as `ls' sorts them with SWITCHES.
+Recognize the sort switches -t, -S, -X, -v, -U and -r, their long
+forms, and -c, -u and --time selecting the time to sort by.  Keep
+reference files first."
+  (let ((key "name") (time "mtime") reverse)
+    (dolist (switch (split-string-and-unquote switches))
+      (cond
+       ((string-prefix-p "--sort=" switch) (setq key (substring switch 7)))
+       ((string-prefix-p "--time=" switch) (setq time (substring switch 7)))
+       ((equal switch "--reverse") (setq reverse t))
+       ((string-match-p "\\`-[^-]" switch)
+        (dolist (char (string-to-list (substring switch 1)))
+          (pcase char
+            (?t (setq key "time"))
+            (?S (setq key "size"))
+            (?X (setq key "extension"))
+            (?v (setq key "version"))
+            (?U (setq key "none"))
+            (?c (setq time "ctime"))
+            (?u (setq time "atime"))
+            (?r (setq reverse t)))))))
+    ;; Each entry is (PATH ATTRIBUTES FILE).
+    (let ((entries (cl-loop for file in files
+                            for path = (alist-get 'path file)
+                            for attrs = (file-attributes path)
+                            when attrs collect (list path attrs file))))
+      (unless (equal key "none")
+        ;; `sort' is stable, so sorting by name first breaks ties as `ls' does.
+        (setq entries (sort entries
+                            (lambda (a b)
+                              (funcall (if (equal key "version")
+                                           #'string-version-lessp
+                                         #'string-collate-lessp)
+                                       (car a) (car b)))))
+        (when-let* ((lessp
+                     (pcase key
+                       ("time"
+                        (let ((file-time
+                               (pcase time
+                                 ((or "atime" "access" "use") #'file-attribute-access-time)
+                                 ((or "ctime" "status") #'file-attribute-status-change-time)
+                                 (_ #'file-attribute-modification-time))))
+                          (lambda (a b)
+                            (time-less-p (funcall file-time (nth 1 b))
+                                         (funcall file-time (nth 1 a))))))
+                       ("size"
+                        (lambda (a b)
+                          (> (file-attribute-size (nth 1 a))
+                             (file-attribute-size (nth 1 b)))))
+                       ("extension"
+                        (lambda (a b)
+                          (string< (or (file-name-extension (car a)) "")
+                                   (or (file-name-extension (car b)) "")))))))
+          (setq entries (sort entries lessp)))
+        (when reverse
+          (setq entries (nreverse entries))))
+      (sort (mapcar #'caddr entries)
+            (lambda (a b)
+              (and (alist-get 'reference a) (not (alist-get 'reference b))))))))
 
-(defun zr-czkawka-dup--insert-line (line group-id &optional file)
-  "Insert LINE with GROUP-ID and FILE text properties.
+(defun zr-czkawka-dup--tag-line (beg group-id &optional file)
+  "Tag the line from BEG to point with GROUP-ID and FILE text properties.
 The properties skip the first column, which Dired rewrites when marking."
+  (add-text-properties (1+ beg) (1- (point))
+                       (list 'zr-czkawka-dup-group group-id
+                             'zr-czkawka-dup-file file)))
+
+(defun zr-czkawka-dup--insert-file (file group-id directory)
+  "Insert the listing line of FILE in GROUP-ID.
+List it with `dired-actual-switches' as Dired lists an explicit file
+list, through `insert-directory'.  DIRECTORY is the top directory."
   (let ((beg (point)))
-    (insert line)
-    (add-text-properties (1+ beg) (1- (point))
-                         (list 'zr-czkawka-dup-group group-id
-                               'zr-czkawka-dup-file file))))
+    (save-restriction
+      ;; Hide the preceding lines from `dired-insert-directory', so that
+      ;; the line is aligned only below, once it is indented.
+      (narrow-to-region beg beg)
+      (dired-insert-directory directory dired-actual-switches
+                              (list (alist-get 'path file))))
+    ;; Columns must include the details `dired-hide-details-mode' hides.
+    (let ((buffer-invisibility-spec nil))
+      (dired-align-file beg (point)))
+    (zr-czkawka-dup--tag-line beg group-id file)))
+
+(defun zr-czkawka-dup--insert-groups ()
+  "Replace the buffer contents with the duplicate groups.
+List files with `dired-actual-switches', skipping files no longer on
+disk and groups left without files, and update the header line."
+  (let ((directory (plist-get zr-czkawka-dup--params :directory))
+        (inhibit-read-only t)
+        (total-groups 0)
+        (total-files 0)
+        (total-waste 0))
+    (when (consp buffer-undo-list)
+      (setq buffer-undo-list nil))
+    (let ((buffer-undo-list t))
+      (erase-buffer)
+      (dolist (grp zr-czkawka-dup--groups)
+        (when-let* ((files (zr-czkawka-dup--sort-files (alist-get 'files grp)
+                                                       dired-actual-switches)))
+          (let* ((id (alist-get 'id grp))
+                 (size (alist-get 'size grp))
+                 (hash (alist-get 'hash grp))
+                 (ref-str (if (alist-get 'reference (car files)) ", 1 reference" ""))
+                 (size-str (if (and size (> size 0))
+                               (format ", Size: %s" (file-size-human-readable size 'iec))
+                             ""))
+                 (hash-str (if hash
+                               (format ", Hash: %s" (truncate-string-to-width hash 8))
+                             ""))
+                 (beg (point)))
+            (insert (format "  // Group %d [%d files%s%s%s]:\n"
+                            id (length files) ref-str size-str hash-str))
+            (zr-czkawka-dup--tag-line beg id)
+            (dolist (f files)
+              (zr-czkawka-dup--insert-file f id directory))
+            (insert "\n")
+            (cl-incf total-groups)
+            (cl-incf total-files (length files))
+            (cl-incf total-waste (* (1- (length files)) (or size 0)))))))
+    (dired-build-subdir-alist)
+    (set-buffer-modified-p nil)
+    ;; `%%%%' survives both `format' and mode line %-construct expansion.
+    (setq header-line-format
+          (format " Czkawka Dup: %d groups, %d files (%s wasted) | [d] Flag [x] Delete [%%%% n] Keep newest [%%%% o] Keep oldest [%%%% f] Keep first [g] Refresh"
+                  total-groups total-files
+                  (file-size-human-readable total-waste 'iec)))))
 
 (defun zr-czkawka-dup--render-buffer (groups params buffer)
-  "Render duplicate GROUPS in Virtual Dired BUFFER using PARAMS."
+  "Render duplicate GROUPS in Virtual Dired BUFFER using PARAMS.
+Keep the listing switches of BUFFER if it already shows duplicates."
   (with-current-buffer (get-buffer-create buffer)
-    (let ((inhibit-read-only t))
+    (let ((switches (and zr-czkawka-dup-mode dired-actual-switches))
+          (inhibit-read-only t))
+      ;; Set up Dired first, as the groups are listed with its switches.
       (erase-buffer)
-      (dolist (grp groups)
-        (let* ((id (alist-get 'id grp))
-               (files (alist-get 'files grp))
-               (size (alist-get 'size grp))
-               (hash (alist-get 'hash grp))
-               (ref-str (if (alist-get 'reference (car files)) ", 1 reference" ""))
-               (size-str (if (and size (> size 0))
-                             (format ", Size: %s" (file-size-human-readable size 'iec))
-                           ""))
-               (hash-str (if hash
-                             (format ", Hash: %s" (truncate-string-to-width hash 8))
-                           "")))
-          (zr-czkawka-dup--insert-line
-           (format "  // Group %d [%d files%s%s%s]:\n"
-                   id (length files) ref-str size-str hash-str)
-           id)
-          (dolist (f files)
-            (zr-czkawka-dup--insert-line
-             (zr-czkawka-dup--file-line (alist-get 'path f)) id f))
-          (insert "\n")))
-      (dired-virtual (plist-get params :directory))
-      (zr-czkawka-dup-mode 1)
-      (setq-local zr-czkawka-dup--params params)
-      (setq-local revert-buffer-function #'zr-czkawka-dup--revert)
-      (let ((total-files 0)
-            (total-waste 0))
-        (dolist (g groups)
-          (let ((n (length (alist-get 'files g))))
-            (cl-incf total-files n)
-            (cl-incf total-waste (* (1- n) (or (alist-get 'size g) 0)))))
-        ;; `%%%%' survives both `format' and mode line %-construct expansion.
-        (setq-local header-line-format
-                    (format " Czkawka Dup: %d groups, %d files (%s wasted) | [d] Flag [x] Delete [%%%% n] Keep newest [%%%% o] Keep oldest [%%%% f] Keep first [g] Refresh"
-                            (length groups) total-files
-                            (file-size-human-readable total-waste 'iec))))
-      (goto-char (point-min))
-      (dired-next-line 1))
+      (dired-virtual (plist-get params :directory) switches))
+    (zr-czkawka-dup-mode 1)
+    (setq-local zr-czkawka-dup--params params)
+    (setq-local zr-czkawka-dup--groups groups)
+    (setq-local revert-buffer-function #'zr-czkawka-dup--revert)
+    (zr-czkawka-dup--insert-groups)
+    (run-hooks 'dired-after-readin-hook)
+    (goto-char (point-min))
+    (dired-next-line 1)
     (pop-to-buffer (current-buffer))))
+
+(defun zr-czkawka-dup--revert (&rest _)
+  "Redisplay the duplicate groups without re-running the scan.
+List files with the current `dired-actual-switches', e.g. as set by
+\\[dired-sort-toggle-or-edit], and keep marks, point and hidden groups
+like `dired-revert'."
+  (widen)
+  (let* ((inhibit-read-only t)
+         (modified (buffer-modified-p))
+         (positions (dired-save-positions))
+         (hidden (save-excursion
+                   (mapcar (lambda (dir)
+                             (dired-goto-subdir dir)
+                             (zr-czkawka-dup--line-property 'zr-czkawka-dup-group))
+                           (dired-remember-hidden))))
+         ;; Only after `dired-remember-hidden', since this unhides all.
+         (marks (dired-remember-marks (point-min) (point-max))))
+    (zr-czkawka-dup--insert-groups)
+    (dired-mark-remembered marks)
+    (run-hooks 'dired-after-readin-hook)
+    (dired-restore-positions positions)
+    (save-excursion
+      (dolist (elt dired-subdir-alist)
+        (goto-char (cdr elt))
+        (when (memq (zr-czkawka-dup--line-property 'zr-czkawka-dup-group) hidden)
+          (dired-hide-subdir 1))))
+    (unless modified (restore-buffer-modified-p nil))))
 
 (defun zr-czkawka-dup--scan (args directory &optional buffer)
   "Run a duplicate scan with czkawka dup ARGS and display the results.
@@ -314,15 +429,16 @@ only when duplicates are found."
   (split-string-and-unquote
    (read-string "czkawka dup arguments: " initial 'zr-czkawka-raw-args-history)))
 
-(defun zr-czkawka-dup--revert (&rest _)
+(defun zr-czkawka-dup-rescan (&optional edit-args)
   "Re-run the duplicate scan for the current buffer.
-With a prefix argument, edit the czkawka dup arguments first."
-  (when-let* ((params zr-czkawka-dup--params))
-    (let ((args (plist-get params :args)))
-      (when current-prefix-arg
-        (setq args (zr-czkawka-dup--read-args (combine-and-quote-strings args))))
-      (message "Refreshing duplicate files scan...")
-      (zr-czkawka-dup--scan args (plist-get params :directory) (current-buffer)))))
+With prefix argument EDIT-ARGS, edit the czkawka dup arguments first."
+  (interactive "P")
+  (let ((args (plist-get zr-czkawka-dup--params :args)))
+    (when edit-args
+      (setq args (zr-czkawka-dup--read-args (combine-and-quote-strings args))))
+    (message "Refreshing duplicate files scan...")
+    (zr-czkawka-dup--scan args (plist-get zr-czkawka-dup--params :directory)
+                          (current-buffer))))
 
 ;;; Duplicate file management actions
 
