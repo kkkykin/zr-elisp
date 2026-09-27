@@ -18,6 +18,7 @@
 ;;   `zr-czkawka-dup' - Find duplicate files.
 ;;   `zr-czkawka-big' - List the biggest or smallest files.
 ;;   `zr-czkawka-image' - Find similar images.
+;;   `zr-czkawka-music' - Find the same music by tags or content.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -246,6 +247,14 @@ A reference file is listed first with an additional (reference . t)."
 (defun zr-czkawka--parse-groups (data)
   "Parse DATA, a JSON list of groups of similar files, into groups."
   (zr-czkawka--make-groups (zr-czkawka--collect data)))
+
+(defun zr-czkawka--remove-keys (groups &rest keys)
+  "Remove KEYS from the files of GROUPS, to save memory.
+Return GROUPS."
+  (dolist (grp groups groups)
+    (setf (alist-get 'files grp)
+          (mapcar (lambda (f) (cl-remove-if (lambda (e) (memq (car e) keys)) f))
+                  (alist-get 'files grp)))))
 
 (defun zr-czkawka--parse-files (data)
   "Parse DATA, a JSON list of files, into a single group."
@@ -948,6 +957,89 @@ Otherwise, prompt for directory(ies) and the maximum difference."
                      (zr-czkawka--number-reader
                       "Maximum difference (0-40)"
                       'zr-czkawka-image-max-difference)))
+
+;;;; Same music
+
+(defcustom zr-czkawka-music-search-method "TAGS"
+  "Default search method for the same music.
+\"TAGS\" compares tags, and \"CONTENT\" compares audio content."
+  :type '(choice (const "TAGS")
+                 (const "CONTENT")))
+
+(defcustom zr-czkawka-music-similarity nil
+  "Tags that must be equal for music to be the same, or nil for the CLI
+default, the title and artist."
+  :type '(choice (const :tag "Default" nil)
+                 (set (const "track_title") (const "track_artist")
+                      (const "year") (const "bitrate") (const "genre")
+                      (const "length"))))
+
+(defcustom zr-czkawka-music-approximate nil
+  "Non-nil means tags are compared approximately."
+  :type 'boolean)
+
+(defcustom zr-czkawka-music-min-file-size nil
+  "Minimum size in bytes of music files, or nil for the CLI default."
+  :type '(choice (const :tag "Default (8192)" nil)
+                 (integer :tag "Bytes")))
+
+(defun zr-czkawka-music--parse-json (data)
+  "Parse DATA, the JSON output of czkawka music, into groups."
+  (zr-czkawka--remove-keys (zr-czkawka--parse-groups data) 'fingerprint))
+
+(defun zr-czkawka--nonempty (value)
+  "Return VALUE if it is a non-empty string, else nil."
+  (and (stringp value) (not (string-empty-p value)) value))
+
+(defun zr-czkawka-music--annotate (file)
+  "Return the tags, length and bitrate of music FILE."
+  (let ((title (zr-czkawka--nonempty (alist-get 'track_title file)))
+        (artist (zr-czkawka--nonempty (alist-get 'track_artist file)))
+        (length (alist-get 'length file))
+        (bitrate (alist-get 'bitrate file)))
+    (string-join
+     (delq nil
+           (list (and (or title artist)
+                      (concat (or title "?") (and artist (concat " - " artist))))
+                 (zr-czkawka--nonempty (alist-get 'year file))
+                 (zr-czkawka--nonempty (alist-get 'genre file))
+                 (and (numberp length) (> length 0)
+                      (let ((seconds (truncate length)))
+                        (format "%d:%02d" (/ seconds 60) (% seconds 60))))
+                 (and (numberp bitrate) (> bitrate 0)
+                      (format "%d kbps" bitrate))))
+     ", ")))
+
+(defconst zr-czkawka-music-tool
+  (zr-czkawka-tool-create
+   :name "music"
+   :title "Same music"
+   :parse #'zr-czkawka-music--parse-json
+   :annotate #'zr-czkawka-music--annotate
+   :keymap zr-czkawka-group-map
+   :keys zr-czkawka--group-keys)
+  "The czkawka tool finding the same music.")
+
+(defun zr-czkawka-music--build-args (dirs search-method)
+  "Build CLI arguments finding the same music in DIRS with SEARCH-METHOD."
+  (append (zr-czkawka--directory-args dirs)
+          (list "-s" search-method)
+          (and zr-czkawka-music-similarity
+               (list "-z" (string-join zr-czkawka-music-similarity ",")))
+          (and zr-czkawka-music-approximate (list "-a"))
+          (and zr-czkawka-music-min-file-size
+               (list "-m" (number-to-string zr-czkawka-music-min-file-size)))))
+
+;;;###autoload
+(defun zr-czkawka-music (&optional raw)
+  "Scan directories for the same music using czkawka_cli.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies) and search method."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-music-tool raw #'zr-czkawka-music--build-args
+                     (zr-czkawka--option-reader
+                      "Search method" '("TAGS" "CONTENT")
+                      'zr-czkawka-music-search-method)))
 
 (provide 'zr-czkawka)
 

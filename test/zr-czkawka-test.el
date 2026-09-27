@@ -747,6 +747,63 @@ JSON properties; the files are created with their `size'."
                                     (alist-get 'files (car groups)))))))
       (delete-directory dir t))))
 
+(ert-deftest zr-czkawka-test-music-annotate ()
+  "Music details skip empty tags."
+  (should (equal (zr-czkawka-music--annotate
+                  '((track_title . "Song") (track_artist . "Me") (year . "2020")
+                    (genre . "") (length . 200) (bitrate . 320)))
+                 "Song - Me, 2020, 3:20, 320 kbps"))
+  (should (equal (zr-czkawka-music--annotate
+                  '((track_title . "") (track_artist . "Me") (length . 0)))
+                 "? - Me"))
+  (should (equal (zr-czkawka-music--annotate '((track_title . "") (bitrate . 0)))
+                 "")))
+
+(ert-deftest zr-czkawka-test-music-parse-drops-fingerprints ()
+  "Audio fingerprints are not kept in the results."
+  (let ((groups (zr-czkawka-music--parse-json
+                 (json-parse-string
+                  "[[{\"path\":\"/a\",\"fingerprint\":[1,2]},{\"path\":\"/b\",\"fingerprint\":[3]}]]"
+                  :object-type 'alist :array-type 'list))))
+    (should (equal groups '(((id . 1) (files ((path . "/a")) ((path . "/b")))))))))
+
+(ert-deftest zr-czkawka-test-music-build-args ()
+  "Test CLI arguments of czkawka music."
+  (let ((zr-czkawka-music-similarity '("track_title" "year"))
+        (zr-czkawka-music-approximate t)
+        (zr-czkawka-music-min-file-size 1))
+    (should (equal (zr-czkawka-music--build-args '("/tmp/a") "TAGS")
+                   (list "-d" (expand-file-name "/tmp/a") "-s" "TAGS"
+                         "-z" "track_title,year" "-a" "-m" "1")))))
+
+(ert-deftest zr-czkawka-test-music-cli ()
+  "czkawka music finds files with the same title and artist."
+  (zr-czkawka-test--skip-unless-cli)
+  (skip-unless (executable-find "ffmpeg"))
+  (let ((dir (make-temp-file "zr-czkawka-test-music" t)))
+    (unwind-protect
+        (let ((files (mapcar (lambda (n) (expand-file-name n dir))
+                             '("a.mp3" "b.mp3" "c.mp3"))))
+          (cl-mapc (lambda (file title)
+                     (zr-czkawka-test--ffmpeg
+                      "-f" "lavfi" "-i" "sine=frequency=440:duration=20"
+                      "-b:a" "64k" "-metadata" (concat "title=" title)
+                      "-metadata" "artist=Me" file))
+                   files '("Song" "Song" "Other"))
+          (let* ((zr-czkawka-music-min-file-size 1)
+                 (groups (zr-czkawka-test--run
+                          zr-czkawka-music-tool
+                          (zr-czkawka-music--build-args (list dir) "TAGS"))))
+            (should (= (length groups) 1))
+            (should (equal (sort (zr-czkawka-test--paths (car groups)) #'string<)
+                           (list (nth 0 files) (nth 1 files))))
+            (zr-czkawka-test--with-tool-buffer (zr-czkawka-music-tool groups dir)
+              (should (equal (zr-czkawka-test--annotations)
+                             (make-list 2 "Song - Me, 0:20, 64 kbps")))
+              (should (string-prefix-p " Czkawka Same music: 1 groups, 2 files"
+                                       header-line-format)))))
+      (delete-directory dir t))))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here
