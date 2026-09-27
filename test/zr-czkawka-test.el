@@ -804,6 +804,55 @@ JSON properties; the files are created with their `size'."
                                        header-line-format)))))
       (delete-directory dir t))))
 
+(ert-deftest zr-czkawka-test-video-annotate ()
+  "Video details, or the error of czkawka."
+  (should (equal (zr-czkawka-video--annotate
+                  '((width . 1920) (height . 1080) (codec . "h264") (duration . 3725.4)
+                    (bitrate . 26282) (fps . 29.97) (error . "")))
+                 "1920x1080, h264, 1:02:05, 26 kbps, 29.97 fps"))
+  (should (equal (zr-czkawka-video--annotate
+                  '((width . 320) (height . 240) (codec . "") (duration . 40.0)
+                    (bitrate . 0) (fps . 10.0)))
+                 "320x240, 0:40, 10 fps"))
+  (should (equal (zr-czkawka-video--annotate '((error . "Broken file")))
+                 "Broken file")))
+
+(ert-deftest zr-czkawka-test-video-build-args ()
+  "Test CLI arguments of czkawka video."
+  (let ((zr-czkawka-video-skip-forward 0)
+        (zr-czkawka-video-min-file-size 1))
+    (should (equal (zr-czkawka-video--build-args '("/tmp/a") 5)
+                   (list "-d" (expand-file-name "/tmp/a") "-t" "5"
+                         "-U" "0" "-m" "1")))))
+
+(ert-deftest zr-czkawka-test-video-cli ()
+  "czkawka video finds a resized copy of a video."
+  (zr-czkawka-test--skip-unless-cli)
+  (skip-unless (executable-find "ffmpeg"))
+  (let ((dir (make-temp-file "zr-czkawka-test-video" t)))
+    (unwind-protect
+        (let ((a (expand-file-name "a.mp4" dir))
+              (b (expand-file-name "b.mp4" dir)))
+          (zr-czkawka-test--ffmpeg "-f" "lavfi" "-i" "testsrc=size=320x240:duration=30:rate=10"
+                                   "-pix_fmt" "yuv420p" a)
+          (zr-czkawka-test--ffmpeg "-i" a "-vf" "scale=160:120" b)
+          (let* ((zr-czkawka-video-skip-forward 0)
+                 (zr-czkawka-video-min-file-size 1)
+                 (groups (zr-czkawka-test--run
+                          zr-czkawka-video-tool
+                          (zr-czkawka-video--build-args (list dir) 10))))
+            (should (= (length groups) 1))
+            (should (equal (sort (zr-czkawka-test--paths (car groups)) #'string<)
+                           (list a b)))
+            (should-not (assq 'vhash (car (alist-get 'files (car groups)))))
+            (zr-czkawka-test--with-tool-buffer (zr-czkawka-video-tool groups dir)
+              (should (equal (mapcar (lambda (s) (car (split-string s ",")))
+                                     (zr-czkawka-test--annotations))
+                             '("320x240" "160x120")))
+              (zr-czkawka-flag-all-except-highest-resolution)
+              (should (equal (zr-czkawka-test--flagged) (list b))))))
+      (delete-directory dir t))))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here

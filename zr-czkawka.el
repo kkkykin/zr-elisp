@@ -19,6 +19,7 @@
 ;;   `zr-czkawka-big' - List the biggest or smallest files.
 ;;   `zr-czkawka-image' - Find similar images.
 ;;   `zr-czkawka-music' - Find the same music by tags or content.
+;;   `zr-czkawka-video' - Find similar videos.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -255,6 +256,18 @@ Return GROUPS."
     (setf (alist-get 'files grp)
           (mapcar (lambda (f) (cl-remove-if (lambda (e) (memq (car e) keys)) f))
                   (alist-get 'files grp)))))
+
+(defun zr-czkawka--nonempty (value)
+  "Return VALUE if it is a non-empty string, else nil."
+  (and (stringp value) (not (string-empty-p value)) value))
+
+(defun zr-czkawka--format-duration (seconds)
+  "Return SECONDS formatted as [H:]MM:SS, or nil if it is not positive."
+  (when (and (numberp seconds) (> seconds 0))
+    (let ((s (truncate seconds)))
+      (if (>= s 3600)
+          (format "%d:%02d:%02d" (/ s 3600) (% (/ s 60) 60) (% s 60))
+        (format "%d:%02d" (/ s 60) (% s 60))))))
 
 (defun zr-czkawka--parse-files (data)
   "Parse DATA, a JSON list of files, into a single group."
@@ -987,15 +1000,10 @@ default, the title and artist."
   "Parse DATA, the JSON output of czkawka music, into groups."
   (zr-czkawka--remove-keys (zr-czkawka--parse-groups data) 'fingerprint))
 
-(defun zr-czkawka--nonempty (value)
-  "Return VALUE if it is a non-empty string, else nil."
-  (and (stringp value) (not (string-empty-p value)) value))
-
 (defun zr-czkawka-music--annotate (file)
   "Return the tags, length and bitrate of music FILE."
   (let ((title (zr-czkawka--nonempty (alist-get 'track_title file)))
         (artist (zr-czkawka--nonempty (alist-get 'track_artist file)))
-        (length (alist-get 'length file))
         (bitrate (alist-get 'bitrate file)))
     (string-join
      (delq nil
@@ -1003,9 +1011,7 @@ default, the title and artist."
                       (concat (or title "?") (and artist (concat " - " artist))))
                  (zr-czkawka--nonempty (alist-get 'year file))
                  (zr-czkawka--nonempty (alist-get 'genre file))
-                 (and (numberp length) (> length 0)
-                      (let ((seconds (truncate length)))
-                        (format "%d:%02d" (/ seconds 60) (% seconds 60))))
+                 (zr-czkawka--format-duration (alist-get 'length file))
                  (and (numberp bitrate) (> bitrate 0)
                       (format "%d kbps" bitrate))))
      ", ")))
@@ -1040,6 +1046,74 @@ Otherwise, prompt for directory(ies) and search method."
                      (zr-czkawka--option-reader
                       "Search method" '("TAGS" "CONTENT")
                       'zr-czkawka-music-search-method)))
+
+;;;; Similar videos
+
+(defcustom zr-czkawka-video-tolerance 10
+  "Default maximum difference between similar videos, from 0 to 20."
+  :type 'natnum)
+
+(defcustom zr-czkawka-video-skip-forward nil
+  "Seconds skipped at the start of videos, or nil for the CLI default."
+  :type '(choice (const :tag "Default (15)" nil)
+                 (natnum :tag "Seconds")))
+
+(defcustom zr-czkawka-video-min-file-size nil
+  "Minimum size in bytes of videos, or nil for the CLI default."
+  :type '(choice (const :tag "Default (8192)" nil)
+                 (integer :tag "Bytes")))
+
+(defun zr-czkawka-video--parse-json (data)
+  "Parse DATA, the JSON output of czkawka video, into groups."
+  (zr-czkawka--remove-keys (zr-czkawka--parse-groups data) 'vhash))
+
+(defun zr-czkawka-video--annotate (file)
+  "Return the dimensions, codec, duration, bitrate and frame rate of video FILE.
+Return the error of czkawka instead if it could not read FILE."
+  (or (zr-czkawka--nonempty (alist-get 'error file))
+      (let ((width (alist-get 'width file))
+            (bitrate (alist-get 'bitrate file))
+            (fps (alist-get 'fps file)))
+        (string-join
+         (delq nil
+               (list (and width (format "%sx%s" width (alist-get 'height file)))
+                     (zr-czkawka--nonempty (alist-get 'codec file))
+                     (zr-czkawka--format-duration (alist-get 'duration file))
+                     (and (numberp bitrate) (> bitrate 0)
+                          (format "%d kbps" (round bitrate 1000)))
+                     (and (numberp fps) (> fps 0)
+                          (format "%s fps" (string-trim-right
+                                            (format "%.2f" fps) "\\.?0+")))))
+         ", "))))
+
+(defconst zr-czkawka-video-tool
+  (zr-czkawka-tool-create
+   :name "video"
+   :title "Similar videos"
+   :parse #'zr-czkawka-video--parse-json
+   :annotate #'zr-czkawka-video--annotate
+   :keymap zr-czkawka-media-map
+   :keys zr-czkawka--media-keys)
+  "The czkawka tool finding similar videos.")
+
+(defun zr-czkawka-video--build-args (dirs tolerance)
+  "Build CLI arguments finding videos in DIRS within TOLERANCE."
+  (append (zr-czkawka--directory-args dirs)
+          (list "-t" (number-to-string tolerance))
+          (and zr-czkawka-video-skip-forward
+               (list "-U" (number-to-string zr-czkawka-video-skip-forward)))
+          (and zr-czkawka-video-min-file-size
+               (list "-m" (number-to-string zr-czkawka-video-min-file-size)))))
+
+;;;###autoload
+(defun zr-czkawka-video (&optional raw)
+  "Scan directories for similar videos using czkawka_cli.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies) and the tolerance."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-video-tool raw #'zr-czkawka-video--build-args
+                     (zr-czkawka--number-reader
+                      "Tolerance (0-20)" 'zr-czkawka-video-tolerance)))
 
 (provide 'zr-czkawka)
 
