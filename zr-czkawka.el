@@ -21,6 +21,7 @@
 ;;   `zr-czkawka-music' - Find the same music by tags or content.
 ;;   `zr-czkawka-video' - Find similar videos.
 ;;   `zr-czkawka-video-optimizer' - Find videos to transcode or crop.
+;;   `zr-czkawka-exif-remover' - Find images with EXIF tags to remove.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -41,7 +42,8 @@
 ;;         in each group, for images and videos.
 ;;
 ;; Keys in buffers of tools fixing files:
-;;   C-c C-c - Fix the marked files, e.g. transcode videos, then rescan.
+;;   C-c C-c - Fix the marked files, e.g. transcode videos or remove
+;;             EXIF tags, then rescan.
 ;;
 ;; Files are listed with `insert-directory' (`ls' or `ls-lisp') using
 ;; the Dired listing switches, and each group is sorted as `ls' would
@@ -1259,7 +1261,7 @@ videos, which do not affect the scan."
 ;;;###autoload
 (defun zr-czkawka-video-optimizer (&optional raw)
   "Scan directories for videos to transcode or crop using czkawka_cli.
-Mark videos and type \<zr-czkawka-fix-map>\[zr-czkawka-fix] to optimize them.
+Mark videos and type \\<zr-czkawka-fix-map>\\[zr-czkawka-fix] to optimize them.
 When called with prefix argument RAW, prompt for raw CLI arguments.
 Otherwise, prompt for directory(ies) and the kind of optimization."
   (interactive "P")
@@ -1268,6 +1270,57 @@ Otherwise, prompt for directory(ies) and the kind of optimization."
                      (zr-czkawka--option-reader
                       "Optimization" '("transcode" "crop")
                       'zr-czkawka-video-optimizer-mode)))
+
+;;;; EXIF remover
+
+(defcustom zr-czkawka-exif-remover-ignored-tags nil
+  "Names of EXIF tags neither listed nor removed, e.g. \"Orientation\"."
+  :type '(repeat string))
+
+(defcustom zr-czkawka-exif-remover-override nil
+  "Non-nil means EXIF tags are removed from the original images.
+Otherwise cleaned copies are saved next to the originals."
+  :type 'boolean)
+
+(defun zr-czkawka-exif-remover--annotate (file)
+  "Return the EXIF tags of image FILE.
+Return the error of czkawka instead if it could not read FILE."
+  (or (zr-czkawka--nonempty (alist-get 'error file))
+      (let ((tags (alist-get 'exif_tags file)))
+        (truncate-string-to-width
+         (format "%d tag(s): %s" (length tags)
+                 (mapconcat (lambda (tag) (alist-get 'name tag)) tags ", "))
+         80 nil nil t))))
+
+(defconst zr-czkawka-exif-remover-tool
+  (zr-czkawka-tool-create
+   :name "exif-remover"
+   :title "Images with EXIF"
+   :parse #'zr-czkawka--parse-files
+   :grouped nil
+   :annotate #'zr-czkawka-exif-remover--annotate
+   :keymap zr-czkawka-fix-map
+   :keys "[m] Mark [C-c C-c] Remove EXIF of marked [d] Flag [x] Delete [g] Refresh"
+   :fix "Remove EXIF tags from %d image(s)? ")
+  "The czkawka tool removing EXIF tags from images.")
+
+(defun zr-czkawka-exif-remover--build-args (dirs)
+  "Build CLI arguments finding images with EXIF tags in DIRS.
+Include the options used to remove tags, which do not affect the scan."
+  (append (zr-czkawka--directory-args dirs)
+          (and zr-czkawka-exif-remover-ignored-tags
+               (list "-i" (string-join zr-czkawka-exif-remover-ignored-tags ",")))
+          (and zr-czkawka-exif-remover-override (list "-o"))))
+
+;;;###autoload
+(defun zr-czkawka-exif-remover (&optional raw)
+  "Scan directories for images with EXIF tags using czkawka_cli.
+Mark images and type \\<zr-czkawka-fix-map>\\[zr-czkawka-fix] to remove their tags.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies)."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-exif-remover-tool raw
+                     #'zr-czkawka-exif-remover--build-args))
 
 (provide 'zr-czkawka)
 

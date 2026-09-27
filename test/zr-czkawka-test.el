@@ -928,6 +928,101 @@ JSON properties; the files are created with their `size'."
       (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))))
     (should-error (zr-czkawka-fix) :type 'user-error)))
 
+(defun zr-czkawka-test--bytes (n count &optional big-endian)
+  "Return integer N as a unibyte string of COUNT bytes.
+Bytes are little-endian unless BIG-ENDIAN is non-nil."
+  (let ((bytes (cl-loop for i below count
+                        collect (logand (ash n (* -8 i)) 255))))
+    (apply #'unibyte-string (if big-endian (nreverse bytes) bytes))))
+
+(defun zr-czkawka-test--add-exif (jpeg)
+  "Insert an EXIF segment with the Make and Software tags into JPEG."
+  (let* ((make "TestCam\0")
+         (software "zr-test\0")
+         ;; Header, entry count, 2 entries and the next IFD offset.
+         (data-offset (+ 8 2 (* 2 12) 4))
+         (tiff (concat "II*\0" (zr-czkawka-test--bytes 8 4)
+                       (zr-czkawka-test--bytes 2 2)
+                       (zr-czkawka-test--bytes #x010f 2) (zr-czkawka-test--bytes 2 2)
+                       (zr-czkawka-test--bytes (length make) 4)
+                       (zr-czkawka-test--bytes data-offset 4)
+                       (zr-czkawka-test--bytes #x0131 2) (zr-czkawka-test--bytes 2 2)
+                       (zr-czkawka-test--bytes (length software) 4)
+                       (zr-czkawka-test--bytes (+ data-offset (length make)) 4)
+                       (zr-czkawka-test--bytes 0 4)
+                       make software))
+         (app1 (concat "Exif\0\0" tiff)))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert-file-contents-literally jpeg)
+      ;; Right after the start of image marker.
+      (goto-char 3)
+      (insert (unibyte-string #xff #xe1)
+              (zr-czkawka-test--bytes (+ 2 (length app1)) 2 t)
+              app1)
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region nil nil jpeg nil 'silent)))))
+
+(ert-deftest zr-czkawka-test-exif-remover-annotate ()
+  "Images show their EXIF tags, or the error of czkawka."
+  (should (equal (zr-czkawka-exif-remover--annotate
+                  '((exif_tags ((name . "Make") (code . 271))
+                               ((name . "Software") (code . 305)))
+                    (error)))
+                 "2 tag(s): Make, Software"))
+  (should (equal (zr-czkawka-exif-remover--annotate '((error . "Bad image")))
+                 "Bad image")))
+
+(ert-deftest zr-czkawka-test-exif-remover-build-args ()
+  "Test CLI arguments of czkawka exif-remover."
+  (let ((zr-czkawka-exif-remover-ignored-tags '("Orientation" "DateTime"))
+        (zr-czkawka-exif-remover-override t))
+    (should (equal (zr-czkawka-exif-remover--build-args '("/tmp/a"))
+                   (list "-d" (expand-file-name "/tmp/a")
+                         "-i" "Orientation,DateTime" "-o")))))
+
+(ert-deftest zr-czkawka-test-exif-remover-cli ()
+  "Images with EXIF tags are listed, and fixing removes their tags."
+  (zr-czkawka-test--skip-unless-cli)
+  (skip-unless (executable-find "ffmpeg"))
+  (let ((dir (make-temp-file "zr-czkawka-test-exif" t)))
+    (unwind-protect
+        (let ((a (expand-file-name "a.jpg" dir))
+              (b (expand-file-name "b.jpg" dir))
+              (c (expand-file-name "c.jpg" dir))
+              (zr-czkawka-exif-remover-override t))
+          (zr-czkawka-test--ffmpeg "-f" "lavfi" "-i" "testsrc=size=64x64"
+                                   "-frames:v" "1" a)
+          (copy-file a b)
+          (copy-file a c)
+          (zr-czkawka-test--add-exif a)
+          (zr-czkawka-test--add-exif b)
+          (let* ((args (zr-czkawka-exif-remover--build-args (list dir)))
+                 (groups (zr-czkawka-test--run zr-czkawka-exif-remover-tool args))
+                 rescanned)
+            (should (equal (sort (zr-czkawka-test--paths (car groups)) #'string<)
+                           (list a b)))
+            (zr-czkawka-test--with-tool-buffer (zr-czkawka-exif-remover-tool groups dir)
+              (setq zr-czkawka--params (list :directory dir :args args))
+              (should (equal (zr-czkawka-test--annotations)
+                             (make-list 2 "2 tag(s): Make, Software")))
+              (should (string-prefix-p " Czkawka Images with EXIF: 2 files"
+                                       header-line-format))
+              (dired-goto-file a)
+              (cl-letf (((symbol-function 'y-or-n-p) #'always)
+                        ((symbol-function 'zr-czkawka--scan)
+                         (lambda (&rest _) (setq rescanned t))))
+                (zr-czkawka-fix)
+                (with-timeout (120 (error "Timed out"))
+                  (while (not rescanned) (accept-process-output nil 0.1)))))
+            ;; Only the marked image was cleaned, in place.
+            (should (equal (zr-czkawka-test--paths
+                            (car (zr-czkawka-test--run zr-czkawka-exif-remover-tool args)))
+                           (list b)))
+            (should (equal (directory-files dir nil "\\.jpg\\'")
+                           '("a.jpg" "b.jpg" "c.jpg")))))
+      (delete-directory dir t))))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here
