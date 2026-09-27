@@ -29,8 +29,8 @@
 ;; Supports visiting/saving files, completion, Dired, directory creation,
 ;; deletion, copying and renaming, including transfers to/from local files.
 ;; Directory listings use PROPFIND; same-server copies/moves use COPY/MOVE.
-;; Background completion and mode-line checks use cached metadata without
-;; starting synchronous HTTP requests.
+;; Background completion and mode-line checks can contact an endpoint
+;; after it has answered a request.  They never prompt for credentials.
 ;; File contents are staged locally to preserve Emacs coding conventions.
 ;; ETags (or Last-Modified) guard saves and read/modify/write appends when
 ;; the server supplies them.  Exclusive creation uses If-None-Match.
@@ -86,6 +86,11 @@ Headers are never forwarded to a different origin on redirects."
 
 (defvar zr-tramp-webdav--passwords (make-hash-table :test #'equal)
   "Credentials entered interactively, keyed by remote identity.")
+
+(defvar zr-tramp-webdav--connected (make-hash-table :test #'equal)
+  "Remote identities that can serve `non-essential' requests.
+An endpoint is connected after it answers a request, until a transport
+error, an authentication failure, or `zr-tramp-webdav-clear-cache'.")
 
 (defvar-local zr-tramp-webdav--visited nil
   "File name and HTTP validators recorded when visiting or saving a file.")
@@ -176,7 +181,7 @@ Headers are never forwarded to a different origin on redirects."
                           (when entry
                             (cons (plist-get entry :user)
                                   (if (functionp secret) (funcall secret) secret))))))
-    (when (and (not credentials) prompt (not noninteractive))
+    (when (and (not credentials) prompt (not noninteractive) (not non-essential))
       (setq credentials
             (cons (if (string-empty-p (or user ""))
                       (read-string (format "WebDAV user for %s: " host))
@@ -325,8 +330,24 @@ Use the final header block, skipping proxy and informational responses."
 (defun zr-tramp-webdav--request (file method &optional headers data)
   "Send a WebDAV METHOD request for FILE with HEADERS and DATA.
 Return a plist containing :status, :headers, :body and the final :url.
-HTTP error codes are left to the caller; transport errors are signaled."
-  (when non-essential (throw 'zr-tramp-webdav--non-essential nil))
+HTTP error codes are left to the caller; transport errors are signaled.
+Background requests only contact endpoints that have already answered."
+  (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
+         (key (tramp-make-tramp-file-name vec 'noloc)))
+    (when (and non-essential (not (gethash key zr-tramp-webdav--connected)))
+      (throw 'zr-tramp-webdav--non-essential nil))
+    (condition-case err
+        (let ((response (zr-tramp-webdav--retrieve file method headers data)))
+          (if (= (plist-get response :status) 401)
+              (remhash key zr-tramp-webdav--connected)
+            (puthash key t zr-tramp-webdav--connected))
+          response)
+      ;; Quits and input interrupting completion leave the endpoint usable.
+      (error (remhash key zr-tramp-webdav--connected)
+             (signal (car err) (cdr err))))))
+
+(defun zr-tramp-webdav--retrieve (file method headers data)
+  "Send METHOD for FILE with HEADERS and DATA, handling auth and redirects."
   (unless (and (numberp zr-tramp-webdav-timeout) (> zr-tramp-webdav-timeout 0))
     (signal 'file-error '("WebDAV timeout must be positive")))
   (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
@@ -1023,9 +1044,10 @@ DIRECTORY permits replacing an empty directory.  Return overwrite consent."
 
 ;;;###autoload
 (defun zr-tramp-webdav-clear-cache ()
-  "Forget WebDAV file metadata and interactively entered credentials."
+  "Forget WebDAV metadata, entered credentials, and connection state."
   (interactive)
   (clrhash zr-tramp-webdav--passwords)
+  (clrhash zr-tramp-webdav--connected)
   (dolist (key (hash-table-keys tramp-cache-data))
     (when (and (tramp-file-name-p key) (zr-tramp-webdav-file-name-p key))
       (remhash key tramp-cache-data))))

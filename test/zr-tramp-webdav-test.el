@@ -63,6 +63,7 @@
          (tramp-cache-data (make-hash-table :test #'equal))
          (tramp-verbose 0)
          (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
+         (zr-tramp-webdav--connected (make-hash-table :test #'equal))
          (zr-tramp-webdav-timeout 3)
          (zr-tramp-webdav-extra-headers nil))
      (setenv "NO_PROXY" "*")
@@ -229,7 +230,7 @@
                                           tramp-cache-undefined)
                   tramp-cache-undefined)))))
 
-(ert-deftest zr-tramp-webdav-background-checks-use-cached-listings ()
+(ert-deftest zr-tramp-webdav-background-requests-reuse-known-endpoints ()
   (zr-tramp-webdav-test--with-backends
     (let ((file (concat root "note.txt"))
           (directory (concat root "folder/")))
@@ -252,7 +253,8 @@
           (should (= requests 0))
           (should (file-exists-p file))
           (should (= requests 1))
-          (should (equal (directory-files root) '("." ".." "folder" "note.txt")))
+          (let ((non-essential t))
+            (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (should (= requests 2))
           (let ((non-essential t))
             (dotimes (_ 3)
@@ -262,24 +264,25 @@
               (should (equal (file-name-all-completions "f" root) '("folder/")))
               (should (equal (directory-files root t "txt$") (list file)))))
           (should (= requests 2))
-          ;; An expired/bypassed cache must remain quiet, without overwriting
-          ;; the stored entries.  An explicit refresh can still fetch them.
+          ;; Connected endpoints also refresh expired or bypassed metadata.
           (let ((non-essential t)
                 (remote-file-name-inhibit-cache t))
-            (should-not (file-attributes file))
-            (should-not (directory-files root)))
-          (should (= requests 2))
+            (should (file-attributes file))
+            (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
+          (should (= requests 4))
           (let ((non-essential t))
             (should (file-exists-p file))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (let ((remote-file-name-inhibit-cache t))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
-          (should (= requests 3)))))))
+          (should (= requests 5)))))))
 
 (ert-deftest zr-tramp-webdav-background-completion-after-dired ()
   (zr-tramp-webdav-test--with-backends
-    (make-directory (concat root "alpha/"))
+    (make-directory (concat root "alpha/nested/") t)
     (write-region "text" nil (concat root "note.txt") nil 'silent)
+    (write-region "text" nil (concat root "alpha/nested/leaf.txt") nil 'silent)
+    (zr-tramp-webdav-clear-cache)
     (let ((buffer (dired-noselect root)))
       (unwind-protect
           (with-current-buffer buffer
@@ -287,7 +290,9 @@
                   (completion-styles '(flex))
                   (completion-category-defaults nil)
                   (completion-category-overrides nil))
-              (dolist (case '(("al" . "alpha/") ("nt" . "note.txt")))
+              (dolist (case '(("al" . "alpha/") ("nt" . "note.txt")
+                              ("alpha/ne" . "nested/")
+                              ("alpha/nested/lf" . "leaf.txt")))
                 (let ((input (concat default-directory (car case))))
                   (should (equal (car (completion-all-completions
                                        input #'read-file-name-internal nil
@@ -297,6 +302,56 @@
                 (should (equal (file-name-all-completions "" default-directory)
                                '("note.txt"))))))
         (kill-buffer buffer)))))
+
+(ert-deftest zr-tramp-webdav-background-transport-failure-needs-explicit-retry ()
+  (zr-tramp-webdav-test--with-backends
+    (let* ((directory (concat root "folder/"))
+           (transport (if (eq zr-tramp-webdav-backend 'curl)
+                          'zr-tramp-webdav--curl-request
+                        'zr-tramp-webdav--url-request))
+           (requests 0))
+      (make-directory (concat directory "nested/leaf/") t)
+      (zr-tramp-webdav-clear-cache)
+      (directory-files root)
+      (cl-letf (((symbol-function transport)
+                 (lambda (&rest _args)
+                   (cl-incf requests)
+                   (signal 'file-error '("Connection lost")))))
+        (let ((non-essential t))
+          (should-error (file-name-all-completions "" directory) :type 'file-error)
+          (should-not (file-name-all-completions "" directory)))
+        (should (= requests 1)))
+      ;; An explicit retry restores background access to uncached directories.
+      (should (equal (directory-files directory) '("." ".." "nested")))
+      (let ((non-essential t))
+        (should (equal (file-name-all-completions "l" (concat directory "nested/"))
+                       '("leaf/")))))))
+
+(ert-deftest zr-tramp-webdav-background-authentication-never-prompts ()
+  (zr-tramp-webdav-test--with-backends
+    (let* ((protected (format "/webdav:127.0.0.1#%s:/auth/" port))
+           (prompts 0)
+           (noninteractive nil))
+      ;; The public fixture collection has already made this endpoint known.
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _args) (cl-incf prompts) "alice"))
+                ((symbol-function 'read-passwd)
+                 (lambda (&rest _args) (cl-incf prompts) "app-password")))
+        (let ((non-essential t))
+          (should-error (directory-files protected) :type 'file-error)
+          ;; A 401 suspends background requests until an explicit retry.
+          (should-not (directory-files protected)))
+        (should (= prompts 0)))
+      ;; Foreground access can authenticate again, then completion can resume.
+      (let ((zr-tramp-webdav-extra-headers
+             (list (cons "Authorization"
+                         (concat "Basic "
+                                 (base64-encode-string "alice:app-password" t))))))
+        (should (equal (directory-files protected) '("." ".." "secret.txt")))
+        (let ((non-essential t)
+              (remote-file-name-inhibit-cache t))
+          (should (equal (file-name-all-completions "s" protected)
+                         '("secret.txt"))))))))
 
 (ert-deftest zr-tramp-webdav-visiting-saving-and-backups ()
   (zr-tramp-webdav-test--with-backends
