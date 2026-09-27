@@ -276,6 +276,28 @@
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (should (= requests 3)))))))
 
+(ert-deftest zr-tramp-webdav-background-completion-after-dired ()
+  (zr-tramp-webdav-test--with-backends
+    (make-directory (concat root "alpha/"))
+    (write-region "text" nil (concat root "note.txt") nil 'silent)
+    (let ((buffer (dired-noselect root)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (let ((non-essential t)
+                  (completion-styles '(flex))
+                  (completion-category-defaults nil)
+                  (completion-category-overrides nil))
+              (dolist (case '(("al" . "alpha/") ("nt" . "note.txt")))
+                (let ((input (concat default-directory (car case))))
+                  (should (equal (car (completion-all-completions
+                                       input #'read-file-name-internal nil
+                                       (length input)))
+                                 (cdr case)))))
+              (let ((completion-regexp-list '("txt\\'")))
+                (should (equal (file-name-all-completions "" default-directory)
+                               '("note.txt"))))))
+        (kill-buffer buffer)))))
+
 (ert-deftest zr-tramp-webdav-visiting-saving-and-backups ()
   (zr-tramp-webdav-test--with-backends
     (let* ((file (concat root "visited.txt"))

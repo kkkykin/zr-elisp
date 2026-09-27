@@ -226,6 +226,32 @@
         (should (file-directory-p remote))
         (should (equal (complete) '("dir/")))))))
 
+(ert-deftest zr-tramp-rcrc-real-background-completion-after-dired ()
+  (zr-tramp-rcrc-test--with-server
+    (make-directory (expand-file-name "alpha/nested" local) t)
+    (write-region "text" nil (expand-file-name "note.txt" local) nil 'silent)
+    (let ((buffer (dired-noselect remote)))
+      (unwind-protect
+          (with-current-buffer buffer
+            ;; fido queries the file table with flex after C-x C-f, including
+            ;; directories whose contents Dired has not listed yet.
+            (let ((non-essential t)
+                  (completion-styles '(flex))
+                  (completion-category-defaults nil)
+                  (completion-category-overrides nil))
+              (dolist (case '(("al" . "alpha/")
+                              ("nt" . "note.txt")
+                              ("alpha/ne" . "nested/")))
+                (let ((input (concat default-directory (car case))))
+                  (should (equal (car (completion-all-completions
+                                       input #'read-file-name-internal nil
+                                       (length input)))
+                                 (cdr case)))))
+              (let ((completion-regexp-list '("txt\\'")))
+                (should (equal (file-name-all-completions "" default-directory)
+                               '("note.txt"))))))
+        (kill-buffer buffer)))))
+
 (ert-deftest zr-tramp-rcrc-real-visit-save-and-append ()
   (zr-tramp-rcrc-test--with-server
     (let ((file (concat remote "notes 中.txt")))

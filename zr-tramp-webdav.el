@@ -574,7 +574,9 @@ Encoded slashes and dot components are rejected to preserve hierarchy."
 
 (defun zr-tramp-webdav--all-completions (file directory)
   "Return completions for FILE in DIRECTORY."
-  (tramp-skeleton-file-name-all-completions file directory
+  ;; Newer TRAMP completion skeletons require a persistent TRAMP process.
+  ;; Cached HTTP listings are usable without one.
+  (ignore-error file-missing
     (let ((completion-ignore-case read-file-name-completion-ignore-case))
       (all-completions
        file (mapcar (lambda (entry)

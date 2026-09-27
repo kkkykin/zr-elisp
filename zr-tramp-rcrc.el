@@ -415,7 +415,9 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
 
 (defun zr-tramp-rcrc--all-completions (file directory)
   "Return completions for FILE in DIRECTORY."
-  (tramp-skeleton-file-name-all-completions file directory
+  ;; Newer TRAMP completion skeletons require a persistent TRAMP process.
+  ;; HTTP endpoints use the connection policy in `zr-tramp-rcrc--http'.
+  (ignore-error file-missing
     (let ((completion-ignore-case read-file-name-completion-ignore-case))
       (all-completions
        file (mapcar (lambda (entry)
