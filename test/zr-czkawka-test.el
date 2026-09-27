@@ -651,6 +651,102 @@ SPEC is (TOOL GROUPS-FORM DIRECTORY).  Run BODY in the buffer."
                          (list (nth 2 files)))))
       (delete-directory dir t))))
 
+(defun zr-czkawka-test--ffmpeg (&rest args)
+  "Run ffmpeg with ARGS, signaling an error on failure."
+  (with-temp-buffer
+    (unless (zerop (apply #'call-process "ffmpeg" nil t nil
+                          "-loglevel" "error" "-y" args))
+      (error "ffmpeg failed: %s" (buffer-string)))))
+
+(defun zr-czkawka-test--json-files (dir &rest files)
+  "Return a JSON array of czkawka FILES entries in DIR.
+Each of FILES is a list (NAME . PROPS), where PROPS is a plist of
+JSON properties; the files are created with their `size'."
+  (concat "["
+          (mapconcat
+           (lambda (f)
+             (let ((path (expand-file-name (car f) dir)))
+               (with-temp-file path
+                 (insert (make-string (or (plist-get (cdr f) :size) 1) ?x)))
+               (json-serialize
+                (append (list :path path :modified_date 1) (cdr f)))))
+           files ",")
+          "]"))
+
+(ert-deftest zr-czkawka-test-image-render-and-flag ()
+  "Similar images show their details and keep the highest resolution."
+  (let* ((dir (make-temp-file "zr-czkawka-test-image" t))
+         (json (format "[%s,[%s,%s]]"
+                       (zr-czkawka-test--json-files
+                        dir '("a.png" :size 3 :width 640 :height 480 :difference 0)
+                        '("b.jpg" :size 5 :width 320 :height 240 :difference 4))
+                       ;; A reference file is followed by its similar files.
+                       (substring
+                        (zr-czkawka-test--json-files
+                         dir '("ref.png" :size 2 :width 100 :height 100 :difference 0))
+                        1 -1)
+                       (zr-czkawka-test--json-files
+                        dir '("c.png" :size 9 :width 10 :height 10 :difference 2))))
+         (groups (zr-czkawka--parse-groups
+                  (json-parse-string json :object-type 'alist :array-type 'list))))
+    (unwind-protect
+        (zr-czkawka-test--with-tool-buffer (zr-czkawka-image-tool groups dir)
+          (should (equal (mapcar #'zr-czkawka-test--paths groups)
+                         (list (list (expand-file-name "a.png" dir)
+                                     (expand-file-name "b.jpg" dir))
+                               (list (expand-file-name "ref.png" dir)
+                                     (expand-file-name "c.png" dir)))))
+          (should (equal (zr-czkawka-test--annotations)
+                         '("640x480, difference 0" "320x240, difference 4"
+                           "100x100, difference 0" "10x10, difference 2")))
+          (should (string-prefix-p " Czkawka Similar images: 2 groups, 4 files (12B wasted)"
+                                   header-line-format))
+          (should (eq (key-binding (kbd "% p"))
+                      #'zr-czkawka-flag-all-except-highest-resolution))
+          (should (eq (key-binding (kbd "% n")) #'zr-czkawka-flag-all-except-newest))
+          (zr-czkawka-flag-all-except-highest-resolution)
+          (should (equal (zr-czkawka-test--flagged)
+                         (list (expand-file-name "b.jpg" dir))))
+          ;; Details go away with their line.
+          (dired-goto-file (expand-file-name "b.jpg" dir))
+          (dired-kill-line)
+          (should (equal (length (zr-czkawka-test--annotations)) 3)))
+      (delete-directory dir t))))
+
+(ert-deftest zr-czkawka-test-image-build-args ()
+  "Test CLI arguments of czkawka image."
+  (let ((zr-czkawka-image-hash-size 8)
+        (zr-czkawka-image-hash-alg "Mean")
+        (zr-czkawka-image-min-file-size 1))
+    (should (equal (zr-czkawka-image--build-args '("/tmp/a") 3)
+                   (list "-d" (expand-file-name "/tmp/a") "-s" "3"
+                         "-c" "8" "-g" "Mean" "-m" "1")))))
+
+(ert-deftest zr-czkawka-test-image-cli ()
+  "czkawka image finds a resized copy of an image."
+  (zr-czkawka-test--skip-unless-cli)
+  (skip-unless (executable-find "ffmpeg"))
+  (let ((dir (make-temp-file "zr-czkawka-test-image" t)))
+    (unwind-protect
+        (let ((a (expand-file-name "a.png" dir))
+              (b (expand-file-name "b.jpg" dir)))
+          (zr-czkawka-test--ffmpeg "-f" "lavfi" "-i" "testsrc=size=640x480"
+                                   "-frames:v" "1" a)
+          (zr-czkawka-test--ffmpeg "-i" a "-q:v" "5" b)
+          (let* ((zr-czkawka-image-min-file-size 1)
+                 (groups (zr-czkawka-test--run
+                          zr-czkawka-image-tool
+                          (zr-czkawka-image--build-args (list dir) 5))))
+            (should (= (length groups) 1))
+            (should (equal (sort (zr-czkawka-test--paths (car groups)) #'string<)
+                           (list a b)))
+            (should (member "640x480"
+                            (mapcar (lambda (f) (car (split-string
+                                                      (zr-czkawka-image--annotate f)
+                                                      ",")))
+                                    (alist-get 'files (car groups)))))))
+      (delete-directory dir t))))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here

@@ -17,6 +17,7 @@
 ;; Commands:
 ;;   `zr-czkawka-dup' - Find duplicate files.
 ;;   `zr-czkawka-big' - List the biggest or smallest files.
+;;   `zr-czkawka-image' - Find similar images.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -33,6 +34,8 @@
 ;;   % o - Flag all files except the oldest in each group.
 ;;   % f - Flag all files except the first in each group.
 ;;   % b - Flag all files except the biggest in each group.
+;;   % p - Flag all files except the one with the highest resolution
+;;         in each group, for images and videos.
 ;;
 ;; Files are listed with `insert-directory' (`ls' or `ls-lisp') using
 ;; the Dired listing switches, and each group is sorted as `ls' would
@@ -270,6 +273,17 @@ A reference file is listed first with an additional (reference . t)."
   "[d] Flag [x] Delete [%% n] Keep newest [%% o] Keep oldest [%% f] Keep first [%% b] Keep biggest [g] Refresh"
   "Header line key hints of result buffers showing groups.")
 
+(defvar zr-czkawka-media-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map zr-czkawka-group-map)
+    (define-key map (kbd "% p") #'zr-czkawka-flag-all-except-highest-resolution)
+    map)
+  "Keymap of result buffers showing groups of similar images or videos.")
+
+(defconst zr-czkawka--media-keys
+  (concat zr-czkawka--group-keys " [%% p] Keep highest resolution")
+  "Header line key hints of result buffers showing images or videos.")
+
 (define-minor-mode zr-czkawka-mode
   "Minor mode for czkawka results in a Virtual Dired buffer.
 The keymap depends on the czkawka tool of the results.
@@ -379,6 +393,16 @@ Show the details of FILE given by the tool after its name."
   "Return the total size in bytes of FILES."
   (apply #'+ (mapcar (lambda (f) (or (alist-get 'size f) 0)) files)))
 
+(defun zr-czkawka--wasted-size (files)
+  "Return the size in bytes that deleting all but one of FILES saves.
+The reference file is kept if any, and otherwise the biggest file."
+  (let ((sizes (mapcar (lambda (f) (or (alist-get 'size f) 0))
+                       (cl-remove-if (lambda (f) (alist-get 'reference f))
+                                     files))))
+    (if (alist-get 'reference (car files))
+        (apply #'+ sizes)
+      (- (apply #'+ sizes) (apply #'max sizes)))))
+
 (defun zr-czkawka--insert-groups ()
   "Replace the buffer contents with the groups of the current results.
 List files with `dired-actual-switches', skipping files no longer on
@@ -418,12 +442,8 @@ disk and groups left without files, and update the header line."
             (insert "\n")
             (cl-incf total-groups)
             (cl-incf total-files (length files))
-            ;; For groups, count what deleting all but the biggest saves.
             (cl-incf total-size
-                     (if grouped
-                         (- size (apply #'max (mapcar (lambda (f) (or (alist-get 'size f) 0))
-                                                      files)))
-                       size))))))
+                     (if grouped (zr-czkawka--wasted-size files) size))))))
     (dired-build-subdir-alist)
     (set-buffer-modified-p nil)
     ;; `%%%%' survives both `format' and mode line %-construct expansion,
@@ -616,6 +636,17 @@ With prefix argument CURRENT-GROUP-ONLY, operate only on the group at point."
   (zr-czkawka--flag (zr-czkawka--all-except-best
                      (lambda (f) (or (alist-get 'size f) 0)))
                     current-group-only "biggest"))
+
+(defun zr-czkawka--resolution (file)
+  "Return the number of pixels of FILE as czkawka reported it."
+  (* (or (alist-get 'width file) 0) (or (alist-get 'height file) 0)))
+
+(defun zr-czkawka-flag-all-except-highest-resolution (&optional current-group-only)
+  "Flag all files for deletion except the highest resolution in each group.
+With prefix argument CURRENT-GROUP-ONLY, operate only on the group at point."
+  (interactive "P")
+  (zr-czkawka--flag (zr-czkawka--all-except-best #'zr-czkawka--resolution)
+                    current-group-only "highest resolution"))
 
 (defun zr-czkawka--set-mark (pos from to)
   "Replace mark FROM with TO at POS; return non-nil if replaced."
@@ -855,6 +886,68 @@ Otherwise, prompt for directory(ies), the kind and number of files."
                       "Find" '("biggest" "smallest") 'zr-czkawka-big-mode)
                      (zr-czkawka--number-reader
                       "Number of files" 'zr-czkawka-big-number-of-files)))
+
+;;;; Similar images
+
+(defcustom zr-czkawka-image-max-difference 5
+  "Default maximum difference between similar images, from 0 to 40.
+Values up to 10 suit a hash size of 8, and up to 20 a hash size of 16."
+  :type 'natnum)
+
+(defcustom zr-czkawka-image-hash-size 16
+  "Size of the perceptual hash of images, or nil for the CLI default."
+  :type '(choice (const :tag "Default" nil)
+                 (const 8) (const 16) (const 32) (const 64)))
+
+(defcustom zr-czkawka-image-hash-alg nil
+  "Perceptual hash algorithm of images, or nil for the CLI default."
+  :type '(choice (const :tag "Default" nil)
+                 (const "Mean") (const "Gradient") (const "Blockhash")
+                 (const "VertGradient") (const "DoubleGradient")
+                 (const "Median")))
+
+(defcustom zr-czkawka-image-min-file-size nil
+  "Minimum size in bytes of images to compare, or nil for the CLI default."
+  :type '(choice (const :tag "Default (16384)" nil)
+                 (integer :tag "Bytes")))
+
+(defun zr-czkawka-image--annotate (file)
+  "Return the dimensions and difference of image FILE."
+  (format "%sx%s, difference %s"
+          (alist-get 'width file) (alist-get 'height file)
+          (alist-get 'difference file)))
+
+(defconst zr-czkawka-image-tool
+  (zr-czkawka-tool-create
+   :name "image"
+   :title "Similar images"
+   :parse #'zr-czkawka--parse-groups
+   :annotate #'zr-czkawka-image--annotate
+   :keymap zr-czkawka-media-map
+   :keys zr-czkawka--media-keys)
+  "The czkawka tool finding similar images.")
+
+(defun zr-czkawka-image--build-args (dirs max-difference)
+  "Build CLI arguments finding images in DIRS within MAX-DIFFERENCE."
+  (append (zr-czkawka--directory-args dirs)
+          (list "-s" (number-to-string max-difference))
+          (and zr-czkawka-image-hash-size
+               (list "-c" (number-to-string zr-czkawka-image-hash-size)))
+          (and zr-czkawka-image-hash-alg
+               (list "-g" zr-czkawka-image-hash-alg))
+          (and zr-czkawka-image-min-file-size
+               (list "-m" (number-to-string zr-czkawka-image-min-file-size)))))
+
+;;;###autoload
+(defun zr-czkawka-image (&optional raw)
+  "Scan directories for similar images using czkawka_cli.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies) and the maximum difference."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-image-tool raw #'zr-czkawka-image--build-args
+                     (zr-czkawka--number-reader
+                      "Maximum difference (0-40)"
+                      'zr-czkawka-image-max-difference)))
 
 (provide 'zr-czkawka)
 
