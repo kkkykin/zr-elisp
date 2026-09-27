@@ -2,16 +2,19 @@
 
 ;;; Commentary:
 
-;; ERT tests for FFmpeg subtitle input, mapping, and burn-in handling.
+;; ERT tests for FFmpeg subtitle input, mapping, and burn-in handling, and
+;; for remote files.  Remote integration tests run FFmpeg and curl against
+;; the WebDAV fixture and, when rclone is available, a local rcd.
 
 ;;; Code:
 
 (require 'ert)
 
-(load (expand-file-name
-       "../zr-ffmpeg.el"
-       (file-name-directory (or load-file-name buffer-file-name)))
-      nil 'nomessage)
+(defconst zr-ffmpeg-test--directory
+  (file-name-directory (or load-file-name buffer-file-name)))
+
+(dolist (file '("../zr-ffmpeg.el" "../zr-tramp-webdav.el" "../zr-tramp-rcrc.el"))
+  (load (expand-file-name file zr-ffmpeg-test--directory) nil 'nomessage))
 
 (declare-function zr-ffmpeg--new-page "zr-ffmpeg")
 (declare-function zr-ffmpeg--build-command "zr-ffmpeg")
@@ -626,6 +629,582 @@ values."
       (should (eq zr-ffmpeg--video-toggle t))
       (should (eq zr-ffmpeg--audio-toggle t))
       (should (eq zr-ffmpeg--subtitle-mode 'soft-default)))))
+
+;;; Remote files
+
+(defmacro zr-ffmpeg-test--with-remote-requests (&rest body)
+  "Evaluate BODY with readable remote files and fake HTTP requests."
+  (declare (indent 0) (debug body))
+  `(cl-letf (((symbol-function 'zr-ffmpeg--remote-backend) #'ignore)
+             ((symbol-function 'zr-ffmpeg--remote-request)
+              (lambda (file &optional upload _resolve)
+                (cons (concat (if (string-prefix-p "/webdavs:" file) "https" "http")
+                              "://example.org/" (if upload "upload/" "")
+                              (file-name-nondirectory file))
+                      '(("Authorization" . "Basic eDp5") ("X-Test" . "1")))))
+             ((symbol-function 'file-regular-p) (lambda (_file) t))
+             ((symbol-function 'file-directory-p)
+              (let ((original (symbol-function 'file-directory-p)))
+                (lambda (file)
+                  (if (file-remote-p file) (directory-name-p file)
+                    (funcall original file))))))
+     ,@body))
+
+(ert-deftest zr-ffmpeg-test-remote-source-classification ()
+  "TRAMP names are remote files, distinct from local paths and URLs."
+  (dolist (source '("/webdav:host#8080:/dav/in.mkv" "/rcrc:127.0.0.1#5572:/fx:/in.mkv"))
+    (should (zr-ffmpeg--remote-p source))
+    (should (zr-ffmpeg--file-p source))
+    (should-not (zr-ffmpeg--local-path-p source)))
+  (should (zr-ffmpeg--local-path-p "/tmp/in.mkv"))
+  (dolist (source '("/tmp/in.mkv" "https://example.com/in.mkv" "-" nil))
+    (should-not (zr-ffmpeg--remote-p source))))
+
+(ert-deftest zr-ffmpeg-test-capture-sources-are-not-file-names ()
+  "Device and filter inputs must not be expanded like file names."
+  (let ((default-directory temporary-file-directory)
+        (audio (zr-ffmpeg--new-page 1))
+        (screen (zr-ffmpeg--new-page 2)))
+    (setf (plist-get audio :kind) 'audio-device
+          (plist-get audio :audio-device) "Microphone (USB)"
+          (plist-get screen :kind) 'screen
+          (plist-get screen :monitor) 0)
+    (zr-ffmpeg-test--with-task (list audio screen) 'separate
+      (let ((specs (zr-ffmpeg--input-specs (list audio screen))))
+        (should (equal (mapcar (lambda (spec) (plist-get spec :source)) specs)
+                       (list "audio=Microphone (USB)"
+                             (zr-ffmpeg--screen-filter screen))))
+        (should-not (cl-some (lambda (spec) (plist-get spec :file)) specs))))))
+
+(ert-deftest zr-ffmpeg-test-input-basename ()
+  "Only URLs lose their query and fragment in default output names."
+  (should (equal (zr-ffmpeg--input-basename "/webdav:host#8080:/dav/in.mkv") "in"))
+  (should (equal (zr-ffmpeg--input-basename "/tmp/a#b?c.mkv") "a#b?c"))
+  (should (equal (zr-ffmpeg--input-basename
+                  "https://example.com/v/in.mkv?token=a#t=1")
+                 "in"))
+  (should (equal (zr-ffmpeg--input-basename "https://example.com/") "recording")))
+
+(ert-deftest zr-ffmpeg-test-remote-task-keeps-file-names ()
+  "Task commands name remote files, and outputs default next to the input."
+  (let* ((input "/webdav:host#8080:/dav/in.mkv")
+         (page (zr-ffmpeg-test--page 1 input)))
+    (zr-ffmpeg-test--with-task (list page) 'separate
+      (setq zr-ffmpeg--output-format "mp4")
+      (let* ((output (zr-ffmpeg--output-for-input))
+             (argv (zr-ffmpeg--build-command (list page) output)))
+        (should (equal output "/webdav:host#8080:/dav/in.mp4"))
+        (should (equal (zr-ffmpeg-test--option-values "-i" argv) (list input)))
+        (should (equal (car (last argv)) output)))
+      (should (string-match-p
+               "identical"
+               (error-message-string
+                (should-error (zr-ffmpeg--build-command (list page) input)
+                              :type 'user-error))))
+      ;; Burn-in subtitles are read by a filter, which cannot send headers.
+      (setf (plist-get page :subtitle-source) "/webdav:host#8080:/dav/in.srt"
+            (plist-get page :overrides) '(:subtitle-mode burn-in))
+      (setf (plist-get page :preset) 'file-stream)
+      (should (string-match-p
+               "must be a local file"
+               (error-message-string
+                (should-error (zr-ffmpeg--build-command (list page) "/tmp/out.mkv")
+                              :type 'user-error)))))))
+
+(ert-deftest zr-ffmpeg-test-split-command ()
+  "Edited commands split into POSIX shell words and report other syntax."
+  (let ((args (list "ffmpeg" "-i" "/webdav:host#8080:/dav/中 文 [1].mkv"
+                    "-filter_complex" "[0:v]null[v];[0:a]anull[a]"
+                    "-metadata" "title=a'b\"c\\d$e`f&g|h" "" "out.mkv")))
+    (should (equal (zr-ffmpeg--split-command
+                    (mapconcat #'shell-quote-argument args " "))
+                   (cons args nil))))
+  (should (equal (zr-ffmpeg--split-command
+                  "ffmpeg  -i \"a b\"'c d'e\\ f \"q\\\"\\\\\"\n")
+                 '(("ffmpeg" "-i" "a bc de f" "q\"\\"))))
+  (dolist (command '("ffmpeg -i in.mkv out.mkv | tee log" "ffmpeg -i $IN out.mkv"
+                     "ffmpeg -i \"$IN\" out.mkv" "ffmpeg -i ~/in.mkv out.mkv"
+                     "ffmpeg -i 'in.mkv out.mkv" "ffmpeg -i in.mkv out.mkv # x"))
+    (ert-info (command)
+      (should (cdr (zr-ffmpeg--split-command command))))))
+
+(ert-deftest zr-ffmpeg-test-remote-argv-reads-http-and-writes-locally ()
+  "Remote inputs become HTTP(S) inputs, and remote outputs local files."
+  (let ((directory (make-temp-file "zr-ffmpeg-test-" t))
+        (input "/webdavs:alice@example.org:/dav/in.mkv")
+        (output "/rcrc:127.0.0.1#5572:/fx:/out dir/中 文.mkv"))
+    (unwind-protect
+        (zr-ffmpeg-test--with-remote-requests
+          (pcase-let ((`(,argv . ,outputs)
+                       (cl-letf (((symbol-function 'file-exists-p) #'ignore))
+                         (zr-ffmpeg--remote-argv
+                          (list "ffmpeg" "-i" input "-i" "/tmp/local.srt"
+                                "-c" "copy" output)
+                          directory))))
+            (should (equal (butlast argv)
+                           '("ffmpeg" "-tls_verify" "1"
+                             "-headers" "Authorization: Basic eDp5\r\nX-Test: 1\r\n"
+                             "-max_redirects" "0"
+                             "-i" "https://example.org/in.mkv"
+                             "-i" "/tmp/local.srt" "-c" "copy")))
+            (should (equal outputs (list (list (directory-file-name
+                                                (file-name-directory
+                                                 (car (last argv))))
+                                               output nil))))
+            (should (equal (file-name-nondirectory (car (last argv))) "中 文.mkv"))
+            (should (file-in-directory-p (car (last argv)) directory))
+            ;; FFmpeg rejects TLS options that an HTTP input leaves unused.
+            (should (equal (car (zr-ffmpeg--remote-argv
+                                 (list "ffmpeg" "-i" "/webdav:host:/dav/in.mkv")
+                                 directory))
+                           '("ffmpeg" "-headers"
+                             "Authorization: Basic eDp5\r\nX-Test: 1\r\n"
+                             "-max_redirects" "0"
+                             "-i" "http://example.org/in.mkv")))
+            ;; Existing outputs are replaced after -y or consent only.
+            (cl-letf (((symbol-function 'file-exists-p) (lambda (_file) t))
+                      ((symbol-function 'y-or-n-p) #'ignore))
+              (dolist (argv (list (list "ffmpeg" "-i" "/tmp/in.mkv" output)
+                                  (list "ffmpeg" "-n" "-i" "/tmp/in.mkv" output)))
+                (should-error (zr-ffmpeg--remote-argv argv directory)
+                              :type 'user-error)))
+            (cl-letf (((symbol-function 'file-exists-p) (lambda (_file) t))
+                      ((symbol-function 'y-or-n-p)
+                       (lambda (_prompt) (error "Should not ask"))))
+              (should (zr-ffmpeg--remote-argv
+                       (list "ffmpeg" "-y" "-i" "/tmp/in.mkv" output) directory)))
+            (should-error (zr-ffmpeg--remote-argv
+                           (list "ffmpeg" "-i" "/tmp/in.mkv" "/webdav:host:/dav/")
+                           directory)
+                          :type 'user-error)))
+      (delete-directory directory t))
+    (should-error (zr-ffmpeg--remote-argv
+                   (list "ffmpeg" "-i" "/ssh:host:/in.mkv" "/tmp/out.mkv") nil)
+                  :type 'user-error)))
+
+(ert-deftest zr-ffmpeg-test-probe-remote-source-sends-headers ()
+  "Probing a remote source reads it over HTTP(S) with its headers."
+  (let (seen)
+    (zr-ffmpeg-test--with-remote-requests
+      (cl-letf (((symbol-function 'executable-find) (lambda (_program) t))
+                ((symbol-function 'call-process)
+                 (lambda (_program _infile _destination _display &rest args)
+                   (setq seen args)
+                   (insert "{\"streams\":[{\"index\":0,\"codec_type\":\"video\"}]}")
+                   0)))
+        (should (equal (mapcar (lambda (stream) (plist-get stream :type))
+                               (zr-ffmpeg--probe-streams "/webdav:host:/dav/in.mkv"))
+                       '(video)))
+        (should (equal (last seen 6)
+                       '("-headers" "Authorization: Basic eDp5\r\nX-Test: 1\r\n"
+                         "-max_redirects" "0"
+                         "-i" "http://example.org/in.mkv")))))))
+
+(ert-deftest zr-ffmpeg-test-edited-remote-commands-run-without-shell ()
+  "Edited commands naming remote files run their words without a shell."
+  (let ((zr-ffmpeg-command-history nil)
+        started)
+    (cl-letf (((symbol-function 'zr-ffmpeg--start-remote)
+               (lambda (argv _buffer) (setq started (list 'remote argv))))
+              ((symbol-function 'start-process-shell-command)
+               (lambda (_name _buffer command) (setq started (list 'shell command)))))
+      (zr-ffmpeg--start-command "ffmpeg -i /webdav\\:host\\:/dav/a\\ b.mkv out.mkv")
+      (should (equal started
+                     '(remote ("ffmpeg" "-i" "/webdav:host:/dav/a b.mkv" "out.mkv"))))
+      (zr-ffmpeg--start-command "ffmpeg -i in.mkv out.mkv 2>&1 | tee log")
+      (should (equal started '(shell "ffmpeg -i in.mkv out.mkv 2>&1 | tee log")))
+      (should-error (zr-ffmpeg--start-command
+                     "ffmpeg -i /webdav:host:/dav/a.mkv out.mkv | tee log")
+                    :type 'user-error)
+      (should (equal (car zr-ffmpeg-command-history)
+                     "ffmpeg -i /webdav:host:/dav/a.mkv out.mkv | tee log")))))
+
+;;; Remote integration
+
+(defvar zr-ffmpeg-test--servers nil
+  "Fixture server processes of the remote integration tests.")
+
+(defvar zr-ffmpeg-test--webdav-port nil)
+
+(defvar zr-ffmpeg-test--rcd nil
+  "The (TOP . DATA) of the running rcd fixture.")
+
+(defun zr-ffmpeg-test--stop ()
+  "Stop the fixture servers and remove the files of the rcd."
+  (dolist (process zr-ffmpeg-test--servers)
+    (when (process-live-p process) (delete-process process)))
+  (when zr-ffmpeg-test--rcd
+    (delete-directory (file-name-directory (cdr zr-ffmpeg-test--rcd)) t)))
+
+(add-hook 'kill-emacs-hook #'zr-ffmpeg-test--stop)
+
+(defmacro zr-ffmpeg-test--with-remote (&rest body)
+  "Run BODY without proxies and with a private `temporary-file-directory'."
+  (declare (indent 0) (debug body))
+  `(let* ((url-proxy-services '(("no_proxy" . ".*")))
+          (process-environment (append '("NO_PROXY=*" "no_proxy=*")
+                                       process-environment))
+          (auth-sources nil)
+          (tramp-verbose 0)
+          (zr-ffmpeg-command-history nil)
+          (temporary-file-directory
+           (file-name-as-directory (make-temp-file "zr-ffmpeg-test-" t))))
+     (unwind-protect
+         (progn
+           (dolist (program (list zr-ffmpeg-program zr-ffmpeg-ffprobe-program
+                                  zr-ffmpeg-curl-program))
+             (unless (executable-find program)
+               (ert-skip (format "%s is required" program))))
+           ,@body)
+       (delete-directory temporary-file-directory t))))
+
+(defun zr-ffmpeg-test--webdav-port ()
+  "Return the port of the WebDAV fixture, starting it if needed."
+  (unless (executable-find "python3") (ert-skip "Python 3 is required"))
+  (unless zr-ffmpeg-test--webdav-port
+    (let* ((buffer (generate-new-buffer " *zr-ffmpeg-test-webdav*"))
+           (process (make-process
+                     :name "zr-ffmpeg-test-webdav" :buffer buffer :noquery t
+                     :command (list "python3" "-u"
+                                    (expand-file-name "webdav-server.py"
+                                                      zr-ffmpeg-test--directory))))
+           (deadline (+ (float-time) 5)))
+      (push process zr-ffmpeg-test--servers)
+      (while (and (not zr-ffmpeg-test--webdav-port) (< (float-time) deadline))
+        (accept-process-output process 0.05)
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (when (re-search-forward "PORT \\([0-9]+\\)" nil t)
+            (setq zr-ffmpeg-test--webdav-port (match-string 1)))))
+      (unless zr-ffmpeg-test--webdav-port
+        (error "WebDAV fixture did not start"))))
+  zr-ffmpeg-test--webdav-port)
+
+(defun zr-ffmpeg-test--rcd ()
+  "Return (TOP . DATA) of an rcd serving objects, starting it if needed.
+TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
+  (let ((program (or (getenv "RCLONE_TEST_PROGRAM") (executable-find "rclone"))))
+    (unless program (ert-skip "Set RCLONE_TEST_PROGRAM or install rclone"))
+    (unless zr-ffmpeg-test--rcd
+      (let* ((root (let ((temporary-file-directory
+                          (default-toplevel-value 'temporary-file-directory)))
+                     (make-temp-file "zr-ffmpeg-test-rcd-" t)))
+             (data (expand-file-name "data" root))
+             (config (expand-file-name "rclone.conf" root))
+             (socket (make-network-process :name "zr-ffmpeg-test-port" :server t
+                                           :host "127.0.0.1" :family 'ipv4
+                                           :service t :noquery t))
+             (port (process-contact socket :service))
+             (url (format "http://127.0.0.1:%s/" port))
+             (top (zr-tramp-rcrc-file-name url nil))
+             (process-environment (append '("RCLONE_RC_USER=test"
+                                            "RCLONE_RC_PASS=secret")
+                                          process-environment))
+             (deadline (+ (float-time) 10))
+             ready)
+        (delete-process socket)
+        (make-directory data)
+        (with-temp-file config
+          (insert "[fixture]\ntype = alias\nremote = " data "\n"))
+        (push (make-process
+               :name "zr-ffmpeg-test-rcd" :buffer nil :noquery t
+               :command (list program "rcd" "--rc-serve"
+                              "--rc-addr" (format "127.0.0.1:%s" port)
+                              "--config" config
+                              "--cache-dir" (expand-file-name "cache" root)))
+              zr-ffmpeg-test--servers)
+        (zr-tramp-rcrc-register-endpoint url "test" "secret")
+        (while (and (not ready) (< (float-time) deadline))
+          (let ((zr-tramp-rcrc-timeout 0.5))
+            (setq ready (ignore-errors (directory-files (concat top "fixture:/")))))
+          (unless ready (accept-process-output nil 0.1)))
+        (unless ready (error "rcd fixture did not start"))
+        (setq zr-ffmpeg-test--rcd (cons top data)))))
+  zr-ffmpeg-test--rcd)
+
+(defun zr-ffmpeg-test--sample (file)
+  "Write a short media FILE with one video and one audio stream."
+  (should (zerop (call-process zr-ffmpeg-program nil nil nil
+                               "-v" "error" "-f" "lavfi"
+                               "-i" "testsrc=duration=1:size=64x64:rate=5"
+                               "-f" "lavfi" "-i" "sine=duration=1"
+                               "-c:v" "mpeg4" "-c:a" "aac" "-shortest" "-y" file))))
+
+(defun zr-ffmpeg-test--run (args)
+  "Run FFmpeg ARGS and wait for its uploads, including their sentinels."
+  (zr-ffmpeg--start-command args)
+  ;; A process leaves `process-list' just before its sentinel runs.
+  (let ((deadline (+ (float-time) 60)))
+    (while (and (cl-some (lambda (process)
+                           (string-match-p "\\`zr-ffmpeg\\(?:-upload\\)?\\(?:<[0-9]+>\\)?\\'"
+                                           (process-name process)))
+                         (process-list))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))))
+
+(defun zr-ffmpeg-test--kept-outputs ()
+  "Return the files kept in private temporary directories of uploads."
+  (cl-loop for directory in (directory-files temporary-file-directory t
+                                             "\\`zr-ffmpeg-")
+           append (directory-files-recursively directory "")))
+
+(defun zr-ffmpeg-test--stream-types (file)
+  "Return the stream types that ffprobe finds in FILE."
+  (mapcar (lambda (stream) (plist-get stream :type))
+          (zr-ffmpeg--probe-streams file)))
+
+(ert-deftest zr-ffmpeg-test-webdav-input-and-output ()
+  "FFmpeg reads WebDAV input over HTTP, and curl uploads its output."
+  (zr-ffmpeg-test--with-remote
+    (let* ((port (zr-ffmpeg-test--webdav-port))
+           (root (format "/webdav:alice@127.0.0.1#%s:/auth/ffmpeg-%d/"
+                         port (random 1000000)))
+           (input (concat root "in 中.mkv"))
+           (output (concat root "out 中 \"q\" ;x.mkv"))
+           (sample (make-temp-file "sample-" nil ".mkv"))
+           (key (tramp-make-tramp-file-name (tramp-dissect-file-name root) 'noloc))
+           (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
+           (zr-tramp-webdav--connected (make-hash-table :test #'equal))
+           (tramp-cache-data (make-hash-table :test #'equal)))
+      (puthash key '("alice" . "app-password") zr-tramp-webdav--passwords)
+      (zr-ffmpeg-test--sample sample)
+      (make-directory root)
+      (copy-file sample input)
+      (zr-ffmpeg-test--run (list zr-ffmpeg-program "-loglevel" "error" "-i" input
+                                 "-map" "0" "-c" "copy" output))
+      (should-not (zr-ffmpeg-test--kept-outputs))
+      (should (equal (zr-ffmpeg-test--stream-types output) '(video audio)))
+      ;; History names files without credentials, and replays as edited.
+      (let ((command (car zr-ffmpeg-command-history)))
+        (should-not (string-match-p "Basic\\|http:" command))
+        (zr-ffmpeg-test--run (replace-regexp-in-string "\\`\\S-+" "\\& -y" command))
+        (should-not (zr-ffmpeg-test--kept-outputs))
+        (should (equal (zr-ffmpeg-test--stream-types output) '(video audio))))
+      ;; A failed FFmpeg run uploads nothing.
+      (zr-ffmpeg-test--run (list zr-ffmpeg-program "-loglevel" "quiet" "-i" input
+                                 "-c:v" "no-such-codec" (concat root "failed.mkv")))
+      (should-not (zr-ffmpeg-test--kept-outputs))
+      (should-not (let ((remote-file-name-inhibit-cache t))
+                    (file-exists-p (concat root "failed.mkv"))))
+      (should (string-match-p
+               "does not exist"
+               (error-message-string
+                (should-error (zr-ffmpeg--start-command
+                               (list zr-ffmpeg-program "-i" input
+                                     (concat root "missing/out.mkv")))
+                              :type 'user-error))))
+      ;; A failed upload keeps FFmpeg's output.
+      (cl-letf (((symbol-function 'zr-ffmpeg--start-remote)
+                 (let ((start (symbol-function 'zr-ffmpeg--start-remote)))
+                   (lambda (&rest args)
+                     (prog1 (apply start args)
+                       (puthash key '("alice" . "wrong") zr-tramp-webdav--passwords))))))
+        (zr-ffmpeg-test--run (list zr-ffmpeg-program "-loglevel" "error" "-i" input
+                                   "-c" "copy" (concat root "kept.mkv"))))
+      (should (equal (mapcar #'file-name-nondirectory (zr-ffmpeg-test--kept-outputs))
+                     '("kept.mkv"))))))
+
+(ert-deftest zr-ffmpeg-test-rcrc-input-and-output ()
+  "FFmpeg reads rcrc input from --rc-serve, and curl uploads its output."
+  (zr-ffmpeg-test--with-remote
+    (pcase-let* ((`(,top . ,data) (zr-ffmpeg-test--rcd))
+                 (name (format "case-%d" (random 1000000)))
+                 (local (expand-file-name name data))
+                 (remote (concat top "fixture:/" name "/"))
+                 (output "out 中 \"q\" ;x.mkv"))
+      (make-directory local)
+      (zr-ffmpeg-test--sample (expand-file-name "in 中.mkv" local))
+      (zr-tramp-rcrc-clear-cache)
+      (zr-ffmpeg-test--run (list zr-ffmpeg-program "-loglevel" "error"
+                                 "-i" (concat remote "in 中.mkv")
+                                 "-map" "0" "-c" "copy" (concat remote output)))
+      (should-not (zr-ffmpeg-test--kept-outputs))
+      (should (equal (zr-ffmpeg-test--stream-types (expand-file-name output local))
+                     '(video audio)))
+      (should (equal (zr-ffmpeg-test--stream-types (concat remote output))
+                     '(video audio))))))
+
+(defun zr-ffmpeg-test--webdav-root ()
+  "Create a fresh directory on the WebDAV fixture and return its name."
+  (let ((root (format "/webdav:127.0.0.1#%s:/dav/ffmpeg-%d/"
+                      (zr-ffmpeg-test--webdav-port) (random 1000000))))
+    (make-directory root)
+    root))
+
+(defun zr-ffmpeg-test--contents (file)
+  "Read FILE literally, bypassing cached remote contents."
+  (with-temp-buffer
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(defun zr-ffmpeg-test--webdav-requests ()
+  "Return the requests received by the WebDAV fixture."
+  (json-parse-string
+   (zr-ffmpeg-test--contents
+    (format "/webdav:127.0.0.1#%s:/__test__/requests"
+            (zr-ffmpeg-test--webdav-port)))
+   :object-type 'alist :array-type 'list))
+
+(ert-deftest zr-ffmpeg-test-webdav-same-origin-redirects ()
+  "Resolve input redirects and upload to a redirect's actual destination."
+  (zr-ffmpeg-test--with-remote
+    (let* ((input (zr-ffmpeg-test--webdav-root))
+           (output (zr-ffmpeg-test--webdav-root))
+           (sample (make-temp-file "sample-" nil ".mkv"))
+           (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture"))))
+      (zr-ffmpeg-test--sample sample)
+      (copy-file sample (concat input "redirect-target"))
+      (should (equal (zr-ffmpeg-test--stream-types (concat input "redirect-source"))
+                     '(video audio)))
+      (zr-ffmpeg-test--run
+       (list zr-ffmpeg-program "-v" "error" "-i" (concat input "redirect-source")
+             "-c" "copy" "-f" "matroska" (concat output "redirect-source")))
+      (should (equal (zr-ffmpeg-test--stream-types (concat output "redirect-target"))
+                     '(video audio)))
+      (should-not (zr-ffmpeg-test--kept-outputs))
+      (should-not (directory-files temporary-file-directory nil "\\`zr-http-")))))
+
+(ert-deftest zr-ffmpeg-test-webdav-input-never-forwards-credentials ()
+  "A GET-only cross-origin redirect must fail in both ffprobe and FFmpeg."
+  (zr-ffmpeg-test--with-remote
+    (let* ((root (zr-ffmpeg-test--webdav-root))
+           (input (concat root "get-cross-origin.mkv"))
+           (target (concat root "cross-origin-target.mkv"))
+           (output (expand-file-name "out.mkv" temporary-file-directory))
+           (sample (make-temp-file "sample-" nil ".mkv"))
+           (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture"))))
+      (zr-ffmpeg-test--sample sample)
+      (copy-file sample input)
+      (copy-file sample target)
+      ;; HEAD succeeds; GET redirects, including after the preflight check.
+      (should-not (zr-ffmpeg--probe-streams input))
+      (zr-ffmpeg-test--run
+       (list zr-ffmpeg-program "-v" "error" "-i" input "-c" "copy" output))
+      (should-not (file-exists-p output))
+      (should-not
+       (cl-find-if
+        (lambda (request)
+          (and (equal (alist-get 'method request) "GET")
+               (equal (alist-get 'path request) (file-local-name target))))
+        (zr-ffmpeg-test--webdav-requests))))))
+
+(ert-deftest zr-ffmpeg-test-webdav-unsuccessful-uploads-keep-files ()
+  "Cross-origin redirects, loops, and unhandled 3xx responses retain output."
+  (dolist (case '(("put-cross-origin.mkv" . "Unsafe upload redirect")
+                  ("put-loop.mkv" . "Too many upload redirects")
+                  ("put-see-other.mkv" . "HTTP 303")))
+    (ert-info ((car case))
+      (zr-ffmpeg-test--with-remote
+        (let* ((root (zr-ffmpeg-test--webdav-root))
+               (output (concat root (car case)))
+               (sample (make-temp-file "sample-" nil ".mkv"))
+               (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture")))
+               ;; Even extra curl arguments cannot enable unchecked redirects.
+               (zr-ffmpeg-curl-arguments '("--location-trusted")))
+          (zr-ffmpeg-test--sample sample)
+          (zr-ffmpeg-test--run
+           (list zr-ffmpeg-program "-v" "error" "-i" sample "-c" "copy" output))
+          (should (equal (mapcar #'file-name-nondirectory
+                                 (zr-ffmpeg-test--kept-outputs))
+                         (list (car case))))
+          (should-not (let ((remote-file-name-inhibit-cache t)) (file-exists-p output)))
+          (should (with-current-buffer "*zr-ffmpeg*"
+                    (string-match-p (cdr case) (buffer-string))))
+          (should-not
+           (cl-find-if
+            (lambda (request)
+              (and (equal (alist-get 'method request) "PUT")
+                   (equal (alist-get 'path request)
+                          (file-local-name (concat root "cross-origin-target.mkv")))))
+            (zr-ffmpeg-test--webdav-requests)))
+          (should-not (directory-files temporary-file-directory nil "\\`zr-http-")))))))
+
+(defun zr-ffmpeg-test--pattern-overwrite (root)
+  "Check no-overwrite, declined confirmation, and overwrite below ROOT."
+  (dolist (flag '("-n" nil "-y"))
+    (let* ((directory (concat root (or flag "ask") "/"))
+           (target (concat directory "frame001.png"))
+           (kept (length (zr-ffmpeg-test--kept-outputs)))
+           (prompts 0))
+      (make-directory directory)
+      (write-region "existing output" nil target nil 'silent)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_prompt) (cl-incf prompts) nil)))
+        (zr-ffmpeg-test--run
+         (append (list zr-ffmpeg-program "-v" "error") (when flag (list flag))
+                 (list "-f" "lavfi" "-i" "color=s=16x16:d=0.1" "-frames:v" "1"
+                       (concat directory "frame%03d.png")))))
+      (should (= prompts (if flag 0 1)))
+      (if (equal flag "-y")
+          (progn
+            (should (equal (zr-ffmpeg-test--stream-types target) '(video)))
+            (should (= kept (length (zr-ffmpeg-test--kept-outputs)))))
+        (should (equal (zr-ffmpeg-test--contents target) "existing output"))
+        (should (= (1+ kept) (length (zr-ffmpeg-test--kept-outputs))))))))
+
+(ert-deftest zr-ffmpeg-test-webdav-pattern-overwrite ()
+  "Image patterns honor the overwrite policy for each actual WebDAV file."
+  (zr-ffmpeg-test--with-remote
+    (zr-ffmpeg-test--pattern-overwrite (zr-ffmpeg-test--webdav-root))))
+
+(ert-deftest zr-ffmpeg-test-rcrc-pattern-overwrite ()
+  "Image patterns honor the overwrite policy for each actual rcrc file."
+  (zr-ffmpeg-test--with-remote
+    (let ((root (concat (car (zr-ffmpeg-test--rcd)) "fixture:/pattern-"
+                        (number-to-string (random 1000000)) "/")))
+      (make-directory root)
+      (zr-ffmpeg-test--pattern-overwrite root))))
+
+(ert-deftest zr-ffmpeg-test-webdav-exclusive-upload ()
+  "A concurrent writer between checking and PUT is protected by HTTP 412."
+  (zr-ffmpeg-test--with-remote
+    (let* ((root (zr-ffmpeg-test--webdav-root))
+           (output (concat root "put-race.mkv"))
+           (sample (make-temp-file "sample-" nil ".mkv")))
+      (zr-ffmpeg-test--sample sample)
+      (zr-ffmpeg-test--run
+       (list zr-ffmpeg-program "-v" "error" "-n" "-i" sample "-c" "copy" output))
+      (should (equal (zr-ffmpeg-test--contents output) "created by another writer"))
+      (should (equal (mapcar #'file-name-nondirectory (zr-ffmpeg-test--kept-outputs))
+                     '("put-race.mkv"))))))
+
+(ert-deftest zr-ffmpeg-test-built-task-mixes-local-webdav-and-rcrc ()
+  "Run generated task commands with mixed inputs and all three output kinds."
+  (zr-ffmpeg-test--with-remote
+    (let* ((dav (zr-ffmpeg-test--webdav-root))
+           (rc (concat (car (zr-ffmpeg-test--rcd)) "fixture:/mixed-"
+                       (number-to-string (random 1000000)) "/"))
+           (sample (make-temp-file "sample-" nil ".mkv"))
+           (inputs (list sample (concat dav "in 中.mkv") (concat rc "in 中.mkv")))
+           (subtitle (concat rc "字幕.srt")))
+      (make-directory rc)
+      (zr-ffmpeg-test--sample sample)
+      (dolist (input (cdr inputs)) (copy-file sample input))
+      (write-region "1\n00:00:00,000 --> 00:00:00,800\nHello\n" nil subtitle nil 'silent)
+      (dolist (output (list (expand-file-name "out.mkv" temporary-file-directory)
+                            (concat dav "out 中.mkv") (concat rc "out 中.mkv")))
+        (with-temp-buffer
+          ;; Exercise the same state and command builder as the transient,
+          ;; including execution from a remote buffer's default-directory.
+          (setq default-directory dav
+                zr-ffmpeg--inputs-state
+                (cl-loop for input in inputs for id from 1
+                         collect (let ((page (zr-ffmpeg--new-page id)))
+                                   (setf (plist-get page :source) input
+                                         (plist-get page :overrides)
+                                         '(:output-args nil :subtitle-mode soft))
+                                   page))
+                zr-ffmpeg--composition-mode 'separate
+                zr-ffmpeg--output-target output
+                zr-ffmpeg--output-format "matroska")
+          (setf (plist-get (car zr-ffmpeg--inputs-state) :subtitle-source) subtitle)
+          (let ((command (zr-ffmpeg--command)))
+            (should (equal (zr-ffmpeg-test--option-values "-i" command)
+                           (list sample subtitle (cadr inputs) (caddr inputs))))
+            (zr-ffmpeg-test--run command)))
+        (should (equal (zr-ffmpeg-test--stream-types output)
+                       '(video audio subtitle video audio video audio)))
+        (should-not (zr-ffmpeg-test--kept-outputs))))))
 
 (provide 'zr-ffmpeg-test)
 

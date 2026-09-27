@@ -4,6 +4,7 @@ import base64
 import email.utils
 import hashlib
 import http.server
+import json
 import threading
 import time
 import urllib.parse
@@ -14,6 +15,7 @@ DAV = "{DAV:}"
 ET.register_namespace("D", "DAV:")
 LOCK = threading.RLock()
 FILES = {}
+REQUESTS = []
 REVISION = 0
 
 
@@ -66,6 +68,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw_path = urllib.parse.urlsplit(self.path).path
         self.resource = urllib.parse.unquote(raw_path).rstrip("/") or "/"
         path = self.resource
+        REQUESTS.append({"method": self.command, "path": path,
+                         "host": self.headers.get("Host"),
+                         "authorization": bool(self.headers.get("Authorization"))})
+        if path == "/__test__/requests":
+            self.reply(200, json.dumps(REQUESTS).encode(),
+                       {"Content-Type": "application/json"})
+            return False
         if path.startswith("/auth"):
             expected = "Basic " + base64.b64encode(b"alice:app-password").decode()
             if self.headers.get("Authorization") != expected:
@@ -104,6 +113,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return False
         if path.endswith("/redirect-source"):
             self.reply(302, headers={"Location": "redirect-target"})
+            return False
+        # HEAD/PROPFIND remain normal so a metadata check cannot hide these.
+        if ((path.endswith("/get-cross-origin.mkv") and self.command == "GET")
+                or (path.endswith("/put-cross-origin.mkv") and self.command == "PUT")):
+            self.reply(307, headers={
+                "Location": "http://localhost:%d%s/cross-origin-target.mkv"
+                            % (self.server.server_port, path.rsplit("/", 1)[0])
+            })
+            return False
+        if self.command == "PUT" and path.endswith("/put-loop.mkv"):
+            self.reply(307, headers={"Location": self.path})
+            return False
+        if self.command == "PUT" and path.endswith("/put-see-other.mkv"):
+            self.reply(303, headers={"Location": self.path})
             return False
         entry = FILES.get(path)
         if (entry and entry["data"] is None and not raw_path.endswith("/")
@@ -172,6 +195,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not self.prepare():
                 return
             path = self.resource
+            if path.endswith("/put-race.mkv") and path not in FILES:
+                put(path, b"created by another writer")
             old = FILES.get(path)
             if ((self.headers.get("If-None-Match") == "*" and old)
                     or (self.headers.get("If-Match") is not None

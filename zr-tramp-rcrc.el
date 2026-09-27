@@ -35,6 +35,9 @@
 ;; request also serves background (`non-essential') requests, such as
 ;; fido and icomplete completion, until it cannot be reached.
 ;;
+;; `zr-tramp-rcrc-http-request' gives other HTTP clients, such as FFmpeg
+;; or curl, the URL and headers that read or upload a file.
+;;
 ;; Supports visiting and saving files, completion, Dired, creating and
 ;; deleting directories, and copying or renaming.  Within one rcd,
 ;; copies and renames run on the server (copyfile, movefile, sync/move);
@@ -206,21 +209,25 @@ connected, so background completion may contact it."
                            (if (string-search ":" host) (concat "[" host "]") host)
                            port)))))
 
+(defun zr-tramp-rcrc--authorization (vec)
+  "Return the Basic authorization for VEC's rcd, or nil."
+  (let* ((endpoint (zr-tramp-rcrc--endpoint vec))
+         (user (or (tramp-file-name-user vec) (plist-get endpoint :user))))
+    (zr-tramp-rcrc-basic-header
+     (zr-tramp-rcrc-credentials
+      (plist-get endpoint :url) user
+      (and (equal user (plist-get endpoint :user))
+           (plist-get endpoint :password))))))
+
 (defun zr-tramp-rcrc--retrieve (vec method path headers data)
   "Send METHOD for PATH below VEC's rcd URL with HEADERS and byte DATA.
 Return (STATUS . BODY), where BODY holds the response bytes."
-  (let* ((endpoint (zr-tramp-rcrc--endpoint vec))
-         (url (concat (plist-get endpoint :url) path))
-         (user (or (tramp-file-name-user vec) (plist-get endpoint :user)))
-         (credentials (zr-tramp-rcrc-credentials
-                       (plist-get endpoint :url) user
-                       (and (equal user (plist-get endpoint :user))
-                            (plist-get endpoint :password))))
+  (let* ((url (concat (plist-get (zr-tramp-rcrc--endpoint vec) :url) path))
          (default-directory temporary-file-directory)
          (url-request-method method)
          ;; An explicit empty field keeps url-http from prompting for auth.
          (url-request-extra-headers
-          (cons (cons "Authorization" (or (zr-tramp-rcrc-basic-header credentials) ""))
+          (cons (cons "Authorization" (or (zr-tramp-rcrc--authorization vec) ""))
                 headers))
          (url-request-data data)
          (url-request-noninteractive t)
@@ -494,6 +501,14 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
             (t (signal 'file-missing (list "No such file" file)))))
     (zr-tramp-rcrc--write-bytes (cdr response) local)))
 
+(defun zr-tramp-rcrc--upload-path (fs remote)
+  "Return the RC path whose multipart POST stores a file part as REMOTE in FS.
+The part's file name must be the base name of REMOTE."
+  (let ((slash (string-match "/[^/]*\\'" remote)))
+    (format "operations/uploadfile?fs=%s&remote=%s"
+            (url-hexify-string fs)
+            (url-hexify-string (if slash (substring remote 0 slash) "")))))
+
 (defun zr-tramp-rcrc--upload (local file)
   "Replace rcrc FILE with the contents of LOCAL file."
   (let* ((location (zr-tramp-rcrc--location file))
@@ -513,13 +528,28 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
         (zr-tramp-rcrc--result
          "operations/uploadfile"
          (zr-tramp-rcrc--http
-          (car location) "POST"
-          (format "operations/uploadfile?fs=%s&remote=%s"
-                  (url-hexify-string (cadr location))
-                  (url-hexify-string (if slash (substring remote 0 slash) "")))
+          (car location) "POST" (zr-tramp-rcrc--upload-path (cadr location) remote)
           (list (cons "Content-Type" (concat "multipart/form-data; boundary=" boundary)))
           body))
       (zr-tramp-rcrc--flush file))))
+
+(defun zr-tramp-rcrc-http-request (file &optional upload)
+  "Return (URL . HEADERS) for another HTTP client to access rcrc FILE.
+A GET of URL reads FILE; the rcd must run with --rc-serve.  With UPLOAD,
+a multipart/form-data POST of URL stores its file part as FILE; the
+part's file name must be the base name of FILE.  HEADERS holds the rcd's
+Basic authorization, if any."
+  (let* ((location (zr-tramp-rcrc--location file))
+         (fs (cadr location))
+         (remote (cddr location))
+         (authorization (zr-tramp-rcrc--authorization (car location))))
+    (when (and upload (string-empty-p remote))
+      (signal 'file-error (list "Cannot write the root of a file system" file)))
+    (cons (concat (plist-get (zr-tramp-rcrc--endpoint (car location)) :url)
+                  (if upload
+                      (zr-tramp-rcrc--upload-path fs remote)
+                    (zr-tramp-rcrc--object-path fs remote)))
+          (and authorization (list (cons "Authorization" authorization))))))
 
 (defun zr-tramp-rcrc--make-directory (directory &optional parents)
   "Create DIRECTORY, optionally creating PARENTS."

@@ -68,6 +68,30 @@
   (should (equal (zr-tramp-rcrc-object-url "http://h:1/" "fx:" "a b/%?#.mkv")
                  "http://h:1/%5Bfx%3A%5D/a%20b/%25%3F%23.mkv")))
 
+(ert-deftest zr-tramp-rcrc-http-requests-for-other-clients ()
+  (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+        (auth-sources nil)
+        (file "/rcrc:proxy.example#443:/fx:/a b/中.mkv"))
+    (zr-tramp-rcrc-register-endpoint "https://proxy.example/rc" "alice" "secret")
+    (let ((headers `(("Authorization"
+                      . ,(concat "Basic " (base64-encode-string "alice:secret" t))))))
+      (should (equal (zr-tramp-rcrc-http-request file)
+                     (cons "https://proxy.example/rc/%5Bfx%3A%5D/a%20b/%E4%B8%AD.mkv"
+                           headers)))
+      (should (equal (zr-tramp-rcrc-http-request file t)
+                     (cons (concat "https://proxy.example/rc/operations/uploadfile"
+                                   "?fs=fx%3A&remote=a%20b")
+                           headers)))
+      (should (equal (car (zr-tramp-rcrc-http-request
+                           "/rcrc:proxy.example#443:/fx:/top.mkv" t))
+                     "https://proxy.example/rc/operations/uploadfile?fs=fx%3A&remote=")))
+    ;; An unregistered rcd without auth-source credentials needs no headers.
+    (should (equal (zr-tramp-rcrc-http-request "/rcrc:127.0.0.1#9:/srv/a.mkv")
+                   '("http://127.0.0.1:9/%5B%2F%5D/srv/a.mkv")))
+    (should-error (zr-tramp-rcrc-http-request "/rcrc:127.0.0.1#9:/fx:" t)
+                  :type 'file-error)))
+
 (ert-deftest zr-tramp-rcrc-background-requests-need-a-connected-rcd ()
   (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
         (zr-tramp-rcrc--connected (make-hash-table :test #'equal))

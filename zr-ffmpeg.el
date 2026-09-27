@@ -17,6 +17,19 @@
 ;;
 ;; RET executes the complete task.  `e' edits the complete shell command,
 ;; while `?' previews the current input page and `SPC' previews the task.
+;;
+;; Inputs and outputs may also be remote files of the TRAMP methods webdav
+;; and webdavs (zr-tramp-webdav) or rcrc (zr-tramp-rcrc).  Commands,
+;; previews, and history keep their names.  Running a command reads each
+;; remote input over HTTP(S) with the backend's request headers, and
+;; writes each remote output to a private temporary directory that curl
+;; uploads after FFmpeg succeeds.  FFmpeg takes request headers only as
+;; command arguments, so other local users can see them in process lists.
+;; FFmpeg and ffprobe must support the HTTP option max_redirects.  WebDAV
+;; input redirects are resolved with HEAD through its backend; subsequent
+;; redirects fail without forwarding credentials.  Uploads follow only
+;; same-origin redirects and retain local outputs on failure or conflict.
+;; Remote burn-in subtitles and shell pipelines are not supported.
 
 ;;; Code:
 
@@ -24,7 +37,9 @@
 (require 'dired)
 (require 'subr-x)
 (require 'transient)
+(require 'url-expand)
 (require 'url-parse)
+(require 'url-util)
 
 ;;; User options and histories
 
@@ -100,6 +115,20 @@
 (defcustom zr-ffmpeg-output-resolution nil
   "Task output dimensions as a WIDTH/HEIGHT cons cell."
   :type '(choice (const nil) (cons integer integer)))
+
+(defcustom zr-ffmpeg-https-input-args '((tls_verify . "1"))
+  "Input arguments for remote files that FFmpeg reads over HTTPS.
+Verifying certificates protects the credentials in request headers.
+Add `ca_file' to trust a private certificate authority."
+  :type '(repeat (choice string (cons symbol sexp))))
+
+(defcustom zr-ffmpeg-curl-program "curl"
+  "Curl executable that uploads remote outputs."
+  :type 'file)
+
+(defcustom zr-ffmpeg-curl-arguments nil
+  "Extra curl arguments for uploads, such as proxy or certificate options."
+  :type '(repeat string))
 
 ;;; Presets
 
@@ -318,14 +347,22 @@ page.  Use additional pages for independent media inputs and devices.")
        (not (string-match-p "\\`[[:alpha:]]:" source))
        (url-type (url-generic-parse-url source))))
 
+(defun zr-ffmpeg--file-p (source)
+  "Return non-nil when SOURCE names a local or remote file."
+  (and (stringp source) (not (equal source "-"))
+       (not (zr-ffmpeg--url-p source))))
+
+(defun zr-ffmpeg--remote-p (source)
+  "Return non-nil when SOURCE is a remote file name, such as a TRAMP name."
+  (and (zr-ffmpeg--file-p source) (file-remote-p source)))
+
 (defun zr-ffmpeg--normalize-source (source)
-  "Return SOURCE as a URL or absolute local path."
-  (if (or (equal source "-") (zr-ffmpeg--url-p source))
-      source (expand-file-name source)))
+  "Return SOURCE as a URL or absolute local or remote file name."
+  (if (zr-ffmpeg--file-p source) (expand-file-name source) source))
 
 (defun zr-ffmpeg--local-path-p (source)
   "Return non-nil when SOURCE is a local path."
-  (and source (not (equal source "-")) (not (zr-ffmpeg--url-p source))))
+  (and (zr-ffmpeg--file-p source) (not (file-remote-p source))))
 
 (defun zr-ffmpeg--args->argv (args)
   "Flatten structured ARGS into an argv list.
@@ -414,15 +451,14 @@ This accepts both the all-stream spelling `v?' and indexed spellings such as
            (string-prefix-p (concat kind ":") stream))))
 
 (defun zr-ffmpeg--probe-streams (source)
-  "Return stream metadata for local or URL SOURCE, or nil when unavailable.
+  "Return stream metadata for file or URL SOURCE, or nil when unavailable.
 Each result includes the global ffprobe `:index' and type-relative `:ordinal'."
-  (when (and (or (zr-ffmpeg--local-path-p source)
-                 (zr-ffmpeg--url-p source))
+  (when (and (or (zr-ffmpeg--file-p source) (zr-ffmpeg--url-p source))
              (executable-find zr-ffmpeg-ffprobe-program))
     (with-temp-buffer
-      (when (zerop (call-process zr-ffmpeg-ffprobe-program nil t nil
-                                 "-v" "quiet" "-print_format" "json"
-                                 "-show_streams" source))
+      (when (zerop (apply #'call-process zr-ffmpeg-ffprobe-program nil t nil
+                          "-v" "quiet" "-print_format" "json" "-show_streams"
+                          (zr-ffmpeg--input-argv source)))
         (goto-char (point-min))
         (condition-case nil
             (let ((json (json-parse-buffer :object-type 'alist
@@ -766,8 +802,8 @@ preset only as a default, while an explicit Output value always wins."
 (defun zr-ffmpeg--input-basename (source)
   "Return a file-name base derived from SOURCE."
   (let* ((path (if (zr-ffmpeg--url-p source)
-                   (url-filename (url-generic-parse-url source)) source))
-         (path (car (split-string (or path "") "[?#]" t)))
+                   (car (url-path-and-query (url-generic-parse-url source)))
+                 source))
          (name (and path (file-name-nondirectory path))))
     (if (string-empty-p (or name "")) "recording"
       (file-name-sans-extension name))))
@@ -777,7 +813,7 @@ preset only as a default, while an explicit Output value always wins."
   (let* ((page (zr-ffmpeg--current-page))
          (source (or source (plist-get page :source)))
          (directory (or zr-ffmpeg-output-directory
-                        (and source (zr-ffmpeg--local-path-p source)
+                        (and (zr-ffmpeg--file-p source)
                              (file-name-directory source))
                         default-directory)))
     (expand-file-name (concat (zr-ffmpeg--input-basename source)
@@ -791,11 +827,15 @@ preset only as a default, while an explicit Output value always wins."
 ;;; FFmpeg input specifications
 
 (defun zr-ffmpeg--spec (page source args streams &optional role)
-  "Build an expanded FFmpeg spec owned by PAGE."
-  (let ((source (zr-ffmpeg--normalize-source source)))
-    (list :owner-id (plist-get page :id) :role (or role 'primary)
+  "Build an expanded FFmpeg spec owned by PAGE.
+File pages and subtitle ROLE inputs read files or URLs.  Capture inputs
+are device or filter strings, which are used verbatim."
+  (let* ((role (or role 'primary))
+         (file (or (eq role 'subtitle) (eq (plist-get page :kind) 'file)))
+         (source (if file (zr-ffmpeg--normalize-source source) source)))
+    (list :owner-id (plist-get page :id) :role role
           :source source :args args :streams streams
-          :file (and (zr-ffmpeg--local-path-p source) source))))
+          :file (and file (zr-ffmpeg--file-p source) source))))
 
 (defun zr-ffmpeg--input-specs (&optional pages)
   "Expand PAGES into FFmpeg input declarations in stable page order."
@@ -1189,8 +1229,8 @@ allow only identical arguments shared by all potentially mapped subtitles."
         (cons (mapconcat #'identity filters ";") maps)))))
 
 (defun zr-ffmpeg--validate-output (specs output)
-  "Reject OUTPUT when it overwrites a local input in SPECS."
-  (when (zr-ffmpeg--local-path-p output)
+  "Reject OUTPUT when it overwrites a local or remote input in SPECS."
+  (when (zr-ffmpeg--file-p output)
     (let ((target (file-truename output)))
       (dolist (spec specs)
         (when-let* ((file (plist-get spec :file)))
@@ -1358,6 +1398,275 @@ INPUT may be a page or source for programmatic callers; nil renders the task."
   "Return the single complete task command as a list."
   (list (zr-ffmpeg--command)))
 
+;;; Remote files
+
+(declare-function zr-tramp-webdav-http-request "zr-tramp-webdav"
+                  (file &optional resolve))
+(declare-function zr-tramp-rcrc-http-request "zr-tramp-rcrc"
+                  (file &optional upload))
+
+(defun zr-ffmpeg--remote-backend (file)
+  "Load the TRAMP backend of remote FILE and return its method."
+  (let ((method (file-remote-p file 'method)))
+    (pcase method
+      ((or "webdav" "webdavs") (require 'zr-tramp-webdav))
+      ("rcrc" (require 'zr-tramp-rcrc))
+      (_ (user-error "Remote files must use webdav, webdavs, or rcrc: %s"
+                     file)))
+    method))
+
+(defun zr-ffmpeg--remote-request (file &optional upload resolve)
+  "Return (URL . HEADERS) that read remote FILE over HTTP(S), or UPLOAD it.
+With RESOLVE, resolve WebDAV input redirects through the backend first."
+  (if (equal (zr-ffmpeg--remote-backend file) "rcrc")
+      (zr-tramp-rcrc-http-request file upload)
+    (zr-tramp-webdav-http-request file resolve)))
+
+(defun zr-ffmpeg--input-argv (source)
+  "Return the FFmpeg arguments that open input SOURCE with -i.
+A remote file is read over HTTP(S), preceded by its request headers and,
+for HTTPS, `zr-ffmpeg-https-input-args'."
+  (if (not (zr-ffmpeg--remote-p source))
+      (list "-i" source)
+    (zr-ffmpeg--remote-backend source)
+    ;; Checking through Emacs lets the backend ask for credentials.
+    (unless (file-regular-p source)
+      (user-error "Remote input is not a readable file: %s" source))
+    (pcase-let ((`(,url . ,headers) (zr-ffmpeg--remote-request source nil t)))
+      (append (when (string-prefix-p "https:" url)
+                (zr-ffmpeg--args->argv zr-ffmpeg-https-input-args))
+              (when headers
+                (list "-headers"
+                      (mapconcat (lambda (header)
+                                   (concat (car header) ": " (cdr header)
+                                           "\r\n"))
+                                 headers "")))
+              ;; A HEAD check cannot guarantee that GET (or a later seek)
+              ;; will not redirect.  Never let FFmpeg forward our headers.
+              (list "-max_redirects" "0" "-i" url)))))
+
+(defun zr-ffmpeg--check-remote-output (file overwrite)
+  "Signal an error unless FFmpeg output can be uploaded as remote FILE.
+OVERWRITE is t to replace an existing FILE, `never' to keep it, and nil
+to ask.  Return the policy, updated to t if replacement was approved."
+  (let ((directory (file-name-directory file))
+        (remote-file-name-inhibit-cache t))
+    (when (string-empty-p (file-name-nondirectory file))
+      (user-error "Remote output must name a file: %s" file))
+    ;; Fail before FFmpeg runs.  Checking the directory through Emacs lets
+    ;; the backend ask for the credentials that the upload needs.
+    (zr-ffmpeg--remote-request file t)
+    (unless (file-directory-p directory)
+      (user-error "Remote output directory does not exist: %s" directory))
+    (when (file-directory-p file)
+      (user-error "Remote output is a directory: %s" file))
+    (when (file-exists-p file)
+      (unless (or (eq overwrite t)
+                  (and (not overwrite)
+                       (y-or-n-p (format "Overwrite %s? " file))))
+        (user-error "Not overwriting %s" file))
+      (setq overwrite t))
+    overwrite))
+
+(defun zr-ffmpeg--remote-argv (argv directory)
+  "Return (ARGV . OUTPUTS) with the remote files in ARGV made usable.
+A remote file after -i is read over HTTP(S).  Any other remote file is
+an output that FFmpeg writes to a new directory below DIRECTORY; OUTPUTS
+lists (LOCAL-DIRECTORY REMOTE OVERWRITE) entries."
+  (let ((overwrite (cond ((member "-y" argv) t) ((member "-n" argv) 'never)))
+        result outputs)
+    (while argv
+      (let ((arg (pop argv)))
+        (cond
+         ((and (equal arg "-i") (zr-ffmpeg--remote-p (car argv)))
+          (setq result (append (reverse (zr-ffmpeg--input-argv (pop argv)))
+                               result)))
+         ((zr-ffmpeg--remote-p arg)
+          (let ((file (expand-file-name arg))
+                (local (make-temp-file (expand-file-name "output-" directory)
+                                       t)))
+            (push (list local file (zr-ffmpeg--check-remote-output file overwrite))
+                  outputs)
+            (push (expand-file-name (file-name-nondirectory file) local)
+                  result)))
+         (t (push arg result)))))
+    (cons (nreverse result) (nreverse outputs))))
+
+(defun zr-ffmpeg--output-files (outputs)
+  "Return (LOCAL REMOTE OVERWRITE) entries of files written for OUTPUTS.
+OUTPUTS lists (LOCAL-DIRECTORY REMOTE OVERWRITE) entries.  FFmpeg usually writes
+just the file named by REMOTE; file patterns and segment muxers write
+more files, which belong next to REMOTE."
+  (cl-loop for (directory remote overwrite) in outputs
+           append (cl-loop for file in (directory-files
+                                        directory t
+                                        directory-files-no-dot-files-regexp)
+                           when (file-regular-p file)
+                           collect (list file
+                                         (expand-file-name
+                                          (file-name-nondirectory file)
+                                          (file-name-directory remote))
+                                         overwrite))))
+
+(defun zr-ffmpeg--curl-form-file (file name)
+  "Return a curl --form argument whose file part sends FILE as NAME."
+  ;; curl keeps a custom Content-Disposition.  As in zr-tramp-rcrc's own
+  ;; uploads, RFC 5987 encoding preserves every character of NAME.
+  (format (concat "file0=@\"%s\";headers=\"Content-Disposition: form-data; "
+                  "name=\\\"file0\\\"; filename*=utf-8''%s\"")
+          (replace-regexp-in-string "[\"\\]" "\\\\\\&" file)
+          (url-hexify-string name)))
+
+(defun zr-ffmpeg--redirect-url (url location)
+  "Resolve LOCATION against URL, rejecting a change of origin or credentials."
+  (let* ((next (and location (url-expand-file-name location url)))
+         (from (url-generic-parse-url url))
+         (to (and next (url-generic-parse-url next))))
+    (unless (and to
+                 (equal (url-type from) (url-type to))
+                 (equal (downcase (url-host from)) (downcase (or (url-host to) "")))
+                 (equal (url-port from) (url-port to))
+                 (not (url-user to)) (not (url-password to)))
+      (user-error "Unsafe upload redirect"))
+    next))
+
+(defun zr-ffmpeg--curl-response (file)
+  "Read the final (STATUS . LOCATION) from curl's response header FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (let ((case-fold-search t) (status 0) location)
+      (dolist (line (split-string (buffer-string) "\r?\n"))
+        (cond
+         ((string-match "\\`HTTP/[0-9.]+ +\\([0-9]+\\)" line)
+          (setq status (string-to-number (match-string 1 line)) location nil))
+         ((string-match "\\`Location:[ \t]*\\(.*\\)" line)
+          (setq location (string-trim (match-string 1 line))))))
+      (cons status location))))
+
+(defun zr-ffmpeg--curl-upload (local remote buffer callback
+                                     &optional overwrite url redirects)
+  "Upload LOCAL as REMOTE with curl, logging errors to BUFFER.
+Call CALLBACK with non-nil only after an HTTP 2xx response.
+OVERWRITE permits replacement; otherwise WebDAV uses exclusive creation.
+URL and REDIRECTS track retries after same-origin redirects."
+  (let* ((request (zr-ffmpeg--remote-request remote t))
+         (url (or url (car request)))
+         (redirects (or redirects 0))
+         (rcrc (equal (file-remote-p remote 'method) "rcrc"))
+         (headers (append (unless (or overwrite rcrc)
+                            '(("If-None-Match" . "*")))
+                          (cdr request)))
+         (response-file (make-temp-file "zr-http-headers-"))
+         process)
+    (unwind-protect
+        (progn
+          (setq process
+                (make-process
+                 :name "zr-ffmpeg-upload" :buffer buffer
+                 :connection-type 'pipe :coding 'utf-8-unix
+                 :command
+                 (append
+                  (list zr-ffmpeg-curl-program "--disable" "--silent" "--show-error"
+                        "--fail" "--globoff"
+                        "--output" null-device
+                        ;; Headers from stdin keep credentials out of process lists.
+                        "--header" "@-")
+                  (if rcrc
+                      (list "--form" (zr-ffmpeg--curl-form-file
+                                      local (file-name-nondirectory remote)))
+                    (list "--upload-file" local))
+                  zr-ffmpeg-curl-arguments
+                  ;; Inspect every redirect before sending credentials or data.
+                  (list "--no-location" "--max-redirs" "0" "--proto" "=http,https"
+                        "--dump-header" response-file "--url" url))
+                 :sentinel
+                 (lambda (process _event)
+                   (when (memq (process-status process) '(exit signal))
+                     (unwind-protect
+                         (condition-case err
+                             (pcase-let ((`(,status . ,location)
+                                          (zr-ffmpeg--curl-response response-file)))
+                               (cond
+                                ((and (zerop (process-exit-status process))
+                                      (<= 200 status 299))
+                                 (funcall callback t))
+                                ((and (zerop (process-exit-status process))
+                                      (memq status '(301 302 307 308)))
+                                 (when (>= redirects 5)
+                                   (user-error "Too many upload redirects"))
+                                 (zr-ffmpeg--curl-upload
+                                  local remote buffer callback overwrite
+                                  (zr-ffmpeg--redirect-url url location) (1+ redirects)))
+                                (t (error "Upload failed: HTTP %s, curl exit %s"
+                                          status (process-exit-status process)))))
+                           (error
+                            (when (buffer-live-p buffer)
+                              (with-current-buffer buffer
+                                (goto-char (point-max))
+                                (insert (error-message-string err) "\n")))
+                            (funcall callback nil)))
+                       (delete-file response-file))))))
+          (process-send-string
+           process (mapconcat (lambda (header)
+                                (concat (car header) ": " (cdr header) "\n"))
+                              headers ""))
+          (process-send-eof process)
+          process)
+      (unless process (delete-file response-file)))))
+
+(defun zr-ffmpeg--upload (files directory buffer)
+  "Upload FILES, (LOCAL REMOTE OVERWRITE) entries, then delete DIRECTORY.
+After a failure, which is logged to BUFFER, keep DIRECTORY with the files
+not yet uploaded."
+  (if (null files)
+      (delete-directory directory t)
+    (pcase-let ((`(,local ,remote ,overwrite) (car files)))
+      (message "Uploading %s..." remote)
+      (condition-case err
+          (progn
+            ;; Patterns and muxers can produce names that were not known
+            ;; before encoding.  Check each actual target with fresh metadata.
+            (setq overwrite (zr-ffmpeg--check-remote-output remote overwrite))
+            (zr-ffmpeg--curl-upload
+             local remote buffer
+             (lambda (success)
+               (if (not success)
+                   (message "Uploading %s failed; see %s.  Output kept in %s"
+                            remote (buffer-name buffer) directory)
+                 (delete-file local)
+                 (ignore-errors (dired-uncache (file-name-directory remote)))
+                 (message "Uploaded %s" remote)
+                 (zr-ffmpeg--upload (cdr files) directory buffer)))
+             (eq overwrite t)))
+        (error
+         (message "Uploading %s failed: %s.  Output kept in %s"
+                  remote (error-message-string err) directory))))))
+
+(defun zr-ffmpeg--start-remote (argv buffer)
+  "Start FFmpeg ARGV, which names remote files, with output in BUFFER.
+Remote outputs are written to a private temporary directory, which is
+deleted once curl has uploaded them."
+  (let ((directory (make-temp-file "zr-ffmpeg-" t)) outputs process)
+    (unwind-protect
+        (let ((resolved (zr-ffmpeg--remote-argv argv directory)))
+          (setq outputs (cdr resolved)
+                process (apply #'start-process "zr-ffmpeg" buffer
+                               (car resolved)))
+          (when outputs
+            (set-process-sentinel
+             process
+             (lambda (process event)
+               (internal-default-process-sentinel process event)
+               (when (memq (process-status process) '(exit signal))
+                 (if (zerop (process-exit-status process))
+                     (zr-ffmpeg--upload (zr-ffmpeg--output-files outputs)
+                                        directory buffer)
+                   (delete-directory directory t)
+                   (message "FFmpeg failed; remote outputs were not uploaded"))))))
+          process)
+      (unless (and process outputs)
+        (delete-directory directory t)))))
+
 ;;; History, execution, and previews
 
 (defun zr-ffmpeg--shell-quote (arg)
@@ -1372,16 +1681,64 @@ INPUT may be a page or source for programmatic callers; nil renders the task."
   "Return the complete task command as a shell string."
   (zr-ffmpeg--command-string (zr-ffmpeg--command)))
 
+(defun zr-ffmpeg--split-command (command)
+  "Split shell COMMAND into (WORDS . SHELL).
+Quotes and backslashes are removed as by a POSIX shell.  SHELL is non-nil
+when COMMAND uses other shell syntax, such as operators, expansions, or
+unbalanced quotes, which WORDS keep literally."
+  (let ((start 0) words shell)
+    (while (setq start (string-match "[^ \t\n]" command start))
+      (when (memq (aref command start) '(?~ ?#))
+        (setq shell t))
+      (let (parts)
+        (while (and (< start (length command))
+                    (not (memq (aref command start) '(?\s ?\t ?\n))))
+          (string-match (rx (or (+ (not (any " \t\n\"'\\")))
+                                (seq "'" (group-n 1 (* (not "'"))) "'")
+                                (seq "\"" (group-n 2 (* (or (not (any "\"\\"))
+                                                            (seq "\\" anychar))))
+                                     "\"")
+                                (seq "\\" (group-n 3 anychar))
+                                anychar))
+                        command start)
+          (setq start (match-end 0))
+          (let ((part (match-string 0 command))
+                (single (match-string 1 command))
+                (double (match-string 2 command))
+                (escaped (match-string 3 command)))
+            (push (cond
+                   (single single)
+                   (double
+                    (when (string-match-p "[$`]" double)
+                      (setq shell t))
+                    (replace-regexp-in-string
+                     "\\\\\\([\"\\$`]\\)\\|\\\\\n" "\\1" double))
+                   (escaped (if (equal escaped "\n") "" escaped))
+                   (t (when (string-match-p "[|&;<>()$`\"'\\]" part)
+                        (setq shell t))
+                      part))
+                  parts)))
+        (push (apply #'concat (nreverse parts)) words)))
+    (cons (nreverse words) shell)))
+
 (defun zr-ffmpeg--start-command (args)
-  "Start ARGS and record the exact command string."
+  "Start ARGS, an argv list or shell command, and record the command string.
+A command naming remote files runs through `zr-ffmpeg--start-remote'
+without a shell, so as a shell command it cannot use shell syntax."
   (let* ((command (if (stringp args) args (zr-ffmpeg--command-string args)))
+         (split (if (stringp args) (zr-ffmpeg--split-command args)
+                  (list args)))
          (buffer (get-buffer-create "*zr-ffmpeg*")))
     (setq zr-ffmpeg-command-history
           (cons command (delete command zr-ffmpeg-command-history)))
     (message "%s" command)
-    (if (stringp args)
-        (start-process-shell-command "zr-ffmpeg" buffer args)
-      (apply #'start-process "zr-ffmpeg" buffer args))))
+    (cond
+     ((cl-some #'zr-ffmpeg--remote-p (car split))
+      (when (cdr split)
+        (user-error "Commands naming remote files cannot use shell syntax"))
+      (zr-ffmpeg--start-remote (car split) buffer))
+     ((stringp args) (start-process-shell-command "zr-ffmpeg" buffer args))
+     (t (apply #'start-process "zr-ffmpeg" buffer args)))))
 
 (defun zr-ffmpeg--edit-command ()
   "Read a shell command using the current task or command history.

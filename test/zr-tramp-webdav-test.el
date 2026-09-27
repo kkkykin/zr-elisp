@@ -96,6 +96,39 @@
                    "/webdavs:alice@example.org#8443:/dav/other.txt"))
     (should-error (expand-file-name "/ssh:jump|webdavs:host:/dav/"))))
 
+(ert-deftest zr-tramp-webdav-http-requests-for-other-clients ()
+  (let* ((file "/webdavs:alice@example.org#8443:/dav/中 文.mkv")
+         (auth-sources nil)
+         (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
+         (zr-tramp-webdav-extra-headers '(("X-Client" . "test"))))
+    (should (equal (zr-tramp-webdav-http-request file)
+                   '("https://example.org:8443/dav/%E4%B8%AD%20%E6%96%87.mkv"
+                     ("X-Client" . "test"))))
+    ;; Credentials entered in Emacs are shared without prompting.
+    (puthash (tramp-make-tramp-file-name (tramp-dissect-file-name file) 'noloc)
+             '("alice" . "secret") zr-tramp-webdav--passwords)
+    (should (equal (cdr (zr-tramp-webdav-http-request file))
+                   `(("X-Client" . "test")
+                     ("Authorization"
+                      . ,(concat "Basic " (base64-encode-string "alice:secret" t))))))
+    ;; An explicit authorization header takes precedence.
+    (let ((zr-tramp-webdav-extra-headers
+           (lambda (name)
+             (should (equal name file))
+             '(("authorization" . "Bearer token")))))
+      (should (equal (cdr (zr-tramp-webdav-http-request file))
+                     '(("Authorization" . "Bearer token")))))))
+
+(ert-deftest zr-tramp-webdav-http-request-resolves-input-redirects ()
+  "HEAD resolution works with both transports and preserves custom headers."
+  (zr-tramp-webdav-test--with-backends
+    (let ((zr-tramp-webdav-extra-headers '(("X-Client" . "ffmpeg"))))
+      (write-region "media" nil (concat root "redirect-target") nil 'silent)
+      (should (equal (zr-tramp-webdav-http-request (concat root "redirect-source") t)
+                     (zr-tramp-webdav-http-request (concat root "redirect-target"))))
+      (should-error (zr-tramp-webdav-http-request (concat root "missing.mkv") t)
+                    :type 'file-missing))))
+
 (ert-deftest zr-tramp-webdav-xml-namespaces-and-status ()
   (let* ((response
           '(:url "http://example.org:80/dav/"

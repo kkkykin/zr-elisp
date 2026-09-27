@@ -25,6 +25,8 @@
 ;; an interactive request prompts after a Basic authentication challenge.
 ;; `zr-tramp-webdav-extra-headers' also accepts a function of the remote
 ;; file name, useful for bearer tokens and per-server configuration.
+;; `zr-tramp-webdav-http-request' gives other HTTP clients, such as
+;; FFmpeg or curl, the URL and headers of a file.
 ;;
 ;; Supports visiting/saving files, completion, Dired, directory creation,
 ;; deletion, copying and renaming, including transfers to/from local files.
@@ -314,6 +316,8 @@ Use the final header block, skipping proxy and informational responses."
                                "--max-time" (number-to-string zr-tramp-webdav-timeout)
                                "--header" (concat "@" request-file)
                                "--dump-header" response-file)
+                         ;; -X HEAD alone still makes curl expect a body.
+                         (when (equal method "HEAD") '("--head"))
                          (when data (list "--data-binary" (concat "@" data-file)))
                          (zr-tramp-webdav--curl-arguments file)
                          (list "--url" url)))))
@@ -346,6 +350,12 @@ Background requests only contact endpoints that have already answered."
       (error (remhash key zr-tramp-webdav--connected)
              (signal (car err) (cdr err))))))
 
+(defun zr-tramp-webdav--extra-headers (file)
+  "Return `zr-tramp-webdav-extra-headers' for FILE."
+  (if (functionp zr-tramp-webdav-extra-headers)
+      (funcall zr-tramp-webdav-extra-headers file)
+    zr-tramp-webdav-extra-headers))
+
 (defun zr-tramp-webdav--retrieve (file method headers data)
   "Send METHOD for FILE with HEADERS and DATA, handling auth and redirects."
   (unless (and (numberp zr-tramp-webdav-timeout) (> zr-tramp-webdav-timeout 0))
@@ -353,11 +363,9 @@ Background requests only contact endpoints that have already answered."
   (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
          (url (zr-tramp-webdav--url vec))
          (origin (zr-tramp-webdav--origin url))
-         (extra (if (functionp zr-tramp-webdav-extra-headers)
-                    (funcall zr-tramp-webdav-extra-headers file)
-                  zr-tramp-webdav-extra-headers))
          (headers (zr-tramp-webdav--merge-headers
-                   headers extra '(("Accept-Encoding" . "identity"))))
+                   headers (zr-tramp-webdav--extra-headers file)
+                   '(("Accept-Encoding" . "identity"))))
          (authorization (or (zr-tramp-webdav--header headers "Authorization")
                             (zr-tramp-webdav--authorization vec)))
          (transport (pcase zr-tramp-webdav-backend
@@ -396,6 +404,26 @@ Background requests only contact endpoints that have already answered."
     (when (= (plist-get response :status) 401)
       (remhash (tramp-make-tramp-file-name vec 'noloc) zr-tramp-webdav--passwords))
     (plist-put response :url url)))
+
+(defun zr-tramp-webdav-http-request (file &optional resolve)
+  "Return (URL . HEADERS) for another HTTP client to access WebDAV FILE.
+A GET of URL reads FILE and a PUT replaces it.  HEADERS holds
+`zr-tramp-webdav-extra-headers' and known Basic credentials.
+With RESOLVE, send a HEAD request first, following same-origin redirects
+and allowing authentication.  Otherwise nothing prompts.  Clients must
+still prevent subsequent redirects from forwarding these headers."
+  (let* ((response (when resolve (zr-tramp-webdav--request file "HEAD")))
+         (vec (tramp-dissect-file-name (expand-file-name file)))
+         (headers (zr-tramp-webdav--merge-headers
+                   (zr-tramp-webdav--extra-headers file)))
+         (authorization (and (not (assoc-string "Authorization" headers t))
+                             (zr-tramp-webdav--authorization vec))))
+    (when (and response (not (<= 200 (plist-get response :status) 299)))
+      (zr-tramp-webdav--http-error response file))
+    (cons (if response (plist-get response :url) (zr-tramp-webdav--url vec))
+          (if authorization
+              (append headers (list (cons "Authorization" authorization)))
+            headers))))
 
 (defun zr-tramp-webdav--http-error (response file &optional exclusive)
   "Signal an appropriate file error for RESPONSE concerning FILE.
