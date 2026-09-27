@@ -565,6 +565,92 @@ new scan results are rendered."
       (while (not done) (accept-process-output nil 0.1)))
     (should (eq result 'error))))
 
+;;; Other tools
+
+(defmacro zr-czkawka-test--skip-unless-cli ()
+  "Skip the current test unless czkawka_cli is available."
+  '(skip-unless (or (executable-find zr-czkawka-program)
+                    (file-executable-p zr-czkawka-program))))
+
+(defun zr-czkawka-test--run (tool args)
+  "Run TOOL with czkawka ARGS synchronously and return its groups."
+  (let (done groups)
+    (zr-czkawka-run (cons (zr-czkawka-tool-name tool) args)
+                    (lambda (data)
+                      (setq groups (funcall (zr-czkawka-tool-parse tool) data)
+                            done t))
+                    (lambda (code buf)
+                      (error "czkawka failed (%s): %s" code
+                             (with-current-buffer buf (buffer-string)))))
+    (with-timeout (120 (error "Timed out"))
+      (while (not done) (accept-process-output nil 0.1)))
+    groups))
+
+(defun zr-czkawka-test--paths (group)
+  "Return the paths of the files of GROUP."
+  (mapcar (lambda (f) (alist-get 'path f)) (alist-get 'files group)))
+
+(defmacro zr-czkawka-test--with-tool-buffer (spec &rest body)
+  "Render results of a tool in a temporary Virtual Dired buffer.
+SPEC is (TOOL GROUPS-FORM DIRECTORY).  Run BODY in the buffer."
+  (declare (indent 1))
+  `(let ((buf-name "*test-zr-czkawka-tool*"))
+     (unwind-protect
+         (progn
+           (zr-czkawka--render-buffer ,(nth 0 spec) ,(nth 1 spec)
+                                      (list :directory ,(nth 2 spec) :args nil)
+                                      buf-name)
+           (with-current-buffer buf-name ,@body))
+       (when (get-buffer buf-name) (kill-buffer buf-name)))))
+
+(defun zr-czkawka-test--annotations ()
+  "Return the file details shown in the buffer, in buffer order."
+  (let (texts)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when-let* ((text (overlay-get ov 'after-string)))
+        (push (cons (overlay-start ov) (string-trim text)) texts)))
+    (mapcar #'cdr (sort texts (lambda (a b) (< (car a) (car b)))))))
+
+(ert-deftest zr-czkawka-test-big-build-args ()
+  "Test CLI arguments of czkawka big."
+  (should (equal (zr-czkawka-big--build-args '("/tmp/a") "biggest" 10)
+                 (list "-d" (expand-file-name "/tmp/a") "-n" "10")))
+  (should (equal (zr-czkawka-big--build-args '("/tmp/a") "smallest" 5)
+                 (list "-d" (expand-file-name "/tmp/a") "-n" "5" "-J"))))
+
+(ert-deftest zr-czkawka-test-big ()
+  "Big files are listed in czkawka order, as a single group."
+  (zr-czkawka-test--skip-unless-cli)
+  (let ((dir (make-temp-file "zr-czkawka-test-big" t)))
+    (unwind-protect
+        (let ((files (mapcar (lambda (n) (expand-file-name n dir)) '("a" "b" "c"))))
+          (cl-mapc (lambda (f size)
+                     (with-temp-file f (insert (make-string size ?x))))
+                   files '(200 300 100))
+          (let ((groups (zr-czkawka-test--run
+                         zr-czkawka-big-tool
+                         (zr-czkawka-big--build-args (list dir) "biggest" 2))))
+            (should (= (length groups) 1))
+            (should (equal (zr-czkawka-test--paths (car groups))
+                           (list (nth 1 files) (nth 0 files))))
+            (zr-czkawka-test--with-tool-buffer (zr-czkawka-big-tool groups dir)
+              (should (equal (zr-czkawka-test--listed)
+                             (list (nth 1 files) (nth 0 files))))
+              (should (string-prefix-p " Czkawka Big files: 2 files (500B)"
+                                       header-line-format))
+              (should-not (key-binding (kbd "% n")))
+              (should (eq (key-binding (kbd "g")) #'zr-czkawka-rescan))
+              ;; Sorting by name overrides the order of czkawka.
+              (dired-sort-other "-al")
+              (should (equal (zr-czkawka-test--listed)
+                             (list (nth 0 files) (nth 1 files))))))
+          (should (equal (zr-czkawka-test--paths
+                          (car (zr-czkawka-test--run
+                                zr-czkawka-big-tool
+                                (zr-czkawka-big--build-args (list dir) "smallest" 1))))
+                         (list (nth 2 files)))))
+      (delete-directory dir t))))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here

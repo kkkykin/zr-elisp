@@ -16,6 +16,7 @@
 ;;
 ;; Commands:
 ;;   `zr-czkawka-dup' - Find duplicate files.
+;;   `zr-czkawka-big' - List the biggest or smallest files.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -754,6 +755,16 @@ returns the default without reading if its argument is non-nil."
         (completing-read (format-prompt prompt value)
                          choices nil t nil nil value)))))
 
+(defun zr-czkawka--number-reader (prompt default)
+  "Return a function reading a number with PROMPT.
+DEFAULT is a symbol whose value is the default number.  The function
+returns the default without reading if its argument is non-nil."
+  (lambda (use-default)
+    (let ((value (symbol-value default)))
+      (if use-default
+          value
+        (read-number (format-prompt prompt value) value)))))
+
 ;;;; Duplicate files
 
 (defun zr-czkawka-dup--parse-json (data)
@@ -802,6 +813,48 @@ Otherwise, prompt for directory(ies) and search method."
                      (zr-czkawka--option-reader
                       "Search method" '("HASH" "SIZE" "NAME")
                       'zr-czkawka-dup-search-method)))
+
+;;;; Big files
+
+(defcustom zr-czkawka-big-mode "biggest"
+  "Default kind of files listed by `zr-czkawka-big'."
+  :type '(choice (const "biggest")
+                 (const "smallest")))
+
+(defcustom zr-czkawka-big-number-of-files 50
+  "Default number of files listed by `zr-czkawka-big'."
+  :type 'natnum)
+
+(defconst zr-czkawka-big-tool
+  (zr-czkawka-tool-create
+   :name "big"
+   :title "Big files"
+   :parse #'zr-czkawka--parse-files
+   :grouped nil
+   ;; Keep the order of czkawka, biggest or smallest first.
+   :extra-switches " -U"
+   :keymap zr-czkawka-mode-map
+   :keys "[d] Flag [x] Delete [s] Sort [g] Refresh")
+  "The czkawka tool finding the biggest or smallest files.")
+
+(defun zr-czkawka-big--build-args (dirs mode number)
+  "Build CLI arguments listing NUMBER files of MODE in DIRS.
+MODE is \"biggest\" or \"smallest\"."
+  (append (zr-czkawka--directory-args dirs)
+          (list "-n" (number-to-string number))
+          (and (equal mode "smallest") (list "-J"))))
+
+;;;###autoload
+(defun zr-czkawka-big (&optional raw)
+  "List the biggest or smallest files of directories using czkawka_cli.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies), the kind and number of files."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-big-tool raw #'zr-czkawka-big--build-args
+                     (zr-czkawka--option-reader
+                      "Find" '("biggest" "smallest") 'zr-czkawka-big-mode)
+                     (zr-czkawka--number-reader
+                      "Number of files" 'zr-czkawka-big-number-of-files)))
 
 (provide 'zr-czkawka)
 
