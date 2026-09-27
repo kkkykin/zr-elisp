@@ -20,6 +20,7 @@
 ;;   `zr-czkawka-image' - Find similar images.
 ;;   `zr-czkawka-music' - Find the same music by tags or content.
 ;;   `zr-czkawka-video' - Find similar videos.
+;;   `zr-czkawka-video-optimizer' - Find videos to transcode or crop.
 ;;
 ;; With a prefix argument, each command reads raw czkawka arguments
 ;; instead of prompting for directories and options.
@@ -38,6 +39,9 @@
 ;;   % b - Flag all files except the biggest in each group.
 ;;   % p - Flag all files except the one with the highest resolution
 ;;         in each group, for images and videos.
+;;
+;; Keys in buffers of tools fixing files:
+;;   C-c C-c - Fix the marked files, e.g. transcode videos, then rescan.
 ;;
 ;; Files are listed with `insert-directory' (`ls' or `ls-lisp') using
 ;; the Dired listing switches, and each group is sorted as `ls' would
@@ -105,6 +109,9 @@ Supported values include \"BLAKE3\", \"CRC32\", \"XXH3\"."
 
 (defvar zr-czkawka-process-buffer-name "*zr-czkawka-process*"
   "Name of the buffer holding czkawka process output.")
+
+(defvar zr-czkawka-fix-buffer-name "*zr-czkawka-fix*"
+  "Name of the buffer holding the output of czkawka fixing files.")
 
 (cl-defstruct (zr-czkawka-tool (:constructor zr-czkawka-tool-create)
                                (:copier nil))
@@ -305,6 +312,13 @@ Return GROUPS."
 (defconst zr-czkawka--media-keys
   (concat zr-czkawka--group-keys " [%% p] Keep highest resolution")
   "Header line key hints of result buffers showing images or videos.")
+
+(defvar zr-czkawka-fix-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map zr-czkawka-mode-map)
+    (define-key map (kbd "C-c C-c") #'zr-czkawka-fix)
+    map)
+  "Keymap of result buffers of tools fixing files.")
 
 (define-minor-mode zr-czkawka-mode
   "Minor mode for czkawka results in a Virtual Dired buffer.
@@ -727,6 +741,51 @@ KEEP-LABEL is a description of the kept file (e.g. \"newest\")."
             (ediff-files current-file target-file)
           (diff current-file target-file))))))
 
+;;; Fixing files
+
+(defun zr-czkawka--replace-directories (args files)
+  "Return czkawka ARGS scanning FILES instead of the directories in ARGS."
+  (let (result)
+    (while args
+      (let ((arg (pop args)))
+        (cond
+         ((member arg '("-d" "--directories")) (pop args))
+         ((string-prefix-p "--directories=" arg))
+         (t (push arg result)))))
+    (append (zr-czkawka--directory-args files) (nreverse result))))
+
+(defun zr-czkawka-fix ()
+  "Fix the marked files with the czkawka tool of the current results.
+Run the scan again on the marked files only, with `-F' to fix them,
+e.g. transcode videos or remove EXIF tags, then rescan.  Show the
+czkawka output if some files could not be fixed."
+  (interactive)
+  (let* ((tool zr-czkawka--tool)
+         (prompt (or (zr-czkawka-tool-fix tool)
+                     (user-error "czkawka %s cannot fix files"
+                                 (zr-czkawka-tool-name tool))))
+         (files (or (dired-get-marked-files) (user-error "No files to fix")))
+         (buffer (current-buffer)))
+    (when (y-or-n-p (format prompt (length files)))
+      (let ((zr-czkawka-process-buffer-name zr-czkawka-fix-buffer-name))
+        (zr-czkawka-run
+         (cons (zr-czkawka-tool-name tool)
+               (append (zr-czkawka--replace-directories
+                        (plist-get zr-czkawka--params :args) files)
+                       (list "-F")))
+         (lambda (_)
+           (let ((failed (zr-czkawka--output-matches-p
+                          zr-czkawka-fix-buffer-name "WARNINGS")))
+             (when failed
+               (display-buffer zr-czkawka-fix-buffer-name))
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (zr-czkawka-rescan)))
+             (message (if failed
+                          "Some files could not be fixed; see %s"
+                        "Fixed %d file(s).")
+                      (if failed zr-czkawka-fix-buffer-name (length files))))))))))
+
 ;;; Interactive commands
 
 (defun zr-czkawka--read-directory (prompt &optional dir default)
@@ -1114,6 +1173,101 @@ Otherwise, prompt for directory(ies) and the tolerance."
   (zr-czkawka--start zr-czkawka-video-tool raw #'zr-czkawka-video--build-args
                      (zr-czkawka--number-reader
                       "Tolerance (0-20)" 'zr-czkawka-video-tolerance)))
+
+;;;; Video optimizer
+
+(defcustom zr-czkawka-video-optimizer-mode "transcode"
+  "Default optimization of `zr-czkawka-video-optimizer'.
+\"transcode\" finds videos to transcode to another codec, and \"crop\"
+videos with black bars to crop."
+  :type '(choice (const "transcode")
+                 (const "crop")))
+
+(defcustom zr-czkawka-video-optimizer-excluded-codecs nil
+  "Codecs of videos not to transcode, or nil for the CLI default."
+  :type '(choice (const :tag "Default" nil)
+                 (repeat :tag "Codecs" string)))
+
+(defcustom zr-czkawka-video-optimizer-target-codec nil
+  "Codec videos are transcoded to, or nil for the CLI default.
+When cropping, nil keeps the codec of videos."
+  :type '(choice (const :tag "Default" nil)
+                 (const "h264") (const "h265") (const "av1") (const "vp9")))
+
+(defcustom zr-czkawka-video-optimizer-quality nil
+  "Encoding quality from 0 to 51, lower being better, or nil for the default."
+  :type '(choice (const :tag "Default" nil)
+                 (natnum :tag "Quality")))
+
+(defcustom zr-czkawka-video-optimizer-fail-if-not-smaller t
+  "Non-nil means a transcoded video must be smaller than the original."
+  :type 'boolean)
+
+(defcustom zr-czkawka-video-optimizer-overwrite-original nil
+  "Non-nil means optimized videos replace the original videos.
+Otherwise they are saved next to the originals."
+  :type 'boolean)
+
+(defun zr-czkawka-video-optimizer--annotate (file)
+  "Return the details of video FILE and the area it would be cropped to.
+Return the error of czkawka instead if it could not read FILE."
+  (or (zr-czkawka--nonempty (alist-get 'error file))
+      (string-join
+       (delq nil
+             (list (and (alist-get 'width file)
+                        (format "%sx%s" (alist-get 'width file)
+                                (alist-get 'height file)))
+                   (zr-czkawka--nonempty (alist-get 'codec file))
+                   (zr-czkawka--format-duration (alist-get 'duration file))
+                   (pcase (alist-get 'new_image_dimensions file)
+                     (`(,left ,top ,right ,bottom)
+                      (format "crop to %dx%d+%d+%d"
+                              (- right left) (- bottom top) left top)))))
+       ", ")))
+
+(defconst zr-czkawka-video-optimizer-tool
+  (zr-czkawka-tool-create
+   :name "video-optimizer"
+   :title "Videos to optimize"
+   :parse #'zr-czkawka--parse-files
+   :grouped nil
+   :annotate #'zr-czkawka-video-optimizer--annotate
+   :keymap zr-czkawka-fix-map
+   :keys "[m] Mark [C-c C-c] Optimize marked [d] Flag [x] Delete [g] Refresh"
+   :fix "Optimize %d video(s)? ")
+  "The czkawka tool transcoding or cropping videos.")
+
+(defun zr-czkawka-video-optimizer--build-args (dirs mode)
+  "Build CLI arguments finding videos in DIRS to optimize with MODE.
+MODE is \"transcode\" or \"crop\".  Include the options used to fix
+videos, which do not affect the scan."
+  (append (zr-czkawka--directory-args dirs)
+          (list mode)
+          (and (equal mode "transcode")
+               zr-czkawka-video-optimizer-excluded-codecs
+               (list "-c" (string-join zr-czkawka-video-optimizer-excluded-codecs ",")))
+          (and zr-czkawka-video-optimizer-target-codec
+               (list "--target-codec" zr-czkawka-video-optimizer-target-codec))
+          (and zr-czkawka-video-optimizer-quality
+               (list "--quality" (number-to-string zr-czkawka-video-optimizer-quality)))
+          (and (equal mode "transcode")
+               zr-czkawka-video-optimizer-fail-if-not-smaller
+               (list "--fail-if-not-smaller"))
+          (and zr-czkawka-video-optimizer-overwrite-original
+               (list "--overwrite-original"))))
+
+;;;###autoload
+(defun zr-czkawka-video-optimizer (&optional raw)
+  "Scan directories for videos to transcode or crop using czkawka_cli.
+Mark videos and type \<zr-czkawka-fix-map>\[zr-czkawka-fix] to optimize them.
+When called with prefix argument RAW, prompt for raw CLI arguments.
+Otherwise, prompt for directory(ies) and the kind of optimization."
+  (interactive "P")
+  (zr-czkawka--start zr-czkawka-video-optimizer-tool raw
+                     #'zr-czkawka-video-optimizer--build-args
+                     (zr-czkawka--option-reader
+                      "Optimization" '("transcode" "crop")
+                      'zr-czkawka-video-optimizer-mode)))
 
 (provide 'zr-czkawka)
 

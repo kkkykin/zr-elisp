@@ -853,6 +853,81 @@ JSON properties; the files are created with their `size'."
               (should (equal (zr-czkawka-test--flagged) (list b))))))
       (delete-directory dir t))))
 
+(ert-deftest zr-czkawka-test-replace-directories ()
+  "Fixing scans the marked files instead of the directories."
+  (should (equal (zr-czkawka--replace-directories
+                  '("-d" "/a" "-e" "/x" "--directories" "/b" "--directories=/c"
+                    "transcode" "-c" "h265")
+                  '("/f/1.mp4" "/f/2.mp4"))
+                 '("-d" "/f/1.mp4" "-d" "/f/2.mp4" "-e" "/x" "transcode" "-c" "h265"))))
+
+(ert-deftest zr-czkawka-test-video-optimizer-annotate ()
+  "Videos to crop show the area they are cropped to."
+  (should (equal (zr-czkawka-video-optimizer--annotate
+                  '((width . 320) (height . 400) (codec . "h264") (duration . 5.0)
+                    (new_image_dimensions 21 80 320 320) (error)))
+                 "320x400, h264, 0:05, crop to 299x240+21+80"))
+  (should (equal (zr-czkawka-video-optimizer--annotate
+                  '((width . 320) (height . 240) (codec . "h264") (duration . 40.0)))
+                 "320x240, h264, 0:40")))
+
+(ert-deftest zr-czkawka-test-video-optimizer-build-args ()
+  "Test CLI arguments of czkawka video-optimizer."
+  (let ((zr-czkawka-video-optimizer-excluded-codecs '("h265" "av1"))
+        (zr-czkawka-video-optimizer-target-codec "av1")
+        (zr-czkawka-video-optimizer-quality 30)
+        (zr-czkawka-video-optimizer-fail-if-not-smaller t)
+        (zr-czkawka-video-optimizer-overwrite-original t)
+        (dir (expand-file-name "/tmp/a")))
+    (should (equal (zr-czkawka-video-optimizer--build-args '("/tmp/a") "transcode")
+                   (list "-d" dir "transcode" "-c" "h265,av1" "--target-codec" "av1"
+                         "--quality" "30" "--fail-if-not-smaller"
+                         "--overwrite-original")))
+    (should (equal (zr-czkawka-video-optimizer--build-args '("/tmp/a") "crop")
+                   (list "-d" dir "crop" "--target-codec" "av1" "--quality" "30"
+                         "--overwrite-original")))))
+
+(ert-deftest zr-czkawka-test-video-optimizer-crop-and-fix ()
+  "Videos with black bars are listed, and fixing crops the marked ones."
+  (zr-czkawka-test--skip-unless-cli)
+  (skip-unless (executable-find "ffmpeg"))
+  (let ((dir (make-temp-file "zr-czkawka-test-vo" t)))
+    (unwind-protect
+        (let ((a (expand-file-name "a.mp4" dir))
+              (b (expand-file-name "b.mp4" dir))
+              (zr-czkawka-video-optimizer-overwrite-original nil))
+          (zr-czkawka-test--ffmpeg "-f" "lavfi" "-i" "testsrc=size=320x240:duration=5:rate=10"
+                                   "-vf" "pad=320:400:0:80" "-pix_fmt" "yuv420p" a)
+          (zr-czkawka-test--ffmpeg "-f" "lavfi" "-i" "testsrc=size=320x240:duration=5:rate=10"
+                                   "-pix_fmt" "yuv420p" b)
+          (let* ((args (zr-czkawka-video-optimizer--build-args (list dir) "crop"))
+                 (groups (zr-czkawka-test--run zr-czkawka-video-optimizer-tool args))
+                 rescanned)
+            (should (equal (zr-czkawka-test--paths (car groups)) (list a)))
+            (should (string-match-p "\\`320x400, h264, 0:05, crop to [0-9]+x240\\+[0-9]+\\+80\\'"
+                                    (zr-czkawka-video-optimizer--annotate
+                                     (car (alist-get 'files (car groups))))))
+            (zr-czkawka-test--with-tool-buffer (zr-czkawka-video-optimizer-tool groups dir)
+              (setq zr-czkawka--params (list :directory dir :args args))
+              (should (eq (key-binding (kbd "C-c C-c")) #'zr-czkawka-fix))
+              (should-not (key-binding (kbd "% n")))
+              (dired-goto-file a)
+              (cl-letf (((symbol-function 'y-or-n-p) #'always)
+                        ((symbol-function 'zr-czkawka--scan)
+                         (lambda (_tool scan-args &rest _) (setq rescanned scan-args))))
+                (zr-czkawka-fix)
+                (with-timeout (120 (error "Timed out"))
+                  (while (not rescanned) (accept-process-output nil 0.1))))
+              (should (equal rescanned args))
+              (should (directory-files dir nil "\\`a\\..*crop.*\\.mp4\\'")))))
+      (delete-directory dir t))))
+
+(ert-deftest zr-czkawka-test-fix-unsupported ()
+  "Tools that cannot fix files say so."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 1) (list (nth 1 fs) 2))))
+    (should-error (zr-czkawka-fix) :type 'user-error)))
+
 (provide 'zr-czkawka-test)
 
 ;;; zr-czkawka-test.el ends here
