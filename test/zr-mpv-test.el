@@ -389,6 +389,7 @@
 
 (ert-deftest zr-mpv-test-ipc-windows-helper ()
   "Windows IPC sends the pipe and Unicode command as data to its helper."
+  (skip-unless (eq system-type 'windows-nt))
   (let ((server "\\\\.\\pipe\\mpv-'quoted'")
         (command '("loadfile" "C:/中文/$(literal).mp4"))
         request script)
@@ -402,8 +403,7 @@
                        script (car (last args)))
                  (erase-buffer)
                  0)))
-      (let ((system-type 'windows-nt)
-            (zr-mpv-windows-ipc-program "test-powershell"))
+      (let ((zr-mpv-windows-ipc-program "test-powershell"))
         (should (zr-mpv-ipc-send command server))))
     (should (equal "mpv-'quoted'" (alist-get 'pipe request)))
     (should-not (string-search "mpv-'quoted'" script))
@@ -415,13 +415,13 @@
 
 (ert-deftest zr-mpv-test-ipc-windows-failure ()
   "A failed named-pipe connection must not report success."
+  (skip-unless (eq system-type 'windows-nt))
   (cl-letf (((symbol-function 'call-process-region)
              (lambda (&rest _)
                (erase-buffer)
                (insert "Pipe connection timed out")
                1)))
-    (let ((system-type 'windows-nt))
-      (should-not (zr-mpv-ipc-send '("cycle" "pause") "\\\\.\\pipe\\missing")))))
+    (should-not (zr-mpv-ipc-send '("cycle" "pause") "\\\\.\\pipe\\missing"))))
 
 (ert-deftest zr-mpv-test-ipc-send-error-closes-connection ()
   "A socket send error still releases its connection."
