@@ -30,9 +30,6 @@ same tag value across fragments.  Nil rules disable stitching locally."
 (defcustom zr-erc-stitch-max-length 65536
   "Maximum character count held for a reconstructed message."
   :type 'integer :group 'zr-erc-stitch)
-(dolist (option '(zr-erc-stitch-rules zr-erc-stitch-timeout
-                  zr-erc-stitch-max-fragments zr-erc-stitch-max-length))
-  (make-variable-buffer-local option))
 
 (cl-defstruct zr-erc-stitch--pending
   process rule context originals parts timer timeout max-fragments max-length)

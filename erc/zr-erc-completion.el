@@ -31,9 +31,6 @@ Only `zr-erc-completion-input-group' is replaced, so @ stays in the input."
 (defcustom zr-erc-completion-history-limit 100000
   "Maximum number of history characters to examine per completion."
   :type 'integer :group 'zr-erc-completion)
-(dolist (option '(zr-erc-completion-rules zr-erc-completion-input-regexp
-                  zr-erc-completion-input-group zr-erc-completion-history-limit))
-  (make-variable-buffer-local option))
 
 (defun zr-erc-completion--extract (context)
   "Extract candidate names from CONTEXT according to the current rules."

@@ -55,11 +55,6 @@ to the final URL so custom credentials cannot be forwarded to another host."
 (defcustom zr-erc-media-download-directory "~/Downloads/"
   "Initial directory offered by `zr-erc-media-download'."
   :type 'directory :group 'zr-erc-media)
-(dolist (option '(zr-erc-media-rules zr-erc-media-auto-show zr-erc-media-use-ffmpeg
-                  zr-erc-media-ffmpeg-program zr-erc-media-max-width
-                  zr-erc-media-max-height zr-erc-media-timeout zr-erc-media-max-bytes
-                  zr-erc-media-download-directory))
-  (make-variable-buffer-local option))
 
 (cl-defstruct zr-erc-media--job
   buffer anchor item destination overwrite request process timer raw preview overlay
@@ -150,7 +145,9 @@ When ONLY-RULE is non-nil, only consider that rule."
 (defun zr-erc-media--cleanup-buffer ()
   "Cancel requests and remove previews owned by the current buffer."
   (mapc #'zr-erc-media--cleanup (copy-sequence zr-erc-media--jobs))
-  (setq zr-erc-media--jobs nil))
+  (setq zr-erc-media--jobs nil)
+  (remove-hook 'after-change-functions #'zr-erc-media--prune t)
+  (remove-hook 'kill-buffer-hook #'zr-erc-media--cleanup-buffer t))
 
 (defun zr-erc-media--prune (&rest _)
   "Discard previews whose source link was removed from the scrollback."
