@@ -1,5 +1,7 @@
 ;;; zr-pcmpl-test.el --- Command completion tests -*- lexical-binding: t; -*-
+
 ;;; Code:
+
 (require 'ert)
 (require 'cl-lib)
 (require 'zr-pcmpl)
@@ -18,7 +20,8 @@
 
 (ert-deftest zr-pcmpl-archive-members-after-options ()
   (let* ((directory (make-temp-file "zr-pcmpl-" t))
-         (default-directory (file-name-as-directory directory)) calls)
+         (default-directory (file-name-as-directory directory))
+         calls)
     (unwind-protect
         (progn
           (write-region "" nil "archive.7z" nil 'silent)
@@ -87,7 +90,24 @@
           (zr-pcmpl-mode -1)
           (should (eq (symbol-function 'pcomplete/7z) #'ignore)))
       (zr-pcmpl-mode -1)
-      (if original (fset 'pcomplete/7z original) (fmakunbound 'pcomplete/7z)))))
+      (if original
+          (fset 'pcomplete/7z original)
+        (fmakunbound 'pcomplete/7z)))))
+
+(ert-deftest zr-pcmpl-test-restores-existing-handler ()
+  (let ((old (and (fboundp 'pcomplete/7z) (symbol-function 'pcomplete/7z))))
+    (unwind-protect
+        (progn
+          (fset 'pcomplete/7z #'ignore)
+          (zr-pcmpl-mode 1)
+          (zr-pcmpl-mode 1)
+          (should (eq (symbol-function 'pcomplete/7z) #'zr-pcmpl-7z))
+          (zr-pcmpl-mode -1)
+          (should (eq (symbol-function 'pcomplete/7z) #'ignore)))
+      (zr-pcmpl-mode -1)
+      (if old
+          (fset 'pcomplete/7z old)
+        (fmakunbound 'pcomplete/7z)))))
 
 (provide 'zr-pcmpl-test)
 ;;; zr-pcmpl-test.el ends here

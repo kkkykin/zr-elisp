@@ -76,7 +76,17 @@ make check-parens FILE=../emacs.d/init.el
 make clean
 ```
 
-迁移测试位于 `test/zr-user-{tools,org,integration}-test.el` 和 `test/zr-pcmpl-test.el`：临时目录中的书签读写及失败状态、Comint 历史/退出/sentinel、实际 Eshell 事件展开、Dired 操作、Org 执行/回写、JSON 合并、通知参数转换、补全参数与平台边界。独立子 Emacs 测试逐库加载且拦截外部进程、网络、写文件、环境修改和定时器；另测反向加载、重复启用和关闭。
+迁移测试按模块放在 `test/zr-<模块>-test.el`，例如 `zr-bookmark-test.el`、`zr-comint-test.el`、`zr-org-babel-test.el` 和 `zr-org-tangle-test.el`。公共临时目录与 Org 缓冲区辅助宏放在 `test/zr-test-helpers.el`；跨模块加载与生命周期检查放在 `test/zr-module-loading-test.el`。
+
+测试覆盖临时目录中的书签读写及失败状态、Comint 历史/退出/sentinel、实际 Eshell 事件展开、Dired 操作、Org 执行/回写、JSON 合并、通知参数转换、补全参数与平台边界。独立子 Emacs 测试逐库加载且拦截外部进程、网络、写文件、环境修改和定时器；另测反向加载、重复启用和关闭。
+
+可以单独运行一个模块的测试：
+
+```sh
+make test TEST_FILE=test/zr-bookmark-test.el
+```
+
+Makefile 会将 `test/` 加入测试加载路径，供各模块复用公共辅助宏。
 
 init.el 只做括号、读取、迁移模块依赖与符号静态检查，不启动整个个人配置或服务。Linux 自动测试不能替代以下实机验收：
 

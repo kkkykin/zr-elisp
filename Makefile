@@ -13,7 +13,7 @@ clean:
 	@find . -type f -name '*.elc' -print -delete
 
 test:
-	@$(EMACS) $(EMACSFLAGS) --batch \
+	@$(EMACS) $(EMACSFLAGS) -L test --batch \
 		$(foreach file,$(TEST_FILE),-l "$(file)") \
 		-f ert-run-tests-batch-and-exit
 
