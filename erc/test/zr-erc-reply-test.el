@@ -183,6 +183,7 @@
   (skip-unless (getenv "ZR_ERC_REPLY_TEST_PORT"))
   (require 'zr-erc-stitch)
   (require 'zr-erc-completion)
+  (require 'zr-erc-media)
   (let ((erc-modules '(networks button fill stamp))
         (erc-server-auto-reconnect nil)
         (erc-flood-protect nil)
@@ -198,6 +199,7 @@
           (erc-zr-reply-mode 1)
           (erc-zr-stitch-mode 1)
           (erc-zr-completion-mode 1)
+          (erc-zr-media-mode 1)
           (setq alice (erc :server "127.0.0.1" :port port :nick "zr-alice"
                            :full-name "ERC reply test")
                 bob (erc :server "127.0.0.1" :port port :nick "zr-bob"
@@ -276,6 +278,14 @@
             (erc-tab 1)
             (should (equal (erc-user-input) "@17225180"))
             (delete-region erc-input-marker (point-max)))
+          (with-current-buffer b
+            (erc-server-send "PRIVMSG #zr-replies :image https://example.test/erc-image.png" t))
+          (zr-erc-reply-test--wait
+           (lambda () (zr-erc-reply-test--position a "https://example.test/erc-image.png")))
+          (with-current-buffer a
+            (goto-char (zr-erc-reply-test--position a "https://example.test/erc-image.png"))
+            (should (eq (plist-get (button-get (button-at (point)) 'zr-erc-media-item) :type) 'image))
+            (should-not zr-erc-media--jobs))
           (let ((body (concat (make-string 700 ?x) "\nlast-fragment-test")) original)
             (with-current-buffer b
               (goto-char (zr-erc-reply-test--position b "明天几点开会？"))
@@ -344,6 +354,7 @@
       (erc-zr-reply-mode -1)
       (erc-zr-stitch-mode -1)
       (erc-zr-completion-mode -1)
+      (erc-zr-media-mode -1)
       (dolist (buffer (cl-set-difference (buffer-list) old-buffers))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 

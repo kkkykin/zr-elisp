@@ -76,3 +76,82 @@ The first successful rule wins. `:groups (2)` would offer only the numeric ID.
 selectors as stitching. `zr-erc-completion-input-regexp` and
 `zr-erc-completion-input-group` control the trigger and the portion replaced.
 `zr-erc-completion-history-limit` bounds the amount of history scanned.
+
+## Images and downloads
+
+```elisp
+(require 'zr-erc-media)
+(erc-zr-media-mode 1)
+```
+
+Recognized links become buttons. RET/mouse-2 previews an image or prompts for
+a file destination. `M-x zr-erc-media-download` saves either type. Downloads
+run asynchronously, and overwriting a file requires confirmation. Automatic
+image fetching is off by default; it can be enabled globally, per buffer, or
+per rule. Inline images need an Emacs display with image support; downloads
+also work in terminal Emacs.
+
+Example for an authenticated image proxy and ordinary downloadable files:
+
+```elisp
+(setq-local zr-erc-media-rules
+            '((:regexp "\\`https://cdn\\.example/images/\\(.*\\)\\'"
+               :replace "https://gateway.example/media/\\1"
+               :type image
+               :headers (("X-Client" . "erc"))
+               :auth-source (:user "bridge")
+               :auth-scheme bearer
+               :auto-show t :ffmpeg t
+               :max-width 0.85 :max-height 0.6)
+              (:regexp "\\.\\(?:pdf\\|zip\\)\\(?:[?#].*\\)?\\'" :type file)))
+```
+
+The visible label keeps the original link; requests use the rewritten URL.
+Credentials are looked up for the **rewritten** host and port. For example,
+an entry in an `auth-sources` file could be:
+
+```text
+machine gateway.example port 443 login bridge password YOUR_TOKEN
+```
+
+`:auth-source t` searches by host/port; a plist can add or override search
+criteria. `:auth-scheme basic` is the default; `bearer` sends the secret as a
+Bearer token. `:auth-header` changes the header name. Credentials are resolved
+at request time, not stored in the message button. Redirects are rejected;
+use a rewrite to the final resource URL.
+
+As with the other modules, `:match` accepts message selectors. A URL can also
+come from a tag rather than the body:
+
+```elisp
+(setq-local zr-erc-media-rules
+            '((:match (:tags (("+media-kind" . "^image$")))
+               :url-tag "+media-url" :regexp "\\`https://" :type image)))
+```
+
+`zr-erc-media-use-ffmpeg` enables FFmpeg conversion by default; a rule's
+`:ffmpeg` overrides it. Conversion produces a single-frame PNG preview,
+preserves aspect ratio and does not enlarge small images. Downloads always
+save the original data. `zr-erc-media-max-width` / `-max-height` accept integer
+pixels or floating-point fractions of the current window. Preview again to
+fit a changed window size. `zr-erc-media-ffmpeg-program` selects the executable.
+
+Requests and conversions use `zr-erc-media-timeout`; responses larger than
+`zr-erc-media-max-bytes` are rejected. Temporary previews and pending requests
+are cleaned when the module is disabled or the buffer is killed; removing a
+link from scrollback also removes its preview. `zr-erc-media-download-directory`
+sets the initial save directory.
+
+## Configuration scope
+
+The three new modules' options support `setq-local`, so a channel's settings
+do not affect another channel. They do not depend on Emacs 32's `erc-settings`.
+Message-tag selectors require the server to send those tags; on Emacs 30,
+enabling `erc-zr-reply-mode` negotiates `message-tags`. The regexp-only paths
+work independently of the reply module.
+
+Run all ERC tests with `make test TEST_FILE="$(echo erc/test/*-test.el)"`.
+The media tests start a temporary loopback HTTP server when Python 3 is
+available and exercise actual FFmpeg conversion when FFmpeg/ffprobe are
+available. The current terminal test environment substitutes only image
+creation, then checks the generated PNG dimensions and inline display property.
