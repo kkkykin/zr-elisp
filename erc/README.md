@@ -21,7 +21,9 @@ make check-parens byte-compile FILE=erc/zr-erc-reply.el
 ```
 
 The reply test also exercises two ERC clients on an isolated local Ergo
-when `ZR_ERC_REPLY_TEST_PORT` names its listening port.
+when `ZR_ERC_REPLY_TEST_PORT` names its listening port. The integration test
+also sends a Unicode `RELAYMSG`: configure the isolated Ergo with
+`server.casemapping: permissive` and `server.relaymsg.available-to-chanops: true`.
 
 ## Clipped messages
 
@@ -46,3 +48,31 @@ Interruption by another speaker, timeout, disabling the module, or exceeding
 `zr-erc-stitch-max-fragments` / `zr-erc-stitch-max-length` displays the originals.
 Complete sequences preserve all original message IDs for reply navigation.
 CTCP actions are not collected.
+
+## Relay name completion
+
+```elisp
+(require 'zr-erc-completion)
+(erc-zr-completion-mode 1)
+```
+
+For `<白雪-17225180/onebot> ...`, typing `@白 TAB` completes `@白雪`;
+`@17 TAB` completes `@17225180`. Other input uses ordinary ERC completion.
+Candidates come from this buffer's retained history, including history that
+predates enabling the module. Wrapped continuation lines do not add candidates.
+
+All parts are configurable with buffer-local options:
+
+```elisp
+(setq-local zr-erc-completion-rules
+            '((:source sender
+               :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2))
+              (:source (:tag "+display-name"))
+              (:source text :regexp "^<\\([^>]+\\)> " :groups (1))))
+```
+
+The first successful rule wins. `:groups (2)` would offer only the numeric ID.
+`:source body` extracts from the message body; `:match` accepts the same
+selectors as stitching. `zr-erc-completion-input-regexp` and
+`zr-erc-completion-input-group` control the trigger and the portion replaced.
+`zr-erc-completion-history-limit` bounds the amount of history scanned.

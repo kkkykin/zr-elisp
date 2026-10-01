@@ -182,6 +182,7 @@
 (ert-deftest zr-erc-reply-live-ergo ()
   (skip-unless (getenv "ZR_ERC_REPLY_TEST_PORT"))
   (require 'zr-erc-stitch)
+  (require 'zr-erc-completion)
   (let ((erc-modules '(networks button fill stamp))
         (erc-server-auto-reconnect nil)
         (erc-flood-protect nil)
@@ -196,6 +197,7 @@
         (progn
           (erc-zr-reply-mode 1)
           (erc-zr-stitch-mode 1)
+          (erc-zr-completion-mode 1)
           (setq alice (erc :server "127.0.0.1" :port port :nick "zr-alice"
                            :full-name "ERC reply test")
                 bob (erc :server "127.0.0.1" :port port :nick "zr-bob"
@@ -261,6 +263,19 @@
               (should (= (zr-erc-reply--find (car ids))
                          (zr-erc-reply--find (cadr ids))))))
           ;; Every fragment of a multiline/long reply keeps its reference.
+          (let ((owner (if (with-current-buffer a
+                             (string-match-p "@" (erc-get-channel-membership-prefix
+                                                   (erc-current-nick)))) a b)))
+            (with-current-buffer owner
+              (erc-server-send "RELAYMSG #zr-replies 白雪-17225180/onebot :relay-completion-test" t)))
+          (zr-erc-reply-test--wait
+           (lambda () (zr-erc-reply-test--position a "relay-completion-test")))
+          (with-current-buffer a
+            (goto-char (point-max))
+            (insert "@17")
+            (erc-tab 1)
+            (should (equal (erc-user-input) "@17225180"))
+            (delete-region erc-input-marker (point-max)))
           (let ((body (concat (make-string 700 ?x) "\nlast-fragment-test")) original)
             (with-current-buffer b
               (goto-char (zr-erc-reply-test--position b "明天几点开会？"))
@@ -319,10 +334,16 @@
                            (with-current-buffer bob (zr-erc-reply--cap-p "echo-message")))))
           (when-let* ((file (getenv "ZR_ERC_REPLY_TEST_TRANSCRIPT")))
             (with-current-buffer a (write-region (point-min) (point-max) file nil 'silent))))
+      (when-let* ((file (getenv "ZR_ERC_REPLY_TEST_PROTOCOL"))
+                  (buffer (get-buffer "*erc-protocol*")))
+        (with-current-buffer buffer
+          (let ((coding-system-for-write 'utf-8-emacs))
+            (write-region (point-min) (point-max) file nil 'silent))))
       (dolist (process (list ap bp))
         (when (process-live-p process) (delete-process process)))
       (erc-zr-reply-mode -1)
       (erc-zr-stitch-mode -1)
+      (erc-zr-completion-mode -1)
       (dolist (buffer (cl-set-difference (buffer-list) old-buffers))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
