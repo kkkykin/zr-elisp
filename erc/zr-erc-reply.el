@@ -35,6 +35,7 @@
 (require 'text-property-search)
 (require 'erc)
 (require 'erc-common)
+(require 'zr-erc-common)
 
 (defgroup zr-erc-reply nil
   "IRCv3 replies for ERC."
@@ -52,16 +53,6 @@
 (defvar-local zr-erc-reply--pending nil)
 (defvar-local zr-erc-reply--offered nil)
 
-(defun zr-erc-reply--unescape (value)
-  "Decode an IRCv3 tag VALUE, including unknown and trailing escapes."
-  (replace-regexp-in-string
-   "\\\\\\(.\\|$\\)"
-   (lambda (s)
-     (pcase s
-       ("\\:" ";") ("\\s" " ") ("\\r" "\r") ("\\n" "\n")
-       (_ (substring s 1))))
-   value t t))
-
 (defun zr-erc-reply--escape (value)
   "Encode VALUE for an IRCv3 tag."
   (replace-regexp-in-string
@@ -72,30 +63,13 @@
        (_ "\\\\")))
    value t t))
 
-(defun zr-erc-reply--tags (string)
-  "Parse raw tag STRING into an alist, keeping the last duplicate."
-  (let (tags)
-    (dolist (item (split-string string ";" t) tags)
-      (let* ((sep (string-search "=" item))
-             (key (if sep (substring item 0 sep) item))
-             (value (and sep (zr-erc-reply--unescape
-                              (substring item (1+ sep))))))
-        (setf (alist-get key tags nil nil #'equal)
-              (unless (equal value "") value))))))
-
 (defun zr-erc-reply--parse-tags (original string)
   "Provide ERC's modern tag representation for STRING.
 Honor an explicit legacy format by calling ORIGINAL."
   (if (eq erc-tags-format 'legacy)
       (funcall original string)
     (mapcar (lambda (pair) (cons (intern (car pair)) (cdr pair)))
-            (zr-erc-reply--tags string))))
-
-(defun zr-erc-reply--message-tags (parsed)
-  "Extract tags from PARSED independently of `erc-tags-format'."
-  (let ((raw (erc-response.unparsed parsed)))
-    (when (and raw (string-prefix-p "@" raw))
-      (zr-erc-reply--tags (substring raw 1 (string-search " " raw))))))
+            (zr-erc-parse-tags string))))
 
 (defun zr-erc-reply--cap-p (name)
   "Return non-nil if NAME is acknowledged on this connection."
@@ -216,8 +190,10 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
     (widen)
     (save-excursion
       (goto-char (point-min))
-      (when-let* ((match (text-property-search-forward
-                         'zr-erc-reply-msgid id t)))
+      (when-let* ((match (or (text-property-search-forward
+                             'zr-erc-reply-msgid id t)
+                            (text-property-search-forward
+                             'zr-erc-reply-ids id #'member))))
         (prop-match-beginning match)))))
 
 (defun zr-erc-reply--summary (parsed)
@@ -264,7 +240,7 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
   (when (and erc-zr-reply-mode (erc-response-p erc-message-parsed)
              (member (erc-response.command erc-message-parsed)
                      '("PRIVMSG" "NOTICE")))
-    (when-let* ((parent (cdr (assoc "+reply" (zr-erc-reply--message-tags
+    (when-let* ((parent (cdr (assoc "+reply" (zr-erc-message-tags
                                              erc-message-parsed)))))
       (save-excursion (zr-erc-reply--annotate parent)))))
 
@@ -273,10 +249,11 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
   (when (and erc-zr-reply-mode (erc-response-p erc-message-parsed)
              (member (erc-response.command erc-message-parsed)
                      '("PRIVMSG" "NOTICE")))
-    (let ((tags (zr-erc-reply--message-tags erc-message-parsed)))
+    (let ((tags (zr-erc-message-tags erc-message-parsed)))
       (add-text-properties
        (point-min) (point-max)
        (list 'zr-erc-reply-msgid (cdr (assoc "msgid" tags))
+             'zr-erc-reply-ids (zr-erc-message-ids erc-message-parsed)
              'zr-erc-reply-parent (cdr (assoc "+reply" tags))
              'zr-erc-reply-summary (zr-erc-reply--summary erc-message-parsed)
              'rear-nonsticky t)))))

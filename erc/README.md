@@ -22,3 +22,27 @@ make check-parens byte-compile FILE=erc/zr-erc-reply.el
 
 The reply test also exercises two ERC clients on an isolated local Ergo
 when `ZR_ERC_REPLY_TEST_PORT` names its listening port.
+
+## Clipped messages
+
+```elisp
+(require 'zr-erc-stitch)
+(erc-zr-stitch-mode 1)
+;; These options also support setq-local in an ERC buffer.
+(setq zr-erc-stitch-rules
+      '((:match (:sender "bridge\\|onebot")
+         :end " <clipped message>\\'"
+         :start "\\`<clipped message> " :separator "")))
+```
+
+The default rule works for any sender. `:match` optionally selects a sender,
+target, server, network, body, or tags. For example,
+`:match (:tags (("+bridge" . "^onebot$")))` requires that tag value.
+`:more-tag ("+continued" . "^1$")` can replace `:end`; `:group-tag "+group"`
+prevents merging different groups from the same sender.
+
+Fragments wait up to `zr-erc-stitch-timeout` seconds (default 5).
+Interruption by another speaker, timeout, disabling the module, or exceeding
+`zr-erc-stitch-max-fragments` / `zr-erc-stitch-max-length` displays the originals.
+Complete sequences preserve all original message IDs for reply navigation.
+CTCP actions are not collected.

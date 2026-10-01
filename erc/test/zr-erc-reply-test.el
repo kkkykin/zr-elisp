@@ -20,9 +20,9 @@
 (ert-deftest zr-erc-reply-tag-codec ()
   (should (equal (zr-erc-reply--escape "a;b c\\d\r\n")
                  "a\\:b\\sc\\\\d\\r\\n"))
-  (should (equal (zr-erc-reply--unescape "a\\:b\\sc\\\\d\\r\\n\\z\\")
+  (should (equal (zr-erc-tag-unescape "a\\:b\\sc\\\\d\\r\\n\\z\\")
                  "a;b c\\d\r\nz"))
-  (should (equal (zr-erc-reply--tags "msgid=first;empty=;flag;msgid=a=b\\:c")
+  (should (equal (zr-erc-parse-tags "msgid=first;empty=;flag;msgid=a=b\\:c")
                  '(("flag") ("empty") ("msgid" . "a=b;c"))))
   (let ((erc-tags-format nil))
     (should (equal (zr-erc-reply--parse-tags #'ignore "+reply=a\\sb;msgid=c")
@@ -181,6 +181,7 @@
 
 (ert-deftest zr-erc-reply-live-ergo ()
   (skip-unless (getenv "ZR_ERC_REPLY_TEST_PORT"))
+  (require 'zr-erc-stitch)
   (let ((erc-modules '(networks button fill stamp))
         (erc-server-auto-reconnect nil)
         (erc-flood-protect nil)
@@ -194,6 +195,7 @@
     (unwind-protect
         (progn
           (erc-zr-reply-mode 1)
+          (erc-zr-stitch-mode 1)
           (setq alice (erc :server "127.0.0.1" :port port :nick "zr-alice"
                            :full-name "ERC reply test")
                 bob (erc :server "127.0.0.1" :port port :nick "zr-bob"
@@ -246,6 +248,18 @@
            (lambda () (zr-erc-reply-test--position a "waves-test")))
           (with-current-buffer a
             (should (= 1 (how-many "waves-test" (point-min) (point-max)))))
+          ;; Clipped protocol messages render once, with both IDs retained.
+          (with-current-buffer b
+            (erc-server-send "PRIVMSG #zr-replies :stitched-one <clipped message>" t)
+            (erc-server-send "PRIVMSG #zr-replies :<clipped message> -two" t))
+          (zr-erc-reply-test--wait
+           (lambda () (zr-erc-reply-test--position a "stitched-one-two")))
+          (with-current-buffer a
+            (goto-char (zr-erc-reply-test--position a "stitched-one-two"))
+            (let ((ids (get-text-property (point) 'zr-erc-reply-ids)))
+              (should (= 2 (length ids)))
+              (should (= (zr-erc-reply--find (car ids))
+                         (zr-erc-reply--find (cadr ids))))))
           ;; Every fragment of a multiline/long reply keeps its reference.
           (let ((body (concat (make-string 700 ?x) "\nlast-fragment-test")) original)
             (with-current-buffer b
@@ -308,6 +322,7 @@
       (dolist (process (list ap bp))
         (when (process-live-p process) (delete-process process)))
       (erc-zr-reply-mode -1)
+      (erc-zr-stitch-mode -1)
       (dolist (buffer (cl-set-difference (buffer-list) old-buffers))
         (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
