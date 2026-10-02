@@ -144,8 +144,26 @@ sets the initial save directory.
 
 ## Configuration scope
 
-The three new modules' options support `setq-local`, so a channel's settings
-do not affect another channel. They do not depend on Emacs 32's `erc-settings`.
+The stitch, completion and media options are ordinary `defcustom` variables
+with global defaults. Loading or enabling these modules does not create local
+bindings for their options. Use `setq` or `setopt` for global configuration,
+or `setq-local` in an ERC buffer to override an option for that buffer only.
+The modules' buffer-local internal state is separate from these user options.
+
+On Emacs 32, the native
+[`erc-settings`](https://github.com/emacs-mirror/emacs/blob/master/lisp/erc/erc-settings.el)
+module can also assign these options per buffer. It skips any variable that
+already has a local binding, even if the local value is nil or equals the
+global default; neither `:eval` nor `:custom` forces an override. If using
+`erc-settings`, let it create the local bindings instead of copying defaults
+into buffers with `setq-local` or `make-local-variable` beforehand. Declaring
+a variable with `defvar-local` or `make-variable-buffer-local` alone does not
+create a local binding in each buffer; assigning it locally does.
+
+These modules do not require `erc-settings`. Configure that option and enable
+the `settings` module before connecting if you use it. Its upstream guidance
+is to destroy and reopen affected sessions to apply changes to `erc-settings`.
+
 Message-tag selectors require the server to send those tags; on Emacs 30,
 enabling `erc-zr-reply-mode` negotiates `message-tags`. The regexp-only paths
 work independently of the reply module.

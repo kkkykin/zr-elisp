@@ -4,8 +4,9 @@
 ;;; Commentary:
 ;; Enable `erc-zr-media-mode'.  Recognized URLs become buttons: images can
 ;; be previewed inline, files downloaded.  `zr-erc-media-download' downloads
-;; either type.  Automatic previews are opt-in.  Options are buffer-local;
-;; see README.md for URL rewriting, request headers, auth-source and FFmpeg.
+;; either type.  Automatic previews are opt-in.  Options support buffer-local
+;; values; see README.md for configuration scope, URL rewriting, request
+;; headers, auth-source and FFmpeg.
 ;;; Code:
 (require 'zr-erc-common)
 (require 'button)
