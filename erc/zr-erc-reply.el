@@ -21,6 +21,7 @@
 ;;
 ;; Implements https://ircv3.net/specs/client-tags/reply using +reply and
 ;; server-provided msgid tags; also accepts +draft/reply from bridges.
+;; Customize `zr-erc-message-tag-send-remap' to change the outgoing tag name.
 ;; Capability discovery runs after login,
 ;; independently of ERC's SASL handshake.  With echo-message, outgoing
 ;; messages are displayed when echoed by the server, so they too have
@@ -178,8 +179,8 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
                     (erc-downcase (car zr-erc-reply--outgoing))))
     (unless (zr-erc-reply--cap-p "message-tags")
       (user-error "This server has not acknowledged message-tags"))
-    (let ((tag (concat "+reply=" (zr-erc-reply--escape
-                                 (cdr zr-erc-reply--outgoing)))))
+    (let ((tag (concat (zr-erc-message-tag-name "+reply") "="
+                       (zr-erc-reply--escape (cdr zr-erc-reply--outgoing)))))
       (setq string (if (string-prefix-p "@" string)
                        (concat "@" tag ";" (substring string 1))
                      (concat "@" tag " " string)))))
@@ -236,18 +237,13 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
      'help-echo "Visit the original message in this conversation")
     (insert " ")))
 
-(defun zr-erc-reply--parent (tags)
-  "Return the parent ID in TAGS, preferring +reply over +draft/reply."
-  (or (cdr (assoc "+reply" tags))
-      (cdr (assoc "+draft/reply" tags))))
-
 (defun zr-erc-reply--insert ()
   "Annotate incoming replies before ERC fills the narrowed message."
   (when (and erc-zr-reply-mode (erc-response-p erc-message-parsed)
              (member (erc-response.command erc-message-parsed)
                      '("PRIVMSG" "NOTICE")))
-    (when-let* ((parent (zr-erc-reply--parent
-                        (zr-erc-message-tags erc-message-parsed))))
+    (when-let* ((parent (cdr (assoc "+reply"
+                                  (zr-erc-message-tags erc-message-parsed)))))
       (save-excursion (zr-erc-reply--annotate parent)))))
 
 (defun zr-erc-reply--remember ()
@@ -260,7 +256,7 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
        (point-min) (point-max)
        (list 'zr-erc-reply-msgid (cdr (assoc "msgid" tags))
              'zr-erc-reply-ids (zr-erc-message-ids erc-message-parsed)
-             'zr-erc-reply-parent (zr-erc-reply--parent tags)
+             'zr-erc-reply-parent (cdr (assoc "+reply" tags))
              'zr-erc-reply-summary (zr-erc-reply--summary erc-message-parsed)
              'rear-nonsticky t)))))
 

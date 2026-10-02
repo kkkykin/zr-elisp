@@ -88,6 +88,20 @@
       (should-error (zr-erc-reply--send #'ignore "PRIVMSG #chat :hello")
                     :type 'user-error))))
 
+(ert-deftest zr-erc-reply-send-remapped-tag ()
+  (let ((zr-erc-reply--outgoing '("#chat" . "parent")))
+    (cl-letf (((symbol-function 'zr-erc-reply--cap-p) (lambda (_) t)))
+      (dolist (name '("+draft/reply" "+example.org/reply"))
+        (let ((zr-erc-message-tag-send-remap (list (cons "+reply" name))))
+          (should (equal
+                   (car (zr-erc-reply--send #'list "@+x=y PRIVMSG #chat :hello"))
+                   (concat "@" name "=parent;+x=y PRIVMSG #chat :hello")))))
+      (dolist (name '("" "+reply;other" "+reply=value" "+reply\r\n"))
+        (let ((zr-erc-message-tag-send-remap (list (cons "+reply" name))))
+          (should-error
+           (zr-erc-reply--send #'ignore "PRIVMSG #chat :hello")
+           :type 'user-error))))))
+
 (defun zr-erc-reply-test--insert (id text &optional parent command reply-tag)
   "Insert ID, TEXT, PARENT and COMMAND, using REPLY-TAG or +reply."
   (let* ((erc-zr-reply-mode t)
@@ -106,6 +120,26 @@
       (narrow-to-region start (point))
       (zr-erc-reply--insert)
       (zr-erc-reply--remember))))
+
+(ert-deftest zr-erc-reply-receive-remapped-tag ()
+  (let ((zr-erc-message-tag-receive-remap
+         '(("+custom/reply" . "+reply") ("draft/msgid" . "msgid"))))
+    (should (equal
+             (zr-erc-message-tags
+              (make-erc-response
+               :unparsed "@draft/msgid=child;+custom/reply=alias;+reply=canonical PRIVMSG #a :body"))
+             '(("msgid" . "child") ("+reply" . "canonical"))))
+    (with-temp-buffer
+      (zr-erc-reply-test--insert "parent" "original")
+      (zr-erc-reply-test--insert "child" "reply" "parent" nil "+custom/reply")
+      (goto-char (zr-erc-reply--find "child"))
+      (should (button-at (point)))
+      (zr-erc-reply-jump)
+      (should (= (point) (point-min)))))
+  (let ((zr-erc-message-tag-receive-remap nil))
+    (with-temp-buffer
+      (zr-erc-reply-test--insert "child" "reply" "parent" nil "+draft/reply")
+      (should-not (get-text-property (point-min) 'zr-erc-reply-parent)))))
 
 (ert-deftest zr-erc-reply-visible-parent-and-navigation ()
   (with-temp-buffer
