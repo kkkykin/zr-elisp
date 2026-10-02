@@ -25,8 +25,10 @@ This does not rewrite arbitrary ERC traffic."
   :group 'erc)
 
 (defcustom zr-erc-message-tag-receive-remap
-  '(("+draft/reply" . "+reply"))
+  '(("+draft/reply" . "+reply")
+    ("+draft/display-name" . "+display-name"))
   "Alist mapping received tag names to canonical names for zr-erc modules.
+Remapping happens after tag decoding, before rule contexts are constructed.
 Mappings are applied once, without chaining.  A canonical tag present
 in the message takes precedence over an alias.  When several aliases
 map to the same name, the first entry in this alist wins.

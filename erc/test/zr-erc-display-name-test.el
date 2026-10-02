@@ -59,6 +59,7 @@
             (erc-mode)
             (should-not erc-zr-display-name-mode)
             (should-not (memq #'zr-erc-display-name--insert erc-insert-post-hook)))
+          (should erc-zr-display-name-mode)
           (save-restriction
             (narrow-to-region erc-input-marker (point-max))
             (erc-zr-display-name-mode -1))
@@ -186,6 +187,54 @@
           (erc-zr-display-name-mode -1)
           (should-not (get-char-property quoted 'display))
           (should-not (memq #'zr-erc-display-name--render-replies erc-send-post-hook)))))))
+
+(ert-deftest zr-erc-display-name-default-tags-and-nil-rules ()
+  (let ((erc-modules nil))
+    (with-temp-buffer
+      (erc-mode)
+      (erc-zr-display-name-mode 1)
+      (dolist (case '(("+display-name=Primary;+draft/display-name=Draft" . "Primary")
+                      ("+draft/display-name=Draft" . "Draft")
+                      ("+display-name=;+draft/display-name=Draft" . nil)
+                      ("unrelated=value" . nil)))
+        (erase-buffer)
+        (let* ((erc-message-parsed
+                (make-erc-response :sender "nichi_bot!u@h" :command "PRIVMSG"
+                                   :contents "hello"
+                                   :unparsed (concat "@" (car case)
+                                                     " :nichi_bot PRIVMSG #c :hello")))
+               (speaker (zr-erc-display-name-test--message "Body name")))
+          (run-hooks 'erc-insert-post-hook)
+          (should (equal (get-char-property speaker 'display) (cdr case)))
+          (let ((zr-erc-display-name-rules nil))
+            (run-hooks 'erc-insert-post-hook)
+            (should-not (get-char-property speaker 'display))))))))
+
+(ert-deftest zr-erc-display-name-remap-before-rules ()
+  (let* ((parsed (make-erc-response
+                  :sender "bot!u@h" :command "PRIVMSG" :contents "hello"
+                  :unparsed "@+draft/display-name=Sydney\\sDian :bot PRIVMSG #c :hello"))
+         (raw (erc-response.unparsed parsed))
+         (context (zr-erc-context parsed)))
+    (should (equal (zr-erc-display-name--extract context) "Sydney Dian"))
+    (should (zr-erc-match-p '(:tags (("+display-name" . "^Sydney Dian$"))) context))
+    (should-not (assoc "+draft/display-name" (plist-get context :tags)))
+    (should (equal (erc-response.unparsed parsed) raw))
+    (let ((zr-erc-message-tag-receive-remap nil))
+      (should-not (zr-erc-display-name--extract (zr-erc-context parsed))))))
+
+(ert-deftest zr-erc-display-name-load-does-not-enable ()
+  (let ((erc-modules nil)
+        (file (symbol-file 'zr-erc-display-name--extract 'defun)))
+    (with-temp-buffer
+      (erc-mode)
+      (should-not erc-zr-display-name-mode)
+      (load file nil t)
+      (should-not erc-zr-display-name-mode)
+      (should-not (memq #'zr-erc-display-name--insert erc-insert-post-hook))
+      (with-temp-buffer
+        (erc-mode)
+        (should-not erc-zr-display-name-mode)))))
 
 (provide 'zr-erc-display-name-test)
 ;;; zr-erc-display-name-test.el ends here

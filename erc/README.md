@@ -1,13 +1,30 @@
 # ERC modules
 
 Requires Emacs 30.1 or newer. Add this directory to `load-path` before
-loading a module. Loading a file does not enable its module.
+loading a module. Loading files and setting options do not enable modules.
+Enable them with their mode commands, or list them in `erc-modules` so ERC
+enables them during setup.
 
 ```elisp
 (add-to-list 'load-path "/path/to/zr-elisp/erc")
 (require 'zr-erc-reply)
 (erc-zr-reply-mode 1)
 ```
+
+Alternatively, configure ERC's module list before connecting:
+
+```elisp
+(require 'zr-erc-reply)
+(add-to-list 'erc-modules 'zr-reply)
+```
+
+The other global module names are `zr-stitch`, `zr-completion` and `zr-media`.
+After changing `erc-modules` in an existing session, run
+`M-x erc-update-modules` to enable listed global modules. If they are already
+enabled through this list or earlier configuration, changing rules takes
+effect without another mode call. `zr-display-name` is buffer-local: add it
+to `erc-modules` before connecting, or run `M-x erc-zr-display-name-mode`
+in an existing conversation. `erc-update-modules` skips local modules.
 
 `zr-erc-reply` implements the IRCv3 `+reply` tag. Put point on a message
 and run `M-x zr-erc-reply`. Replies show the original sender and an excerpt;
@@ -86,6 +103,23 @@ selectors as stitching. `zr-erc-completion-input-regexp` and
 
 ## Local display names
 
+This buffer-local module defaults to matching only `+display-name`.
+The default `zr-erc-message-tag-receive-remap` maps `+draft/display-name`
+to `+display-name` before rules run. Messages without a valid display name
+keep their original nickname. To enable it during ERC setup:
+
+```elisp
+(require 'zr-erc-display-name)
+(add-to-list 'erc-modules 'zr-display-name)
+```
+
+Reception decodes tags, applies remapping, then builds rule contexts for all
+modules. A canonical tag in the message wins over its alias, even when empty;
+aliases are removed from the resulting context. Remapping is applied once,
+without chaining, and does not modify the raw IRC message.
+
+To extract a relay name from text instead, configure the conversation buffer:
+
 ```elisp
 (require 'zr-erc-display-name)
 ;; Evaluate in the conversation buffer; no rejoin is needed.
@@ -118,7 +152,8 @@ The reference text, IDs and navigation behavior are unchanged. References
 created before loading this version of the reply module lack that metadata
 and keep their original nicknames.
 
-Rules default to nil. The first successful rule wins; `:match` uses the same
+Setting rules to nil disables name replacement. Custom rules replace the
+default tag rules; the first successful rule wins. `:match` uses the same
 selectors as the other modules. `:source` accepts `text` (default), `body`,
 `sender`, or `(:tag "+display-name")`. With `:regexp`, `:group` defaults to 1;
 without a regexp, the whole source is used. Empty, whitespace-only and

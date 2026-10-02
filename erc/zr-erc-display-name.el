@@ -9,13 +9,15 @@
 (require 'button)
 
 (defgroup zr-erc-display-name nil "Local ERC display names." :group 'erc)
-(defcustom zr-erc-display-name-rules nil
+(defcustom zr-erc-display-name-rules
+  '((:source (:tag "+display-name")))
   "Ordered rules for extracting a local display name; first success wins.
 Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
 body, text, or (:tag TAG), default text), :regexp, and :group (default 1
 with a regexp, otherwise 0).  Without :regexp use the entire source.
 Names containing control characters or only whitespace are rejected.
 Use text rules for history whose original metadata ERC has already removed.
+By default recognize +display-name after `zr-erc-message-tag-receive-remap'.
 Nil disables name replacement.  This option supports buffer-local values."
   :type 'sexp :group 'zr-erc-display-name)
 
