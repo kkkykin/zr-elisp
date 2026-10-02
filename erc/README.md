@@ -92,7 +92,14 @@ selectors as stitching. `zr-erc-completion-input-regexp` and
 ```
 
 Recognized links become buttons. RET/mouse-2 previews an image or prompts for
-a file destination. `M-x zr-erc-media-download` saves either type. Downloads
+a file destination. `M-x zr-erc-media-show` previews the image at point, or
+all image links overlapping the active region. With a prefix argument
+(`C-u M-x zr-erc-media-show`), it previews images in the selected window's
+visible range, taking precedence over the region. Range previews skip file
+links and continue if an image has expired or a request fails. These manual
+previews work with automatic image fetching disabled.
+
+`M-x zr-erc-media-download` saves either type. Downloads
 run asynchronously, and overwriting a file requires confirmation. Automatic
 image fetching is off by default; it can be enabled globally, per buffer, or
 per rule. Inline images need an Emacs display with image support; downloads
