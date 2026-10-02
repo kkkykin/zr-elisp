@@ -16,6 +16,7 @@
 (require 'iso8601)
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
+(defvar url-http-after-change-function)
 
 (defgroup zr-erc-media nil "Images and files in ERC." :group 'erc)
 (defcustom zr-erc-media-rules
@@ -29,6 +30,7 @@ with Emacs regexp backreferences; :headers is an HTTP header alist;
 or bearer; :auth-header defaults to Authorization.  :auto-show, :ffmpeg,
 :max-width, :max-height and :max-age override the corresponding module
 options.  :max-age is an age limit in seconds; nil disables the limit.
+:proxy overrides `zr-erc-media-proxy' (inherit, nil, or an HTTP proxy).
 :url-tag names a message tag whose value supplies an additional URL.
 Regexp matching of URLs is case-sensitive; use explicit alternatives as
 needed.  Only HTTP(S) URLs can be fetched.  Redirects are rejected: rewrite
@@ -46,6 +48,20 @@ Expired links skip automatic previews; manual previews and downloads
 report an error without requesting the URL.  Existing previews and
 requests already in progress are retained."
   :type '(choice (const :tag "No age limit" nil) (natnum :tag "Seconds"))
+  :group 'zr-erc-media)
+(defcustom zr-erc-media-proxy 'inherit
+  "HTTP proxy for media previews and downloads.
+The default, inherit, uses Emacs's existing URL proxy configuration.
+Nil forces a direct connection.  A string specifies an HTTP proxy as
+host:port or http://host:port, for example http://127.0.0.1:7890.
+IPv6 addresses must be bracketed.  Proxy URLs with credentials or paths
+are not supported.  HTTPS media uses a CONNECT tunnel through the proxy.
+A rule's :proxy overrides this option, including an explicit nil.
+Explicit proxies bypass no_proxy exclusions.  Proxy settings apply only
+to the media request, without changing other Emacs network requests."
+  :type '(choice (const :tag "Use Emacs proxy settings" inherit)
+                 (const :tag "Connect directly" nil)
+                 (string :tag "HTTP proxy (host:port or http://host:port)"))
   :group 'zr-erc-media)
 (defcustom zr-erc-media-use-ffmpeg nil
   "Whether to use FFmpeg to create a scaled, single-frame PNG preview."
@@ -111,6 +127,25 @@ When ONLY-RULE is non-nil, only consider that rule."
   "Signal a user error if ITEM has expired."
   (when (zr-erc-media--expired-p item)
     (user-error "Media link has expired (message exceeds the configured age limit)")))
+
+(defun zr-erc-media--proxy-locator (proxy)
+  "Return a URL proxy locator for PROXY, rejecting invalid proxy addresses."
+  (pcase proxy
+    ('inherit url-proxy-locator)
+    ('nil (lambda (_url _host) "DIRECT"))
+    (_ (save-match-data
+         (let ((case-fold-search t))
+           (unless (and (stringp proxy)
+                        (string-match
+                         (concat "\\`\\(?:http://\\)?"
+                                 "\\(\\(?:\\[[[:xdigit:]:.]+\\]\\|[[:alnum:]._-]+\\)\\)"
+                                 ":\\([0-9]+\\)/?\\'")
+                         proxy)
+                        (<= 1 (string-to-number (match-string 2 proxy)) 65535))
+             (user-error "Media proxy must be inherit, nil, or an HTTP host:port"))
+           (let ((directive (format "PROXY %s:%d" (match-string 1 proxy)
+                                    (string-to-number (match-string 2 proxy)))))
+             (lambda (_url _host) directive)))))))
 
 (defun zr-erc-media--headers (item)
   "Build request headers for ITEM, resolving secrets only when fetching."
@@ -236,6 +271,10 @@ When ONLY-RULE is non-nil, only consider that rule."
           (condition-case nil
               (progn
                 (when (or (plist-get status :error)
+                          ;; A failed TLS handshake can leave CONNECT's 200
+                          ;; response behind.  It is not a media response.
+                          (eq url-http-after-change-function
+                              #'url-https-proxy-after-change-function)
                           (not (and (integerp url-http-response-status)
                                     (<= 200 url-http-response-status 299))))
                   (error "HTTP failure"))
@@ -275,6 +314,10 @@ When ONLY-RULE is non-nil, only consider that rule."
   "Fetch ITEM at ANCHOR, optionally to DESTINATION with OVERWRITE permission."
   (zr-erc-media--check-age item)
   (let* ((rule (plist-get item :rule))
+         (locator (zr-erc-media--proxy-locator
+                   (zr-erc-media--option rule :proxy zr-erc-media-proxy)))
+         ;; URL's connection cache is keyed by destination, not proxy.
+         (connections (make-hash-table :test #'equal))
          (window (or (get-buffer-window (current-buffer) t) (selected-window)))
          (headers (zr-erc-media--headers item))
          (ffmpeg (and (not destination)
@@ -299,14 +342,24 @@ When ONLY-RULE is non-nil, only consider that rule."
     (condition-case nil
         (let ((url-request-extra-headers headers)
               (url-request-noninteractive t)
+              (url-proxy-locator locator)
+              (url-proxy-services (copy-tree url-proxy-services))
+              (url-http-open-connections connections)
+              (url-http-attempt-keepalives nil)
               (url-max-redirections 0))
           (setf (zr-erc-media--job-timer job)
                 (run-at-time zr-erc-media-timeout nil #'zr-erc-media--fail job "Request timed out")
                 (zr-erc-media--job-request job)
                 (url-retrieve (plist-get item :url) #'zr-erc-media--received (list job) t t))
           (unless (zr-erc-media--job-request job) (error "No request"))
-          (with-current-buffer (zr-erc-media--job-request job)
-            (setq-local url-max-redirections 0)))
+          ;; Preserve routing for asynchronous connection retries as well.
+          (let ((services url-proxy-services))
+            (with-current-buffer (zr-erc-media--job-request job)
+              (setq-local url-max-redirections 0
+                          url-proxy-locator locator
+                          url-proxy-services services
+                          url-http-open-connections connections
+                          url-http-attempt-keepalives nil))))
       (error (zr-erc-media--fail job "Could not start the request")))
     job))
 

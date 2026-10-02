@@ -2,6 +2,7 @@
 ;;; Code:
 (require 'ert)
 (require 'zr-erc-media)
+(require 'gnutls)
 
 (defconst zr-erc-media-test--server-file
   (expand-file-name "media-server.py"
@@ -15,12 +16,13 @@
       (accept-process-output nil 0.02))
     (should (funcall predicate))))
 
-(defun zr-erc-media-test--server (function)
-  "Run FUNCTION with the URL and directory of an isolated HTTP fixture."
+(defun zr-erc-media-test--server (function &optional tls)
+  "Run FUNCTION with an isolated HTTP fixture's URL and directory.
+TLS, when non-nil, is a list of certificate and key file names."
   (unless (executable-find "python3") (ert-skip "python3 is unavailable"))
   (let* ((buffer (generate-new-buffer " *erc-media-http-test*"))
          (process (make-process :name "erc-media-http-test" :buffer buffer :noquery t
-                                 :command (list "python3" zr-erc-media-test--server-file)))
+                                 :command (append (list "python3" zr-erc-media-test--server-file) tls)))
          (directory (make-temp-file "erc-media-test-" t))
          (url-proxy-services '(("no_proxy" . "127.0.0.1"))))
     (unwind-protect
@@ -28,11 +30,33 @@
           (zr-erc-media-test--wait
            (lambda () (with-current-buffer buffer (string-match-p "^[0-9]+\n" (buffer-string)))))
           (funcall function
-                   (with-current-buffer buffer (format "http://127.0.0.1:%d" (string-to-number (buffer-string))))
+                   (with-current-buffer buffer
+                     (format "%s://127.0.0.1:%d" (if tls "https" "http")
+                             (string-to-number (buffer-string))))
                    directory))
       (delete-process process)
       (kill-buffer buffer)
       (delete-directory directory t))))
+
+(defun zr-erc-media-test--proxy (function)
+  "Run FUNCTION with a loopback proxy URL and its request log buffer."
+  (unless (executable-find "python3") (ert-skip "python3 is unavailable"))
+  (let* ((buffer (generate-new-buffer " *erc-media-proxy-test*"))
+         (process (make-process
+                   :name "erc-media-proxy-test" :buffer buffer :noquery t
+                   :command (list "python3" (expand-file-name
+                                            "media-proxy.py"
+                                            (file-name-directory zr-erc-media-test--server-file))))))
+    (unwind-protect
+        (progn
+          (zr-erc-media-test--wait
+           (lambda () (with-current-buffer buffer (string-match-p "^[0-9]+\n" (buffer-string)))))
+          (funcall function
+                   (with-current-buffer buffer
+                     (format "http://127.0.0.1:%d" (string-to-number (buffer-string))))
+                   buffer))
+      (delete-process process)
+      (kill-buffer buffer))))
 
 (defun zr-erc-media-test--read (file)
   (with-temp-buffer
@@ -165,6 +189,146 @@
             (should-error (zr-erc-media--fetch item (point-max) destination) :type 'user-error))
           (should-not side-effects)
           (should-not zr-erc-media--jobs))))))
+
+(ert-deftest zr-erc-media-invalid-proxy-does-not-start-request ()
+  (with-temp-buffer
+    (dolist (proxy '(t "" "localhost" "host:0" "host:65536" "host:bad"
+                    "https://host:80" "socks5://host:80" "http://user:secret@host:80"
+                    "http://host:80/path" "host:80;DIRECT" "host:80\n"))
+      (let ((zr-erc-media-proxy proxy))
+        (should-error (zr-erc-media--fetch '(:url "http://127.0.0.1/image") (point))
+                      :type 'user-error)
+        (should-not zr-erc-media--jobs))))
+  (dolist (proxy '("[::1]:7890" "http://[::1]:7890/"))
+    (let ((url-proxy-locator (zr-erc-media--proxy-locator proxy)))
+      (should (equal (url-find-proxy-for-url (url-generic-parse-url "https://example.test")
+                                            "example.test")
+                     "http://[::1]:7890/")))))
+
+(ert-deftest zr-erc-media-http-proxy-overrides-and-isolation ()
+  (zr-erc-media-test--server
+   (lambda (base directory)
+     (zr-erc-media-test--proxy
+      (lambda (proxy log)
+        (let* ((url-proxy-locator #'url-default-find-proxy-for-url)
+               (url-proxy-services '(("no_proxy" . ".")))
+               (services (copy-tree url-proxy-services))
+               (connections url-http-open-connections)
+               (destination (expand-file-name "download" directory)))
+          (with-temp-buffer
+            (setq-local zr-erc-media-proxy proxy)
+            ;; Explicit proxy overrides no_proxy; nil forces a direct request.
+            (dolist (rule '(nil (:proxy nil)))
+              (let ((job (zr-erc-media--fetch (list :url (concat base "/data") :rule rule)
+                                              (point) destination t)))
+                (with-current-buffer (zr-erc-media--job-request job)
+                  (should-not (eq url-http-open-connections connections))
+                  (should (equal (url-find-proxy-for-url (url-generic-parse-url base) "127.0.0.1")
+                                 (unless rule (concat proxy "/")))))
+                (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job)))
+                (should-not (zr-erc-media--job-error job))))
+            (with-current-buffer log
+              (should (= 1 (how-many "^GET " (point-min) (point-max)))))
+            ;; Another buffer keeps the default (inherited direct connection).
+            (with-temp-buffer
+              (let ((job (zr-erc-media--fetch (list :url (concat base "/data"))
+                                              (point) destination t)))
+                (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job)))
+                (should-not (zr-erc-media--job-error job))))
+            ;; A rule can restore an inherited proxy over a local direct setting.
+            (setq-local zr-erc-media-proxy nil)
+            (let* ((url-proxy-locator (lambda (_url _host) (concat "PROXY " (substring proxy 7))))
+                   (job (zr-erc-media--fetch (list :url (concat base "/data") :rule '(:proxy inherit))
+                                             (point) destination t)))
+              (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job)))
+              (should-not (zr-erc-media--job-error job))))
+          (with-current-buffer log
+            (should (= 2 (how-many (concat "^GET " (regexp-quote base) "/data$")
+                                  (point-min) (point-max)))))
+          (should (= 13 (length (zr-erc-media-test--read destination))))
+          (should (equal services url-proxy-services))
+          (should (eq connections url-http-open-connections))
+          (should (eq url-proxy-locator #'url-default-find-proxy-for-url))))))))
+
+(ert-deftest zr-erc-media-http-proxy-failure-does-not-fall-back-direct ()
+  (zr-erc-media-test--server
+   (lambda (base directory)
+     (zr-erc-media-test--proxy
+      (lambda (proxy log)
+        (with-temp-buffer
+          (let* ((destination (expand-file-name "download" directory))
+                 (job (zr-erc-media--fetch
+                       (list :url (concat base "/drop") :rule (list :proxy proxy))
+                       (point) destination)))
+            ;; The origin would serve /drop successfully if requested directly.
+            (let ((url-proxy-locator (lambda (&rest _) "DIRECT")))
+              (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job))))
+            (should (zr-erc-media--job-error job))
+            (should-not (file-exists-p destination))
+            (with-current-buffer log
+              (should (= 1 (how-many "^GET " (point-min) (point-max))))))))))))
+
+(ert-deftest zr-erc-media-https-through-http-proxy ()
+  (skip-unless (and (executable-find "openssl") (gnutls-available-p)))
+  (let* ((directory (make-temp-file "erc-media-tls-" t))
+         (ca (expand-file-name "ca.pem" directory))
+         (ca-key (expand-file-name "ca-key.pem" directory))
+         (csr (expand-file-name "request.pem" directory))
+         (cert (expand-file-name "cert.pem" directory))
+         (key (expand-file-name "key.pem" directory)))
+    (unwind-protect
+        (progn
+          (should (= 0 (call-process "openssl" nil nil nil "req" "-x509" "-newkey" "rsa:2048"
+                                     "-nodes" "-keyout" ca-key "-out" ca "-days" "1"
+                                     "-subj" "/CN=ERC media test CA")))
+          (should (= 0 (call-process "openssl" nil nil nil "req" "-new" "-newkey" "rsa:2048"
+                                     "-nodes" "-keyout" key "-out" csr
+                                     "-subj" "/CN=127.0.0.1" "-addext" "subjectAltName=IP:127.0.0.1")))
+          (should (= 0 (call-process "openssl" nil nil nil "x509" "-req" "-in" csr
+                                     "-CA" ca "-CAkey" ca-key "-CAcreateserial" "-out" cert
+                                     "-days" "1" "-copy_extensions" "copy")))
+          (let ((gnutls-trustfiles (list ca)))
+            (zr-erc-media-test--server
+             (lambda (base downloads)
+               (zr-erc-media-test--proxy
+                (lambda (proxy log)
+                  (with-temp-buffer
+                    (let* ((destination (expand-file-name "download" downloads))
+                           (job (zr-erc-media--fetch
+                                 (list :url (concat base "/data") :rule (list :proxy proxy))
+                                 (point) destination)))
+                      (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job)))
+                      (should-not (zr-erc-media--job-error job))
+                      (should (= 13 (length (zr-erc-media-test--read destination))))
+                      (with-current-buffer log
+                        (should (string-match-p (concat "^CONNECT " (regexp-quote (substring base 8)) "$")
+                                                (buffer-string)))))))))
+             (list cert key))))
+      (delete-directory directory t))))
+
+(ert-deftest zr-erc-media-connect-response-is-not-a-download ()
+  (let* ((directory (make-temp-file "erc-media-connect-" t))
+         (destination (expand-file-name "download" directory))
+         (raw (expand-file-name "raw" directory))
+         (job (make-zr-erc-media--job :destination destination :overwrite t
+                                     :raw raw :max-bytes 1024
+                                     :timer (run-at-time 60 nil #'ignore))))
+    (unwind-protect
+        (progn
+          (write-region "original" nil destination nil 'silent)
+          ;; URL can invoke the callback with CONNECT's 200 status after a
+          ;; rejected TLS handshake.  Never overwrite a file with that body.
+          (with-temp-buffer
+            (insert "HTTP/1.1 200 Connection established\r\n\r\n")
+            (setq-local url-http-response-status 200
+                        url-http-end-of-headers (1- (point-max))
+                        url-http-after-change-function #'url-https-proxy-after-change-function)
+            (zr-erc-media--received nil job))
+          (should (zr-erc-media--job-error job))
+          (should-not (file-exists-p raw))
+          (should (equal (zr-erc-media-test--read destination) "original")))
+      (cancel-timer (zr-erc-media--job-timer job))
+      (delete-directory directory t))))
 
 (ert-deftest zr-erc-media-http-auth-source-download-and-failures ()
   (zr-erc-media-test--server

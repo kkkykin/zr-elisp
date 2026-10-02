@@ -1,6 +1,8 @@
 """Isolated HTTP fixture for ERC media tests; prints its loopback port."""
 import http.server
+import ssl
 import struct
+import sys
 import time
 import zlib
 
@@ -52,5 +54,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+if len(sys.argv) == 3:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(sys.argv[1], sys.argv[2])
+    server.socket = context.wrap_socket(server.socket, server_side=True)
 print(server.server_port, flush=True)
 server.serve_forever()

@@ -118,6 +118,25 @@ destination. Age is checked again for each request. Existing previews and
 requests already in progress are retained. This is separate from
 `zr-erc-media-timeout`, which limits how long a request may run.
 
+Use `zr-erc-media-proxy` to select an HTTP proxy for both previews and
+downloads. It supports global and buffer-local settings, with per-rule
+overrides via `:proxy`:
+
+```elisp
+(setq-local zr-erc-media-proxy "http://127.0.0.1:7890")
+;; Alternatively, add this to an existing media rule:
+;; :proxy "http://127.0.0.1:7890"
+```
+
+The default, `inherit`, uses Emacs's existing URL proxy settings. A nil
+value forces a direct connection, including `:proxy nil` in a rule.
+`:proxy inherit` restores the Emacs settings for a rule. Proxy addresses
+accept `host:port` or `http://host:port`, including bracketed IPv6 hosts;
+credentials and paths in proxy URLs are not supported. Explicit proxies
+bypass `no_proxy` exclusions. HTTP links use the proxy directly, and HTTPS
+links use CONNECT tunnels. These settings affect only media requests and
+do not alter the proxy configuration used by other Emacs packages.
+
 Example for an authenticated image proxy and ordinary downloadable files:
 
 ```elisp
@@ -198,5 +217,7 @@ work independently of the reply module.
 Run all ERC tests with `make test TEST_FILE="$(echo erc/test/*-test.el)"`.
 The media tests start a temporary loopback HTTP server when Python 3 is
 available and exercise actual FFmpeg conversion when FFmpeg/ffprobe are
-available. The current terminal test environment substitutes only image
-creation, then checks the generated PNG dimensions and inline display property.
+available. Proxy tests use a loopback HTTP proxy; HTTPS CONNECT tests also
+require OpenSSL and Emacs GnuTLS support. The current terminal test environment
+substitutes only image creation, then checks the generated PNG dimensions and
+inline display property.
