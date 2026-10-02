@@ -91,13 +91,16 @@ selectors as stitching. `zr-erc-completion-input-regexp` and
 (erc-zr-media-mode 1)
 ```
 
-Recognized links become buttons. RET/mouse-2 previews an image or prompts for
-a file destination. `M-x zr-erc-media-show` previews the image at point, or
+Recognized links become buttons. RET/mouse-2 toggles an image preview or prompts
+for a file destination. `M-x zr-erc-media-show` toggles the image at point, or
 all image links overlapping the active region. With a prefix argument
-(`C-u M-x zr-erc-media-show`), it previews images in the selected window's
-visible range, taking precedence over the region. Range previews skip file
-links and continue if an image has expired or a request fails. These manual
-previews work with automatic image fetching disabled.
+(`C-u M-x zr-erc-media-show`), it toggles images in the selected window's
+visible range, taking precedence over the region. If any targeted image is
+displayed or loading, all targeted previews are hidden and pending image
+requests canceled; otherwise, they are fetched and shown. This also hides
+automatically displayed images, even after their links have expired. Range
+previews skip file links and continue if an image has expired or a request
+fails. These manual previews work with automatic image fetching disabled.
 
 `M-x zr-erc-media-download` saves either type. Downloads
 run asynchronously, and overwriting a file requires confirmation. Automatic

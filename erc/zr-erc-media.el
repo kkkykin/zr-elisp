@@ -3,7 +3,7 @@
 ;; Package-Requires: ((emacs "30.1"))
 ;;; Commentary:
 ;; Enable `erc-zr-media-mode'.  Recognized URLs become buttons: images can
-;; be previewed inline, files downloaded.  `zr-erc-media-show' previews images
+;; be previewed inline, files downloaded.  `zr-erc-media-show' toggles images
 ;; at point, in the region, or in the visible window.  `zr-erc-media-download'
 ;; downloads either type.  Automatic previews are opt-in.  Options support
 ;; buffer-local values; see README.md for configuration scope, URL rewriting,
@@ -381,6 +381,13 @@ When ONLY-RULE is non-nil, only consider that rule."
           (inhibit-read-only t))
       (button-put button 'zr-erc-media-job job))))
 
+(defun zr-erc-media--hide-button (button)
+  "Hide BUTTON's preview and cancel any pending image request."
+  (when-let* ((job (button-get button 'zr-erc-media-job)))
+    (zr-erc-media--cleanup job)
+    (let ((inhibit-read-only t))
+      (button-put button 'zr-erc-media-job nil))))
+
 (defun zr-erc-media--image-buttons (beg end)
   "Return image buttons overlapping BEG through END, in buffer order."
   (let ((button (and (< beg end) (next-button beg t))) buttons)
@@ -392,25 +399,38 @@ When ONLY-RULE is non-nil, only consider that rule."
 
 ;;;###autoload
 (defun zr-erc-media-show (&optional beg end)
-  "Fetch and show images, fitting the current window.
-Interactively, show the image at point, or images overlapping the active
+  "Toggle inline images, fitting the current window when showing them.
+Interactively, toggle the image at point, or images overlapping the active
 region.  With a prefix argument, use the selected window's visible range
 instead, even when the region is active.
-From Lisp, show the image at point, or images overlapping BEG through END
+From Lisp, toggle the image at point, or images overlapping BEG through END
 when both bounds are supplied.  The end boundary is exclusive.
+If any targeted image is displayed or loading, hide all targeted previews
+and cancel their pending requests; otherwise, fetch and show them.
+This also hides automatic previews, even after their links have expired.
 For a range, skip file links and report errors without stopping the other
 previews.  This command works regardless of `zr-erc-media-auto-show'."
   (interactive
    (cond (current-prefix-arg (list (window-start) (window-end nil t)))
          ((use-region-p) (list (region-beginning) (region-end)))))
-  (unless (display-images-p) (user-error "This display cannot show images; use zr-erc-media-download"))
-  (if (and beg end)
-      (let ((buttons (zr-erc-media--image-buttons beg end)))
-        (unless buttons (user-error "No image links in the selected range"))
-        (dolist (button buttons)
-          (condition-case err (zr-erc-media--show-button button)
-            (error (message "ERC media: %s" (error-message-string err))))))
-    (zr-erc-media--show-button (zr-erc-media--button-item))))
+  (let* ((range (and beg end))
+         (buttons (if range (zr-erc-media--image-buttons beg end)
+                    (list (zr-erc-media--button-item))))
+         ;; Completed previews remain in `zr-erc-media--jobs'; failed or
+         ;; canceled jobs are removed, even if a button still refers to them.
+         (hide (cl-some (lambda (button)
+                          (memq (button-get button 'zr-erc-media-job)
+                                zr-erc-media--jobs))
+                        buttons)))
+    (unless buttons (user-error "No image links in the selected range"))
+    (unless (or hide (display-images-p))
+      (user-error "This display cannot show images; use zr-erc-media-download"))
+    (dolist (button buttons)
+      (cond (hide (zr-erc-media--hide-button button))
+            (range
+             (condition-case err (zr-erc-media--show-button button)
+               (error (message "ERC media: %s" (error-message-string err)))))
+            (t (zr-erc-media--show-button button))))))
 
 ;;;###autoload
 (defun zr-erc-media-download (destination &optional overwrite)
@@ -446,7 +466,7 @@ Existing files require explicit OVERWRITE permission."
   (remove-text-properties start end '(keymap nil erc-callback nil erc-data nil))
   (make-text-button start end 'action #'zr-erc-media--activate
                     'keymap button-map 'follow-link t 'zr-erc-media-item item
-                    'help-echo "RET: preview image / download file; M-x zr-erc-media-download: save")
+                    'help-echo "RET: toggle image / download file; M-x zr-erc-media-download: save")
   (when (and (eq (plist-get item :type) 'image) (display-images-p)
              (not (zr-erc-media--expired-p item))
              (zr-erc-media--option (plist-get item :rule) :auto-show zr-erc-media-auto-show))
