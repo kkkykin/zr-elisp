@@ -98,6 +98,26 @@ image fetching is off by default; it can be enabled globally, per buffer, or
 per rule. Inline images need an Emacs display with image support; downloads
 also work in terminal Emacs.
 
+Set `zr-erc-media-max-age` to an age limit in seconds, globally or per buffer,
+to avoid requesting expired links. The default is nil (unlimited). A rule's
+`:max-age` overrides the option; an explicit `:max-age nil` disables the limit
+for that rule. For example, only request these image links for one hour:
+
+```elisp
+(setq-local zr-erc-media-rules
+            '((:regexp "\\`https://multimedia\\.nt\\.qq\\.com\\.cn/download\\?"
+               :type image :auto-show t :max-age 3600)))
+```
+
+Age uses the IRC `time` tag supplied by servers with `server-time`, falling
+back to local receipt time when the tag is absent or invalid. Without that
+tag, the original age of replayed history cannot be determined. Expired
+links remain buttons but skip automatic previews; manual previews and
+downloads report expiration before starting a request or asking for a save
+destination. Age is checked again for each request. Existing previews and
+requests already in progress are retained. This is separate from
+`zr-erc-media-timeout`, which limits how long a request may run.
+
 Example for an authenticated image proxy and ordinary downloadable files:
 
 ```elisp

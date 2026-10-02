@@ -13,6 +13,7 @@
 (require 'auth-source)
 (require 'url)
 (require 'url-http)
+(require 'iso8601)
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
 
@@ -26,7 +27,8 @@ Each plist has :regexp and :type (image or file).  Optional keys:
 with Emacs regexp backreferences; :headers is an HTTP header alist;
 :auth-source is t or an auth-source search plist; :auth-scheme is basic
 or bearer; :auth-header defaults to Authorization.  :auto-show, :ffmpeg,
-:max-width and :max-height override the corresponding module options.
+:max-width, :max-height and :max-age override the corresponding module
+options.  :max-age is an age limit in seconds; nil disables the limit.
 :url-tag names a message tag whose value supplies an additional URL.
 Regexp matching of URLs is case-sensitive; use explicit alternatives as
 needed.  Only HTTP(S) URLs can be fetched.  Redirects are rejected: rewrite
@@ -35,6 +37,16 @@ to the final URL so custom credentials cannot be forwarded to another host."
 (defcustom zr-erc-media-auto-show nil
   "Whether recognized images are automatically fetched and displayed."
   :type 'boolean :group 'zr-erc-media)
+(defcustom zr-erc-media-max-age nil
+  "Maximum message age in seconds for starting a media request.
+Nil disables the age limit.  A rule's :max-age overrides this option,
+including an explicit nil.  Age is measured from the message's IRC
+server-time tag (time), or local receipt when the tag is absent or invalid.
+Expired links skip automatic previews; manual previews and downloads
+report an error without requesting the URL.  Existing previews and
+requests already in progress are retained."
+  :type '(choice (const :tag "No age limit" nil) (natnum :tag "Seconds"))
+  :group 'zr-erc-media)
 (defcustom zr-erc-media-use-ffmpeg nil
   "Whether to use FFmpeg to create a scaled, single-frame PNG preview."
   :type 'boolean :group 'zr-erc-media)
@@ -81,7 +93,24 @@ When ONLY-RULE is non-nil, only consider that rule."
                                                      replacement url t nil) url)))
         (when (string-match-p "\\`https?://" rewritten)
           (list :url rewritten :original url :rule rule
+                :time (or (when-let* ((stamp (cdr (assoc "time" (plist-get context :tags)))))
+                            (condition-case nil
+                                (encode-time (iso8601-parse stamp t))
+                              (error nil)))
+                          (current-time))
                 :type (or (plist-get rule :type) 'file)))))))
+
+(defun zr-erc-media--expired-p (item)
+  "Whether ITEM exceeds the current buffer's or its rule's age limit."
+  (when-let* ((max-age (zr-erc-media--option
+                       (plist-get item :rule) :max-age zr-erc-media-max-age))
+              (time (plist-get item :time)))
+    (> (float-time (time-subtract (current-time) time)) max-age)))
+
+(defun zr-erc-media--check-age (item)
+  "Signal a user error if ITEM has expired."
+  (when (zr-erc-media--expired-p item)
+    (user-error "Media link has expired (message exceeds the configured age limit)")))
 
 (defun zr-erc-media--headers (item)
   "Build request headers for ITEM, resolving secrets only when fetching."
@@ -244,6 +273,7 @@ When ONLY-RULE is non-nil, only consider that rule."
 
 (defun zr-erc-media--fetch (item anchor &optional destination overwrite)
   "Fetch ITEM at ANCHOR, optionally to DESTINATION with OVERWRITE permission."
+  (zr-erc-media--check-age item)
   (let* ((rule (plist-get item :rule))
          (window (or (get-buffer-window (current-buffer) t) (selected-window)))
          (headers (zr-erc-media--headers item))
@@ -295,6 +325,7 @@ When ONLY-RULE is non-nil, only consider that rule."
   (let* ((button (zr-erc-media--button-item))
          (item (button-get button 'zr-erc-media-item)))
     (unless (eq (plist-get item :type) 'image) (user-error "This link is a file"))
+    (zr-erc-media--check-age item)
     (when-let* ((old (button-get button 'zr-erc-media-job))) (zr-erc-media--cleanup old))
     (button-put button 'zr-erc-media-job (zr-erc-media--fetch item (button-end button)))))
 
@@ -307,12 +338,15 @@ Existing files require explicit OVERWRITE permission."
           (item (button-get button 'zr-erc-media-item))
           (name (file-name-nondirectory
                  (car (split-string (url-filename (url-generic-parse-url (plist-get item :url))) "?"))))
-          (file (read-file-name "Download to: " zr-erc-media-download-directory nil nil name))
+          (file (progn
+                  (zr-erc-media--check-age item)
+                  (read-file-name "Download to: " zr-erc-media-download-directory nil nil name)))
           (exists (file-exists-p file)))
      (when (and exists (not (yes-or-no-p "Overwrite the existing file? "))) (user-error "Canceled"))
      (list file exists)))
   (let* ((button (zr-erc-media--button-item))
          (item (button-get button 'zr-erc-media-item)))
+    (zr-erc-media--check-age item)
     (when (and (file-exists-p destination) (not overwrite)) (user-error "Destination already exists"))
     (make-directory (file-name-directory (expand-file-name destination)) t)
     (zr-erc-media--fetch item (button-end button) (expand-file-name destination) overwrite)))
@@ -331,6 +365,7 @@ Existing files require explicit OVERWRITE permission."
                     'keymap button-map 'follow-link t 'zr-erc-media-item item
                     'help-echo "RET: preview image / download file; M-x zr-erc-media-download: save")
   (when (and (eq (plist-get item :type) 'image) (display-images-p)
+             (not (zr-erc-media--expired-p item))
              (zr-erc-media--option (plist-get item :rule) :auto-show zr-erc-media-auto-show))
     (save-excursion
       (goto-char start)

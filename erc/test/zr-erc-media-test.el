@@ -77,6 +77,95 @@
           (zr-erc-media--insert))
         (should fetched)))))
 
+(ert-deftest zr-erc-media-age-uses-server-time-or-receipt ()
+  (let ((now (encode-time '(0 0 12 2 10 2026 nil nil 0)))
+        (zr-erc-media-rules '((:regexp "." :type image))))
+    (cl-letf (((symbol-function 'current-time) (lambda () now)))
+      (let ((item (zr-erc-media--item
+                   "https://example.test/a"
+                   '(:tags (("time" . "2026-10-02T08:00:00.123Z"))))))
+        (should (time-equal-p (plist-get item :time)
+                             (encode-time (iso8601-parse "2026-10-02T08:00:00.123Z" t)))))
+      (dolist (stamp '(nil "" "not-a-time"))
+        (let ((item (zr-erc-media--item "https://example.test/a"
+                                        (list :tags (list (cons "time" stamp))))))
+          (should (time-equal-p (plist-get item :time) now)))))))
+
+(ert-deftest zr-erc-media-age-boundary-and-local-overrides ()
+  (let ((now 1000)
+        (zr-erc-media-rules '((:regexp "." :type image))))
+    (cl-letf (((symbol-function 'current-time) (lambda () now)))
+      (let ((item (zr-erc-media--item "https://example.test/a" nil)))
+        (setq now 1060)
+        (with-temp-buffer
+          (setq-local zr-erc-media-max-age 60)
+          (should-not (zr-erc-media--expired-p item))
+          (setq now 1061)
+          (should (zr-erc-media--expired-p item))
+          (with-temp-buffer
+            (should-not (zr-erc-media--expired-p item)))
+          (setf (plist-get (plist-get item :rule) :max-age) nil)
+          (should-not (zr-erc-media--expired-p item))
+          (setq-local zr-erc-media-max-age nil)
+          (setf (plist-get (plist-get item :rule) :max-age) 60)
+          (should (zr-erc-media--expired-p item)))))))
+
+(ert-deftest zr-erc-media-expired-history-skips-auto-requests ()
+  ;; Both visible URLs and URLs supplied only by tags use the message time.
+  (dolist (tag-url '(nil t))
+    (with-temp-buffer
+      (let* ((zr-erc-media-rules
+              `((:regexp "." :type image :auto-show t :max-age 60
+                 ,@(and tag-url '(:url-tag "+image")))))
+             (erc-message-parsed
+              (make-erc-response
+               :command "PRIVMSG" :sender "bot!u@h" :contents "image"
+               :unparsed (concat "@time=2026-10-02T08:00:00.000Z"
+                                 (and tag-url ";+image=https://example.test/a.png")
+                                 " :bot!u@h PRIVMSG #c :image")))
+             (now (encode-time '(0 2 8 2 10 2026 nil nil 0)))
+             fetched)
+        (cl-letf (((symbol-function 'current-time) (lambda () now))
+                  ((symbol-function 'display-images-p) (lambda (&rest _) t))
+                  ((symbol-function 'zr-erc-media--fetch)
+                   (lambda (&rest _) (setq fetched t))))
+          (insert (if tag-url "<bot> image\n" "<bot> https://example.test/a.png\n"))
+          (zr-erc-media--insert)
+          (should-not fetched)
+          (should-not zr-erc-media--jobs)
+          (let ((pos (text-property-not-all (point-min) (point-max) 'zr-erc-media-item nil)))
+            (should pos)
+            (should (button-at pos))
+            (should (zr-erc-media--expired-p (get-text-property pos 'zr-erc-media-item)))))))))
+
+(ert-deftest zr-erc-media-expired-manual-requests-have-no-side-effects ()
+  (with-temp-buffer
+    (let ((now 1000)
+          (zr-erc-media-rules '((:regexp "." :type image :max-age 60)))
+          side-effects)
+      (cl-letf (((symbol-function 'current-time) (lambda () now))
+                ((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'url-retrieve) (lambda (&rest _) (push 'request side-effects)))
+                ((symbol-function 'auth-source-search) (lambda (&rest _) (push 'auth side-effects)))
+                ((symbol-function 'make-temp-file) (lambda (&rest _) (push 'temp side-effects)))
+                ((symbol-function 'make-directory) (lambda (&rest _) (push 'directory side-effects)))
+                ((symbol-function 'read-file-name) (lambda (&rest _) (push 'prompt side-effects)))
+                ((symbol-function 'zr-erc-media--cleanup) (lambda (&rest _) (push 'cleanup side-effects))))
+        (let ((item (zr-erc-media--item "https://example.test/a" nil)))
+          (insert "image")
+          (zr-erc-media--buttonize (point-min) (point-max) item)
+          (goto-char (point-min))
+          (button-put (button-at (point)) 'zr-erc-media-job 'existing-preview)
+          (setq now 1061)
+          (should-error (zr-erc-media-show) :type 'user-error)
+          (should-error (zr-erc-media-download "/unused/download") :type 'user-error)
+          (should-error (call-interactively #'zr-erc-media-download) :type 'user-error)
+          (setf (plist-get (plist-get item :rule) :auth-source) t)
+          (dolist (destination '(nil "/unused/download"))
+            (should-error (zr-erc-media--fetch item (point-max) destination) :type 'user-error))
+          (should-not side-effects)
+          (should-not zr-erc-media--jobs))))))
+
 (ert-deftest zr-erc-media-http-auth-source-download-and-failures ()
   (zr-erc-media-test--server
    (lambda (base directory)
@@ -85,12 +174,12 @@
               (auth-sources (list auth-file)) (auth-source-do-cache nil)
               (destination (expand-file-name "download" directory))
               (port (url-port (url-generic-parse-url base)))
-              (rule '(:type file :auth-source (:user "bridge") :auth-scheme bearer
+              (rule '(:type file :max-age 60 :auth-source (:user "bridge") :auth-scheme bearer
                       :headers (("X-Bridge" . "onebot")))))
          (write-region (format "machine 127.0.0.1 port %d login bridge password media-secret\n" port)
                        nil auth-file nil 'silent)
          (set-file-modes auth-file #o600)
-         (let ((job (zr-erc-media--fetch (list :url (concat base "/file") :rule rule)
+         (let ((job (zr-erc-media--fetch (zr-erc-media--item (concat base "/file") nil rule)
                                          (point) destination)))
            (zr-erc-media-test--wait (lambda () (zr-erc-media--job-done job)))
            (should-not (zr-erc-media--job-error job))
