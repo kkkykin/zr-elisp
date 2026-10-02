@@ -88,15 +88,16 @@
       (should-error (zr-erc-reply--send #'ignore "PRIVMSG #chat :hello")
                     :type 'user-error))))
 
-(defun zr-erc-reply-test--insert (id text &optional parent command)
-  "Insert a formatted test message with ID, TEXT, PARENT and COMMAND."
+(defun zr-erc-reply-test--insert (id text &optional parent command reply-tag)
+  "Insert ID, TEXT, PARENT and COMMAND, using REPLY-TAG or +reply."
   (let* ((erc-zr-reply-mode t)
          (erc-message-parsed
           (make-erc-response
            :command (or command "PRIVMSG") :sender "alice!u@host"
            :contents text
            :unparsed (concat "@msgid=" id
-                              (and parent (concat ";+reply=" parent))
+                              (and parent (concat ";" (or reply-tag "+reply")
+                                                  "=" parent))
                               " :alice!u@host PRIVMSG #test :" text)))
          (start (point-max)))
     (goto-char start)
@@ -133,6 +134,35 @@
       (should-not (zr-erc-reply--find "same-id"))
       (goto-char (point-min))
       (should-error (zr-erc-reply-jump) :type 'user-error))))
+
+(ert-deftest zr-erc-reply-bridge-reply-chain ()
+  (with-temp-buffer
+    (zr-erc-reply-test--insert
+     "9744cgxk9kcy93pwkieje3vqzw" "说说"
+     "85udcif97ek3hhikc2a5v74ewe" nil "+draft/reply")
+    (should (string-match-p
+             "Original unavailable: 85udcif97ek3hhikc2a5v74ewe"
+             (buffer-string)))
+    (goto-char (point-min))
+    (should-error (zr-erc-reply-jump) :type 'user-error)
+    (zr-erc-reply-test--insert
+     "93hudzrjsp2a92yk68q428ccb6" "想说什么" "9744cgxk9kcy93pwkieje3vqzw")
+    (zr-erc-reply-test--insert
+     "r7jw8mf9znnm5ht5di9xem7v3w" "xxxx 我说呢"
+     "93hudzrjsp2a92yk68q428ccb6" nil "+draft/reply")
+    (should (string-match-p "\\[↪ alice: 想说什么\\] <alice> xxxx 我说呢"
+                            (buffer-string)))
+    (goto-char (zr-erc-reply--find "r7jw8mf9znnm5ht5di9xem7v3w"))
+    (should (button-at (point)))
+    (button-activate (button-at (point)))
+    (should (= (point) (zr-erc-reply--find "93hudzrjsp2a92yk68q428ccb6")))
+    ;; Navigation must also work from the body, outside the button.
+    (goto-char (point-max))
+    (search-backward "xxxx 我说呢")
+    (zr-erc-reply-jump)
+    (should (= (point) (zr-erc-reply--find "93hudzrjsp2a92yk68q428ccb6")))
+    (zr-erc-reply-jump)
+    (should (= (point) (point-min)))))
 
 (ert-deftest zr-erc-reply-echo-suppression ()
   (cl-letf (((symbol-function 'zr-erc-reply--cap-p) (lambda (_) t)))
