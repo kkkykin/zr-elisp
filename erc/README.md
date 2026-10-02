@@ -22,8 +22,8 @@ The other global module names are `zr-stitch`, `zr-completion` and `zr-media`.
 After changing `erc-modules` in an existing session, run
 `M-x erc-update-modules` to enable listed global modules. If they are already
 enabled through this list or earlier configuration, changing rules takes
-effect without another mode call. `zr-display-name` is buffer-local: add it
-to `erc-modules` before connecting, or run `M-x erc-zr-display-name-mode`
+effect without another mode call. `zr-display` is buffer-local: add it
+to `erc-modules` before connecting, or run `M-x erc-zr-display-mode`
 in an existing conversation. `erc-update-modules` skips local modules.
 
 `zr-erc-reply` implements the IRCv3 `+reply` tag. Put point on a message
@@ -101,67 +101,133 @@ selectors as stitching. `zr-erc-completion-input-regexp` and
 `zr-erc-completion-input-group` control the trigger and the portion replaced.
 `zr-erc-completion-history-limit` bounds the amount of history scanned.
 
-## Local display names
+## Local display rules
 
-This buffer-local module defaults to matching only `+display-name`.
-The default `zr-erc-message-tag-receive-remap` maps `+draft/display-name`
-to `+display-name` before rules run. Messages without a valid display name
-keep their original nickname. To enable it during ERC setup:
+`zr-erc-display` changes local presentation with overlays: replace the speaker
+name, replace selected text, or hide it by replacing it with an empty string.
+Rules default to nil. Loading the file does not enable the buffer-local mode.
+To enable it during ERC setup:
 
 ```elisp
-(require 'zr-erc-display-name)
-(add-to-list 'erc-modules 'zr-display-name)
+(require 'zr-erc-display)
+(add-to-list 'erc-modules 'zr-display)
 ```
 
-Reception decodes tags, applies remapping, then builds rule contexts for all
-modules. A canonical tag in the message wins over its alias, even when empty;
-aliases are removed from the resulting context. Remapping is applied once,
+To extract a relay name and hide its duplicate body prefix, evaluate this in
+the conversation buffer; no rejoin is needed:
+
+```elisp
+(setq-local zr-erc-display-rules
+            '((:match (:sender "\\`nichi_bot\\'")
+               :source body :regexp "\\[\\([^]]+\\)\\][ \t]*"
+               :replace-sender "\\1" :replace-text "")))
+(erc-zr-display-mode 1)
+```
+
+For `<nichi_bot> [nami.yti] 强大v5`, the nickname becomes `nami.yti` and
+the matched prefix `[nami.yti] ` is hidden, leaving `<nami.yti> 强大v5`.
+Both `:replace-sender` and `:replace-text` are optional: nil or omitted means
+no change, while an empty string hides that part. The first rule yielding a
+replacement wins; a matching rule with neither action is skipped.
+
+String replacements use Emacs `replace-match` backreferences: `"\\1"` selects
+group 1, `"\\&"` selects the full match, and `"user: \\1"` adds a prefix.
+Case is preserved. `:replace-sender` replaces the displayed nickname;
+`:replace-text` replaces the **entire regexp match**, not just a capture.
+Use captures to preserve or rearrange parts of that match:
+
+```elisp
+(setq-local zr-erc-display-rules
+            '((:match (:sender "\\`nichi_bot\\'")
+               :source body :regexp "\\`\\[\\([^]]+\\)\\] *\\(.*\\)"
+               :replace-sender "\\1" :replace-text "\\2")))
+(zr-erc-display-refresh)
+```
+
+Either replacement may instead be a function receiving a context plist. It
+contains the original `:sender`, `:body`, `:text`, `:tags`, `:target`, `:server`
+and `:network`, plus `:source` (the selected source), `:value` (its full string),
+and `:groups` (a vector of captures, starting with the complete match at 0).
+Unmatched optional groups are nil. Each callback receives its own context
+copy and need not depend on dynamic match data. Return nil for no change or
+a string for literal display; backreferences in returned strings are not
+expanded. For example:
+
+```elisp
+(setq-local zr-erc-display-rules
+            '((:source body :regexp "\\[\\([^]]+\\)\\]"
+               :replace-sender
+               (lambda (context)
+                 (concat (plist-get context :sender) "/"
+                         (aref (plist-get context :groups) 1)))
+               :replace-text "")))
+```
+
+Sender and text replacements are independent. Nonempty sender replacements
+containing control characters or only whitespace are rejected. Rules retain
+the full source and match offsets; replacement never searches for another
+occurrence of the matched fragment. Position mapping depends on the source:
+
+- `text`: use offsets in the complete retained formatted message, including
+  wrapped lines, after verifying that it still matches the buffer text.
+- `body`: verify the complete raw body at the end of the rendered message,
+  either as-is or with IRC controls removed, before mapping its offsets.
+  Matches splitting a control sequence are not replaced.
+- Reply references: verify the visible excerpt against the corresponding
+  prefix of the original body, using the reply module's control conversion.
+  A match extending beyond the truncated excerpt is not replaced. `text`
+  offsets are usable when the original raw body is an exact suffix of that
+  source text.
+
+If formatting or wrapping prevents that correspondence, preserve the display.
+Use `text` when a raw body has been wrapped. Old history without retained
+message boundaries supports only its fallback line. Tag and sender sources
+support nickname replacement, not body text replacement. Empty matches do
+not insert text. All text replacements stay after the nickname and within
+their own message or reply reference.
+
+Tag-based names are opt-in. Without `:regexp`, the entire source is group 0:
+
+```elisp
+(setq zr-erc-display-rules
+      '((:source (:tag "+display-name") :replace-sender "\\&")))
+```
+
+The default `zr-erc-message-tag-receive-remap` still maps
+`+draft/display-name` to `+display-name`. Reception decodes tags, applies
+remapping, then builds rule contexts for all modules. A canonical tag in the
+message wins over its alias, even when empty. Remapping is applied once,
 without chaining, and does not modify the raw IRC message.
 
-To extract a relay name from text instead, configure the conversation buffer:
+The extraction sources are distinct; `:match` uses the same selectors as
+the other modules:
 
-```elisp
-(require 'zr-erc-display-name)
-;; Evaluate in the conversation buffer; no rejoin is needed.
-(setq-local zr-erc-display-name-rules
-            '((:match (:sender "\\`nichi_bot\\'")
-               :source text :regexp "\\[\\([^]]+\\)\\]" :group 1)))
-(erc-zr-display-name-mode 1)
-```
+| Source | Contents |
+| --- | --- |
+| `body` | Original message body, possibly with IRC formatting controls; no sender or tags. |
+| `text` (default) | ERC's formatted buffer text, usually nickname and body, without display overlays or the reply reference prefix; no protocol tags. |
+| `sender` | Original IRC nickname, without the user/host suffix. |
+| `(:tag "+display-name")` | The decoded tag value after receive remapping. |
 
-This buffer-local mode displays `Sydney Dian` over the IRC nickname in
-`<nichi_bot> [Sydney Dian] hello`. The bracketed name in the body is retained.
-IRC formatting controls outside the brackets do not affect this rule.
-Toggle with `M-x erc-zr-display-name-mode`; disabling immediately restores
-original nicknames. Enabling also refreshes retained history. After changing
-rules, run `M-x zr-erc-display-name-refresh` to refresh existing messages.
+Use `text` for history whose original body metadata is no longer available.
+For such history, the fallback text is the retained line containing the
+speaker; formatting, timestamps and wrapping may affect its contents.
+History without ERC speaker properties cannot be transformed.
 
-Names use display overlays only. Original text, sender identity, message tags
-and shared rule contexts remain unchanged: completion, replies, stitching
-and media keep matching the actual message. No synthetic `+display-name`
-tag is added, and copying/logging buffer text retains the original nickname.
-Hovering over a replaced nickname shows its IRC nickname.
+Reply references, including those in locally sent replies, use the quoted
+message's own original context. Both name replacement and text replacement
+work there, including rules that only hide text. Reply summaries retain this
+context even with display mode off, so references can still be transformed
+after their original messages have been truncated from history. References
+created before the reply module retained this metadata remain unchanged.
 
-Reply reference nicknames also use display overlays, including references in
-locally sent replies. Each reference uses the quoted message's original
-context, so reply chains extract each name independently. Turning the mode
-off restores the original nicknames in references as well. Reply summaries
-retain this context even when display-name mode is off, and references can
-still display names after the original message has been truncated from history.
-The reference text, IDs and navigation behavior are unchanged. References
-created before loading this version of the reply module lack that metadata
-and keep their original nicknames.
-
-Setting rules to nil disables name replacement. Custom rules replace the
-default tag rules; the first successful rule wins. `:match` uses the same
-selectors as the other modules. `:source` accepts `text` (default), `body`,
-`sender`, or `(:tag "+display-name")`. With `:regexp`, `:group` defaults to 1;
-without a regexp, the whole source is used. Empty, whitespace-only and
-control-containing names are rejected. Metadata for messages received while
-the mode is enabled is retained for later refreshes. For older history whose
-metadata ERC has already discarded, only the original speaker and rendered
-text are available, so use a `text` rule as above. History without ERC speaker
-properties cannot be renamed.
+Toggle with `M-x erc-zr-display-mode`; disabling restores names and body text.
+Enabling refreshes retained history. After changing rules, run
+`M-x zr-erc-display-refresh` to update existing messages.
+Original text, sender identities, tags and shared rule contexts remain
+unchanged: completion, replies, stitching and media match the actual message.
+Copying and logging buffer text retain the originals; reply navigation is
+unchanged. Hovering over a replaced nickname shows its IRC nickname.
 
 ## Images and downloads
 
@@ -279,7 +345,7 @@ sets the initial save directory.
 
 ## Configuration scope
 
-The stitch, completion, display-name and media options are ordinary `defcustom` variables
+The stitch, completion, display and media options are ordinary `defcustom` variables
 with global defaults. Loading or enabling these modules does not create local
 bindings for their options. Use `setq` or `setopt` for global configuration,
 or `setq-local` in an ERC buffer to override an option for that buffer only.
