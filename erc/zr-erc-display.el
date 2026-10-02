@@ -126,16 +126,65 @@ of the original rendered message.  Other source types have no body range."
                (string= whole (concat prefix matched suffix)))
       (list whole (length prefix) (+ (length prefix) (length matched))))))
 
+(defun zr-erc-display--filled-regexp (text)
+  "Quote TEXT, allowing ERC filling to change whitespace runs."
+  (mapconcat (lambda (part)
+               (if (string-match-p "\\`[ \t\n]+\\'" part)
+                   "[ \t\n]+"
+                 (regexp-quote part)))
+             (let ((start 0) parts)
+               (while (string-match "[ \t\n]+" text start)
+                 (push (substring text start (match-beginning 0)) parts)
+                 (push (match-string 0 text) parts)
+                 (setq start (match-end 0)))
+               (nreverse (cons (substring text start) parts)))
+             ""))
+
+(defun zr-erc-display--locate-filled (body begin end shown minimum)
+  "Map BODY's BEGIN..END into SHOWN after MINIMUM, allowing filling.
+Verify the complete body as a suffix.  Boundaries inside whitespace runs
+are ambiguous after filling and are left unchanged."
+  (save-match-data
+    (unless (cl-some (lambda (pos)
+                       (and (< 0 pos (length body))
+                            (string-match-p "\\`[ \t\n]+\\'"
+                                            (substring body (1- pos) (1+ pos)))))
+                     (list begin end))
+      (let* ((case-fold-search nil)
+             (regexp (concat
+                      (zr-erc-display--filled-regexp (substring body 0 begin))
+                      "\\(" (zr-erc-display--filled-regexp (substring body begin end)) "\\)"
+                      (zr-erc-display--filled-regexp (substring body end))
+                      "\\'"))
+             (content (substring shown 0 (zr-erc-display--content-end shown))))
+        (when (string-match regexp content minimum)
+          (cons (match-beginning 1) (match-end 1)))))))
+
 (defun zr-erc-display--reference-text (text)
   "Apply the control-character conversion used in reply excerpts to TEXT."
   (replace-regexp-in-string "[[:cntrl:]]" " " text))
+
+(defun zr-erc-display--body-display-text (start end)
+  "Return message text in START..END without ERC's trailing timestamp.
+Use the timestamp field, including its padding, rather than its appearance.
+Keep the final newline so raw body offsets retain their usual meaning."
+  (let* ((text (buffer-substring-no-properties start end))
+         (content-end (+ start (zr-erc-display--content-end text))))
+    (if (and (> content-end start)
+             (eq (get-text-property (1- content-end) 'field) 'erc-timestamp))
+        (concat (buffer-substring-no-properties
+                 start (previous-single-property-change content-end 'field nil start))
+                (buffer-substring-no-properties content-end end))
+      text)))
 
 (defun zr-erc-display--locate (result context start end sender-end reference)
   "Locate RESULT within START..END using its original offsets.
 SENDER-END bounds body changes.  REFERENCE means the range is a reply body.
 Require a whole-message correspondence, or a verified prefix for excerpts;
 never search for a repeated match fragment."
-  (let ((shown (buffer-substring-no-properties start end)))
+  (let ((shown (if (and (not reference) (eq (plist-get result :source) 'body))
+                   (zr-erc-display--body-display-text start end)
+                 (buffer-substring-no-properties start end))))
     (if (and (not reference) (eq (plist-get result :source) 'text))
         (when (and (string= shown (plist-get result :value))
                    (<= sender-end (+ start (plist-get result :begin))))
@@ -156,9 +205,12 @@ never search for a repeated match fragment."
                    (cons (+ start begin) (+ start finish))))
              (let* ((content-end (zr-erc-display--content-end shown))
                     (offset (- content-end (length body))))
-               (when (and (<= (- sender-end start) offset)
-                          (string= body (substring shown offset content-end)))
-                 (cons (+ start offset begin) (+ start offset finish)))))))))))
+               (if (and (<= (- sender-end start) offset)
+                        (string= body (substring shown offset content-end)))
+                   (cons (+ start offset begin) (+ start offset finish))
+                 (when-let* ((filled (zr-erc-display--locate-filled
+                                      body begin finish shown (- sender-end start))))
+                   (cons (+ start (car filled)) (+ start (cdr filled)))))))))))))
 
 (defun zr-erc-display--apply (speaker-start speaker-end context start end &optional reference)
   "Apply CONTEXT to the speaker and its START..END message or REFERENCE body."

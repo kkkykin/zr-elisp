@@ -1,6 +1,8 @@
 ;;; zr-erc-display-test.el --- Display name tests -*- lexical-binding: t; -*-
 ;;; Code:
 (require 'ert)
+(require 'erc-fill)
+(require 'erc-stamp)
 (require 'zr-erc-display)
 (require 'zr-erc-completion)
 (require 'zr-erc-reply)
@@ -579,11 +581,13 @@
         (erc-zr-display-mode -1)
         (erc-zr-display-mode 1)
         (should (equal (get-char-property pos 'display) "joined")))
-      ;; Raw offsets cannot be assumed to survive filling.
+      ;; Raw offsets are mapped through verified whitespace changes.
       (setq-local zr-erc-display-rules
-                  '((:source body :regexp "second" :replace-text "wrong")))
+                  '((:source body :regexp "second" :replace-text "SECOND")))
       (zr-erc-display-refresh)
-      (should-not (overlays-in (point-min) (point-max))))))
+      (goto-char (point-min))
+      (search-forward "second")
+      (should (equal (get-char-property (- (point) 6) 'display) "SECOND")))))
 
 (ert-deftest zr-erc-display-reference-text-offsets ()
   (let ((erc-modules nil)
@@ -605,6 +609,85 @@
         (should-not (get-char-property (- (point) 6) 'display))
         (search-forward "[Same]")
         (should (equal (get-char-property (- (point) 6) 'display) "LAST"))))))
+
+(ert-deftest zr-erc-display-filled-relay-body-and-reference ()
+  (let ((erc-modules nil)
+        (erc-zr-reply-mode t)
+        (zr-erc-display-rules
+         `((:source body :regexp ,(rx "[" (group (+ (not "]"))) "] ")
+            :replace-sender "\\1" :replace-text ""))))
+    (dolist (controls '(nil t))
+      (with-temp-buffer
+        (erc-mode)
+        (erc-zr-display-mode 1)
+        (let* ((body (concat (and controls (string 3))
+                             (and controls "11")
+                             "[nami.yti] first second third fourth fifth sixth seventh"))
+               (rendered (with-temp-buffer
+                           (erc-mode)
+                           (insert "<bot> " (erc-controls-strip body) "\n")
+                           (let ((erc-fill-column 30)) (erc-fill-static))
+                           (buffer-substring-no-properties 7 (1- (point-max))))))
+          (should (string-match-p "\n" rendered))
+          (zr-erc-display-test--formatted body rendered "filled")
+          (goto-char (point-min))
+          (search-forward "[nami.yti]")
+          (let ((pos (- (point) 10)))
+            (should (equal (get-char-property pos 'display) ""))
+            (erc-zr-display-mode -1)
+            (should-not (get-char-property pos 'display))
+            (erc-zr-display-mode 1)
+            (should (equal (get-char-property pos 'display) "")))
+          (let ((child (zr-erc-display-test--relay "child" "Reply" "filled")))
+            (goto-char child)
+            (search-forward "[nami.yti]")
+            (should (equal (get-char-property (- (point) 10) 'display) ""))))))))
+
+(ert-deftest zr-erc-display-filled-mapping-rejects-changed-content ()
+  (should-not (zr-erc-display--locate-filled "[Name] first second" 0 7
+                                            "<bot> [Name] first\n SECOND\n" 5))
+  (should-not (zr-erc-display--locate-filled "[Name]  first second" 0 7
+                                            "<bot> [Name]\n first second\n" 5))
+  (should (equal (zr-erc-display--locate-filled "[Same] then [Same]" 12 18
+                                              "<bot> [Same]\n  then [Same]\n" 5)
+                 '(20 . 26))))
+
+(ert-deftest zr-erc-display-body-with-intermittent-right-timestamps ()
+  (let ((erc-modules nil)
+        (erc-timestamp-only-if-changed-flag t)
+        (erc-timestamp-right-column 10)
+        (zr-erc-display-rules
+         `((:source body :regexp ,(rx "[" (group (+ (not "]"))) "] ")
+            :replace-sender "\\1" :replace-text ""))))
+    (dolist (erc-timestamp-use-align-to '(t nil 0))
+      (with-temp-buffer
+        (erc-mode)
+        (erc-zr-display-mode 1)
+        (let ((stamp "[00:00]"))
+          (add-hook 'erc-insert-post-hook
+                    (lambda () (erc-insert-timestamp-right (copy-sequence stamp))) 70 t)
+          (dolist (entry '(("[00:00]" "我觉得cloudnative-pg最厉害🥹" t)
+                           ("[00:00]" "虽然之前看到过有人弄出来了脑裂的bug" nil)
+                           ("[00:01]" "下一分钟" t)))
+            (setq stamp (car entry))
+            (let* ((body (concat (string 3) "09[終🍥] " (cadr entry)))
+                   (start (zr-erc-display-test--formatted body (erc-controls-strip body))))
+              (goto-char start)
+              (search-forward "[終🍥] ")
+              (let ((pos (- (point) 5))
+                    (original (buffer-substring-no-properties start (point-max))))
+                (should (equal (get-char-property (1+ start) 'display) "終🍥"))
+                (should (equal (get-char-property pos 'display) ""))
+                (erc-zr-display-mode -1)
+                (should-not (get-char-property pos 'display))
+                (erc-zr-display-mode 1)
+                (should (equal (get-char-property pos 'display) ""))
+                (should (equal (buffer-substring-no-properties start (point-max)) original))
+                (let ((field (text-property-any start (point-max) 'field 'erc-timestamp)))
+                  (should (eq (and field t) (nth 2 entry)))
+                  (when field
+                    (should-not (cl-some (lambda (ov) (overlay-get ov 'zr-erc-display))
+                                         (overlays-at field)))))))))))))
 
 (provide 'zr-erc-display-test)
 ;;; zr-erc-display-test.el ends here

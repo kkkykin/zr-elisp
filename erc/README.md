@@ -172,15 +172,19 @@ occurrence of the matched fragment. Position mapping depends on the source:
   wrapped lines, after verifying that it still matches the buffer text.
 - `body`: verify the complete raw body at the end of the rendered message,
   either as-is or with IRC controls removed, before mapping its offsets.
-  Matches splitting a control sequence are not replaced.
+  ERC trailing timestamp fields and their padding are excluded from this
+  comparison; timestamps and original message text remain unchanged.
+  Whitespace runs may change during ERC filling; the complete body must
+  still match. Matches splitting a control sequence or a changed whitespace
+  run are not replaced.
 - Reply references: verify the visible excerpt against the corresponding
   prefix of the original body, using the reply module's control conversion.
   A match extending beyond the truncated excerpt is not replaced. `text`
   offsets are usable when the original raw body is an exact suffix of that
   source text.
 
-If formatting or wrapping prevents that correspondence, preserve the display.
-Use `text` when a raw body has been wrapped. Old history without retained
+If formatting prevents that correspondence, preserve the display.
+Old history without retained
 message boundaries supports only its fallback line. Tag and sender sources
 support nickname replacement, not body text replacement. Empty matches do
 not insert text. All text replacements stay after the nickname and within
