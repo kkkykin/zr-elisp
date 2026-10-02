@@ -199,11 +199,22 @@ Pass FORCE and TARGET to ORIGINAL without bypassing ERC's send queue."
         (prop-match-beginning match)))))
 
 (defun zr-erc-reply--summary (parsed)
-  "Return a short, single-line, control-free summary of PARSED."
+  "Return a short, single-line, control-free summary of PARSED.
+Retain the original context on the nickname for optional display overlays."
   (truncate-string-to-width
    (replace-regexp-in-string
     "[[:cntrl:]]" " "
-    (concat (car (erc-parse-user (erc-response.sender parsed))) ": "
+    (concat (propertize
+             (car (erc-parse-user (erc-response.sender parsed)))
+             'zr-erc-reply-speaker-context
+             (zr-erc-context
+              parsed
+              (buffer-substring-no-properties
+               (if-let* ((button (button-at (point-min)))
+                         ((button-get button 'zr-erc-reply-parent)))
+                   (min (point-max) (1+ (button-end button)))
+                 (point-min))
+               (point-max)))) ": "
             (erc-response.contents parsed)))
    72 nil nil "…"))
 

@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'zr-erc-display-name)
 (require 'zr-erc-completion)
+(require 'zr-erc-reply)
 
 (defconst zr-erc-display-name-test--rules
   '((:match (:sender "^nichi_bot$")
@@ -93,6 +94,98 @@
         (erc-zr-display-name-mode -1)
         (erc-zr-display-name-mode 1)
         (should (equal (get-char-property speaker 'display) "Sydney Dian"))))))
+
+(defun zr-erc-display-name-test--relay (id name &optional parent)
+  "Insert relay message ID from NAME, optionally replying to PARENT."
+  (goto-char (point-max))
+  (let* ((start (point))
+         (erc-message-parsed
+          (make-erc-response
+           :command "PRIVMSG" :sender "nichi_bot!u@h"
+           :contents (concat (string 3) "11[" name "]" (string 15) " hello")
+           :unparsed (concat "@msgid=" id
+                             (and parent (concat ";+reply=" parent))
+                             " :nichi_bot PRIVMSG #c :hello"))))
+    (zr-erc-display-name-test--message name)
+    (save-restriction
+      (narrow-to-region start (point-max))
+      (zr-erc-reply--insert)
+      (run-hooks 'erc-insert-post-hook)
+      (zr-erc-reply--remember))
+    (setq erc-insert-marker (copy-marker (point-max)))
+    start))
+
+(ert-deftest zr-erc-display-name-reply-history-chain-and-navigation ()
+  (let ((erc-modules nil)
+        (erc-zr-reply-mode t)
+        (zr-erc-display-name-rules zr-erc-display-name-test--rules))
+    (with-temp-buffer
+      (erc-mode)
+      ;; Receive history before enabling display names.
+      (zr-erc-display-name-test--relay "a" "Sydney Dian")
+      (let* ((child (zr-erc-display-name-test--relay "b" "Other Name" "a"))
+             (quoted (+ child (length "[↪ ")))
+             (original (buffer-substring-no-properties (point-min) (point-max)))
+             (summary (get-text-property child 'zr-erc-reply-summary)))
+        (erc-zr-display-name-mode 1)
+        (should (equal (get-char-property quoted 'display) "Sydney Dian"))
+        (goto-char child)
+        (search-forward "<")
+        (should (equal (get-char-property (point) 'display) "Other Name"))
+        (should (equal (get-text-property child 'zr-erc-reply-summary) summary))
+        (should (equal (buffer-substring-no-properties (point-min) (point-max)) original))
+        (button-activate (button-at child))
+        (should (= (point) (point-min)))
+        ;; The next quote uses b's name, never the name in b's quoted prefix.
+        (let* ((grandchild (zr-erc-display-name-test--relay "c" "Third Name" "b"))
+               (third-quote (+ grandchild (length "[↪ "))))
+          (should (equal (get-char-property third-quote 'display) "Other Name"))
+          (goto-char grandchild)
+          (search-forward "<")
+          (should (equal (get-char-property (point) 'display) "Third Name")))
+        (erc-zr-display-name-mode -1)
+        (should-not (get-char-property quoted 'display))
+        (erc-zr-display-name-mode 1)
+        (should (equal (get-char-property quoted 'display) "Sydney Dian"))
+        ;; Retained reference context survives removal of the original message.
+        (delete-region (point-min) child)
+        (zr-erc-display-name-refresh)
+        (should (equal (get-char-property (+ (point-min) (length "[↪ ")) 'display)
+                       "Sydney Dian"))
+        (should-error (button-activate (button-at (point-min))) :type 'user-error)))))
+
+(ert-deftest zr-erc-display-name-local-reply-and-tag-rules ()
+  (let ((erc-modules nil)
+        (erc-zr-reply-mode t)
+        (zr-erc-display-name-rules '((:source (:tag "+display-name")))))
+    (with-temp-buffer
+      (erc-mode)
+      (erc-zr-display-name-mode 1)
+      (let ((erc-message-parsed
+             (make-erc-response :sender "nichi_bot!u@h" :command "PRIVMSG"
+                                :contents "[body name] hello"
+                                :unparsed "@msgid=a;+display-name=Tag\\sName :nichi_bot PRIVMSG #c :hello")))
+        (zr-erc-display-name-test--message "body name")
+        (zr-erc-reply--remember))
+      (goto-char (point-max))
+      (let ((start (point))
+            (zr-erc-reply--outgoing '("#c" . "a")))
+        (insert "<me> reply\n")
+        (save-restriction
+          (narrow-to-region start (point-max))
+          (zr-erc-reply--outgoing-insert)
+          (run-hooks 'erc-send-post-hook))
+        (setq erc-insert-marker (copy-marker (point-max)))
+        (let ((quoted (+ start (length "[↪ "))))
+          (should (equal (get-char-property quoted 'display) "Tag Name"))
+          (should (equal (buffer-substring-no-properties quoted (+ quoted 9)) "nichi_bot"))
+          (setq-local zr-erc-display-name-rules
+                      '((:source body :regexp "\\[\\([^]]+\\)\\]")))
+          (zr-erc-display-name-refresh)
+          (should (equal (get-char-property quoted 'display) "body name"))
+          (erc-zr-display-name-mode -1)
+          (should-not (get-char-property quoted 'display))
+          (should-not (memq #'zr-erc-display-name--render-replies erc-send-post-hook)))))))
 
 (provide 'zr-erc-display-name-test)
 ;;; zr-erc-display-name-test.el ends here

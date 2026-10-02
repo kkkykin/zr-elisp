@@ -6,6 +6,7 @@
 ;; names over IRC nicknames.  Overlays leave messages and identities intact.
 ;;; Code:
 (require 'zr-erc-common)
+(require 'button)
 
 (defgroup zr-erc-display-name nil "Local ERC display names." :group 'erc)
 (defcustom zr-erc-display-name-rules nil
@@ -43,6 +44,28 @@ Nil disables name replacement.  This option supports buffer-local values."
   "Remove this module's overlays in the accessible region."
   (remove-overlays (point-min) (point-max) 'zr-erc-display-name t))
 
+(defun zr-erc-display-name--overlay (start end context)
+  "Display the name extracted from CONTEXT over START to END."
+  (when-let* ((name (zr-erc-display-name--extract context)))
+    (let ((overlay (make-overlay start end nil t nil)))
+      (overlay-put overlay 'zr-erc-display-name t)
+      (overlay-put overlay 'evaporate t)
+      (overlay-put overlay 'display name)
+      (overlay-put overlay 'help-echo
+                   (format "IRC nickname: %s" (plist-get context :sender))))))
+
+(defun zr-erc-display-name--render-replies ()
+  "Render reference nicknames using the quoted messages' original contexts."
+  (let ((pos (point-min)))
+    (while (< pos (point-max))
+      (let ((context (get-text-property pos 'zr-erc-reply-speaker-context))
+            (end (next-single-property-change
+                  pos 'zr-erc-reply-speaker-context nil (point-max))))
+        (when context
+          (remove-overlays pos end 'zr-erc-display-name t)
+          (zr-erc-display-name--overlay pos end context))
+        (setq pos end)))))
+
 (defun zr-erc-display-name--render (&optional context)
   "Render speaker names in the accessible region, using CONTEXT if supplied."
   (save-excursion
@@ -56,21 +79,21 @@ Nil disables name replacement.  This option supports buffer-local values."
             (when speaker
               (goto-char pos)
               (let* ((parsed (get-text-property pos 'erc-parsed))
+                     (summary (get-text-property pos 'zr-erc-reply-summary))
                      (text (buffer-substring-no-properties
                             (line-beginning-position) (line-end-position)))
                      (data (or context
                                (get-text-property pos 'zr-erc-display-name-context)
+                               (and summary (> (length summary) 0)
+                                    (get-text-property
+                                     0 'zr-erc-reply-speaker-context summary))
                                (zr-erc-context parsed text))))
                 (setq data (plist-put (copy-sequence data) :sender speaker))
                 (when (or context parsed)
                   (put-text-property pos end 'zr-erc-display-name-context data))
-                (when-let* ((name (zr-erc-display-name--extract data)))
-                  (let ((overlay (make-overlay pos end nil t nil)))
-                    (overlay-put overlay 'zr-erc-display-name t)
-                    (overlay-put overlay 'evaporate t)
-                    (overlay-put overlay 'display name)
-                    (overlay-put overlay 'help-echo (format "IRC nickname: %s" speaker))))))
-            (setq pos end)))))))
+                (zr-erc-display-name--overlay pos end data)))
+            (setq pos end))))
+      (zr-erc-display-name--render-replies))))
 
 (defun zr-erc-display-name--insert ()
   "Render the narrowed incoming message after ERC formatting."
@@ -78,7 +101,12 @@ Nil disables name replacement.  This option supports buffer-local values."
              (member (erc-response.command erc-message-parsed) '("PRIVMSG" "NOTICE")))
     (zr-erc-display-name--render
      (zr-erc-context erc-message-parsed
-                     (buffer-substring-no-properties (point-min) (point-max))))))
+                     (buffer-substring-no-properties
+                      (if-let* ((button (button-at (point-min)))
+                                ((button-get button 'zr-erc-reply-parent)))
+                          (min (point-max) (1+ (button-end button)))
+                        (point-min))
+                      (point-max))))))
 
 ;;;###autoload
 (defun zr-erc-display-name-refresh ()
@@ -100,8 +128,10 @@ Nil disables name replacement.  This option supports buffer-local values."
 Enabling refreshes retained history; disabling restores original nicknames.
 No reconnect or channel rejoin is needed."
   ((add-hook 'erc-insert-post-hook #'zr-erc-display-name--insert 85 t)
+   (add-hook 'erc-send-post-hook #'zr-erc-display-name--render-replies 85 t)
    (zr-erc-display-name-refresh))
   ((remove-hook 'erc-insert-post-hook #'zr-erc-display-name--insert t)
+   (remove-hook 'erc-send-post-hook #'zr-erc-display-name--render-replies t)
    (zr-erc-display-name-refresh))
   t)
 

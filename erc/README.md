@@ -108,6 +108,16 @@ and media keep matching the actual message. No synthetic `+display-name`
 tag is added, and copying/logging buffer text retains the original nickname.
 Hovering over a replaced nickname shows its IRC nickname.
 
+Reply reference nicknames also use display overlays, including references in
+locally sent replies. Each reference uses the quoted message's original
+context, so reply chains extract each name independently. Turning the mode
+off restores the original nicknames in references as well. Reply summaries
+retain this context even when display-name mode is off, and references can
+still display names after the original message has been truncated from history.
+The reference text, IDs and navigation behavior are unchanged. References
+created before loading this version of the reply module lack that metadata
+and keep their original nicknames.
+
 Rules default to nil. The first successful rule wins; `:match` uses the same
 selectors as the other modules. `:source` accepts `text` (default), `body`,
 `sender`, or `(:tag "+display-name")`. With `:regexp`, `:group` defaults to 1;
