@@ -84,6 +84,40 @@ selectors as stitching. `zr-erc-completion-input-regexp` and
 `zr-erc-completion-input-group` control the trigger and the portion replaced.
 `zr-erc-completion-history-limit` bounds the amount of history scanned.
 
+## Local display names
+
+```elisp
+(require 'zr-erc-display-name)
+;; Evaluate in the conversation buffer; no rejoin is needed.
+(setq-local zr-erc-display-name-rules
+            '((:match (:sender "\\`nichi_bot\\'")
+               :source text :regexp "\\[\\([^]]+\\)\\]" :group 1)))
+(erc-zr-display-name-mode 1)
+```
+
+This buffer-local mode displays `Sydney Dian` over the IRC nickname in
+`<nichi_bot> [Sydney Dian] hello`. The bracketed name in the body is retained.
+IRC formatting controls outside the brackets do not affect this rule.
+Toggle with `M-x erc-zr-display-name-mode`; disabling immediately restores
+original nicknames. Enabling also refreshes retained history. After changing
+rules, run `M-x zr-erc-display-name-refresh` to refresh existing messages.
+
+Names use display overlays only. Original text, sender identity, message tags
+and shared rule contexts remain unchanged: completion, replies, stitching
+and media keep matching the actual message. No synthetic `+display-name`
+tag is added, and copying/logging buffer text retains the original nickname.
+Hovering over a replaced nickname shows its IRC nickname.
+
+Rules default to nil. The first successful rule wins; `:match` uses the same
+selectors as the other modules. `:source` accepts `text` (default), `body`,
+`sender`, or `(:tag "+display-name")`. With `:regexp`, `:group` defaults to 1;
+without a regexp, the whole source is used. Empty, whitespace-only and
+control-containing names are rejected. Metadata for messages received while
+the mode is enabled is retained for later refreshes. For older history whose
+metadata ERC has already discarded, only the original speaker and rendered
+text are available, so use a `text` rule as above. History without ERC speaker
+properties cannot be renamed.
+
 ## Images and downloads
 
 ```elisp
@@ -200,7 +234,7 @@ sets the initial save directory.
 
 ## Configuration scope
 
-The stitch, completion and media options are ordinary `defcustom` variables
+The stitch, completion, display-name and media options are ordinary `defcustom` variables
 with global defaults. Loading or enabling these modules does not create local
 bindings for their options. Use `setq` or `setopt` for global configuration,
 or `setq-local` in an ERC buffer to override an option for that buffer only.
