@@ -9,16 +9,14 @@
 (require 'zr-erc-common)
 
 (defgroup zr-erc-completion nil "Complete relayed names." :group 'erc)
-(defcustom zr-erc-completion-rules
-  '((:source sender :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2))
-    (:source text :regexp "^<\\(.+\\)-\\([0-9]+\\)/onebot> " :groups (1 2))
-    (:source text :regexp "^<\\([^>]+\\)> " :groups (1)))
+(defcustom zr-erc-completion-rules nil
   "Ordered extraction rules; use the first rule that yields candidates.
 Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
 body, text, or (:tag TAG)), :regexp, and :groups (capture numbers, default
 \=(0)).  Without :regexp, the entire source is group 0.  For example a
 tag-only rule is (:source (:tag \"+display-name\")).  Multiple groups let
-one relaymsg sender contribute both a display name and a numeric ID."
+one relaymsg sender contribute both a display name and a numeric ID.
+Nil rules disable relay completion."
   :type 'sexp :group 'zr-erc-completion)
 (defcustom zr-erc-completion-input-regexp
   "\\(?:\\`\\|[[:space:]]\\)@\\([^[:space:]@]*\\)\\'"
@@ -66,26 +64,28 @@ Only `zr-erc-completion-input-group' is replaced, so @ stays in the input."
 
 (defun zr-erc-completion--candidates ()
   "Collect candidates from this conversation's retained history, newest first."
-  (save-excursion
-    (save-restriction
-      (widen)
-      (let* ((end (if (markerp erc-insert-marker) (marker-position erc-insert-marker)
-                    (point-min)))
-             (begin (max (point-min) (- end zr-erc-completion-history-limit)))
-             candidates)
-        (goto-char end)
-        (while (> (point) begin)
-          (forward-line -1)
-          (let ((context (or (get-text-property (point) 'zr-erc-completion-context)
-                             (zr-erc-context
-                              nil (buffer-substring-no-properties
-                                   (point) (min end (line-end-position)))))))
-            (setq candidates (nconc candidates (zr-erc-completion--extract context)))))
-        (delete-dups candidates)))))
+  (when zr-erc-completion-rules
+    (save-excursion
+      (save-restriction
+        (widen)
+        (let* ((end (if (markerp erc-insert-marker) (marker-position erc-insert-marker)
+                      (point-min)))
+               (begin (max (point-min) (- end zr-erc-completion-history-limit)))
+               candidates)
+          (goto-char end)
+          (while (> (point) begin)
+            (forward-line -1)
+            (let ((context (or (get-text-property (point) 'zr-erc-completion-context)
+                               (zr-erc-context
+                                nil (buffer-substring-no-properties
+                                     (point) (min end (line-end-position)))))))
+              (setq candidates (nconc candidates (zr-erc-completion--extract context)))))
+          (delete-dups candidates))))))
 
 (defun zr-erc-completion-at-point ()
   "Complete a configured trigger from history, or defer to ordinary ERC completion."
-  (when (and (derived-mode-p 'erc-mode) (markerp erc-input-marker)
+  (when (and zr-erc-completion-rules
+             (derived-mode-p 'erc-mode) (markerp erc-input-marker)
              (>= (point) erc-input-marker))
     (let ((input (buffer-substring-no-properties erc-input-marker (point)))
           (case-fold-search nil))

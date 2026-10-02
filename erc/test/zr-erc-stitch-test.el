@@ -27,25 +27,33 @@
          (zr-erc-stitch--flush-all)
          (delete-process erc-server-process)))))
 
+(defvar zr-erc-stitch-test--rules
+  '((:end " <clipped message>\\'" :start "\\`<clipped message> " :separator "")))
+
 (ert-deftest zr-erc-stitch-clipped-sequence-and-reply-ids ()
+  (should-not zr-erc-stitch-rules)
   (zr-erc-stitch-test--with-server
-    (should (zr-erc-stitch--receive erc-server-process
-                                    (zr-erc-stitch-test--message "你好 <clipped message>"
-                                                                 nil nil "msgid=a")))
-    (should-not delivered)
-    (should (zr-erc-stitch--receive erc-server-process
-                                    (zr-erc-stitch-test--message "<clipped message> 世界"
-                                                                 nil nil "msgid=b")))
-    (should (= 1 (length delivered)))
-    (let ((message (car delivered)))
-      (should (equal (erc-response.contents message) "你好世界"))
-      (should (equal (zr-erc-message-ids message) '("a" "b")))
-      (with-temp-buffer
-        (insert "<alice> 你好世界\n")
-        (let ((erc-zr-reply-mode t) (erc-message-parsed message))
-          (zr-erc-reply--remember))
-        (should (= 1 (zr-erc-reply--find "a")))
-        (should (= 1 (zr-erc-reply--find "b")))))))
+    (should-not (zr-erc-stitch--receive erc-server-process
+                                        (zr-erc-stitch-test--message "你好 <clipped message>"
+                                                                     nil nil "msgid=a")))
+    (let ((zr-erc-stitch-rules zr-erc-stitch-test--rules))
+      (should (zr-erc-stitch--receive erc-server-process
+                                      (zr-erc-stitch-test--message "你好 <clipped message>"
+                                                                   nil nil "msgid=a")))
+      (should-not delivered)
+      (should (zr-erc-stitch--receive erc-server-process
+                                      (zr-erc-stitch-test--message "<clipped message> 世界"
+                                                                   nil nil "msgid=b")))
+      (should (= 1 (length delivered)))
+      (let ((message (car delivered)))
+        (should (equal (erc-response.contents message) "你好世界"))
+        (should (equal (zr-erc-message-ids message) '("a" "b")))
+        (with-temp-buffer
+          (insert "<alice> 你好世界\n")
+          (let ((erc-zr-reply-mode t) (erc-message-parsed message))
+            (zr-erc-reply--remember))
+          (should (= 1 (zr-erc-reply--find "a")))
+          (should (= 1 (zr-erc-reply--find "b"))))))))
 
 (ert-deftest zr-erc-stitch-tags-and-conversation-isolation ()
   (zr-erc-stitch-test--with-server
@@ -61,12 +69,14 @@
 
 (ert-deftest zr-erc-stitch-interruption-and-limits-retain-originals ()
   (zr-erc-stitch-test--with-server
-    (let ((first (zr-erc-stitch-test--message "one <clipped message>")))
+    (let ((zr-erc-stitch-rules zr-erc-stitch-test--rules)
+          (first (zr-erc-stitch-test--message "one <clipped message>")))
       (zr-erc-stitch--receive erc-server-process first)
       (should-not (zr-erc-stitch--receive erc-server-process
                                          (zr-erc-stitch-test--message "hello" "bob")))
       (should (eq (car delivered) first)))
-    (let ((zr-erc-stitch-max-fragments 1))
+    (let ((zr-erc-stitch-rules zr-erc-stitch-test--rules)
+          (zr-erc-stitch-max-fragments 1))
       (zr-erc-stitch--receive erc-server-process
                               (zr-erc-stitch-test--message "one <clipped message>"))
       (zr-erc-stitch--receive erc-server-process (zr-erc-stitch-test--message "two"))
@@ -75,7 +85,8 @@
 
 (ert-deftest zr-erc-stitch-timeout-retains-original ()
   (zr-erc-stitch-test--with-server
-    (let ((zr-erc-stitch-timeout 0.01))
+    (let ((zr-erc-stitch-rules zr-erc-stitch-test--rules)
+          (zr-erc-stitch-timeout 0.01))
       (zr-erc-stitch--receive erc-server-process
                               (zr-erc-stitch-test--message "unfinished <clipped message>"))
       (let ((deadline (+ (float-time) 1)))

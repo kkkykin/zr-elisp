@@ -11,8 +11,7 @@
 (require 'zr-erc-common)
 
 (defgroup zr-erc-stitch nil "Reassemble clipped messages." :group 'erc)
-(defcustom zr-erc-stitch-rules
-  '((:end " <clipped message>\\'" :start "\\`<clipped message> " :separator ""))
+(defcustom zr-erc-stitch-rules nil
   "Rules identifying split messages, evaluated in order.
 Each plist accepts :match (a `zr-erc-match-p' selector), :end (a suffix
 regexp removed when another fragment follows), :start (an optional prefix
