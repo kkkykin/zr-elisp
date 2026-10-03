@@ -62,6 +62,25 @@
 
 全局或局部 minor mode 用参数 `-1` 关闭。只加载库不启用功能、不执行平台命令。Hook 函数只在配置加入后运行。
 
+旧 `zn/has-public-ipv6-addr-p` 改用独立模块 `zr-network`：
+
+```elisp
+(require 'zr-network)
+(zr-network-has-public-ipv6-addr-p)
+;; 只检查指定 Wi-Fi 接口，名称按本机实际情况填写。
+(zr-network-has-public-ipv6-addr-p
+ (lambda (name) (string= name "wlan0")))
+;; 显式忽略 rmnet_data 系列蜂窝接口。
+(zr-network-has-public-ipv6-addr-p
+ (lambda (name) (not (string-prefix-p "rmnet_data" name))))
+```
+
+这里只检查本机接口上配置的地址，不判断默认路由、接口状态或实际 IPv6 联网能力。
+地址分类采用 `2000::/3` 及 IANA 标记为全球可达的特殊分配，排除文档等特殊范围；
+Teredo、6to4 保守返回 nil。范围表固定在库内，不会联网查询 IANA。
+接口过滤为空时返回 nil，不回退到全部接口。Termux 标准 Wi-Fi 查询没有 `ipv6` 字段，
+因此不自动调用 Termux API 或据此推断当前出口。
+
 共享书签普通保存会写两个独立文件，包括空列表。显式另存为保留 Emacs 的完整导出语义。任一写入失败都报错且不清除修改计数；两份文件不是跨文件原子事务，修复失败原因后可重试保存。Comint 尊重已有历史文件，进程终止前、缓冲区关闭/改模式、Emacs 正常退出时保存；强制杀死 Emacs 不保证保存。
 
 Detangle 完成全部合并后才修改源码，保留缓冲区中的未保存修改供审核，冲突使用 smerge-mode。Babel 执行遵循 `org-confirm-babel-evaluate`。Cookie 导入要求 Netscape 格式和合法主机文件名，导入文件权限为 0600。
