@@ -689,5 +689,164 @@
                     (should-not (cl-some (lambda (ov) (overlay-get ov 'zr-erc-display))
                                          (overlays-at field)))))))))))))
 
+(defmacro zr-erc-display-test--with-wrap (&rest body)
+  "Run BODY with real ERC wrapping and isolated insertion hooks."
+  (declare (indent 0) (debug t))
+  `(let ((erc-modules nil)
+         (erc-fill-mode t)
+         (erc--fill-wrap-scrolltobottom-exempt-p t)
+         (erc-fill-wrap-merge nil)
+         (erc-insert-modify-hook '(erc-fill))
+         (erc-insert-post-hook nil)
+         (erc-send-post-hook nil))
+     (with-temp-buffer
+       (erc-mode)
+       (erc-fill-wrap-mode 1)
+       ,@body)))
+
+(defun zr-erc-display-test--wrapped (name &optional id parent outgoing)
+  "Insert a relay from NAME with optional ID and PARENT through ERC hooks.
+OUTGOING inserts a locally sent reply instead.  Retain ERC's message metadata
+after the post hook, as `erc-insert-line' does."
+  (goto-char (point-max))
+  (let* ((start (point))
+         (sender (if outgoing "me" "bot"))
+         (body (concat "[" name "] hello"))
+         (erc--msg-props (make-hash-table))
+         (erc-message-parsed
+          (make-erc-response
+           :sender (concat sender "!u@h") :command "PRIVMSG" :contents body
+           :unparsed (concat "@msgid=" (or id "test")
+                             (and parent (concat ";+reply=" parent))
+                             " :" sender " PRIVMSG #c :" body))))
+    (puthash 'erc--msg 'PRIVMSG erc--msg-props)
+    (puthash 'erc--spkr sender erc--msg-props)
+    (puthash 'erc--ts (current-time) erc--msg-props)
+    (insert "<" (propertize sender 'erc--speaker sender) "> " body "\n")
+    (save-restriction
+      (narrow-to-region start (point-max))
+      (if outgoing
+          (let ((zr-erc-reply--outgoing (cons "#c" parent)))
+            (zr-erc-reply--outgoing-insert)
+            (erc-fill)
+            (run-hooks 'erc-send-post-hook))
+        (when parent (zr-erc-reply--insert))
+        (run-hooks 'erc-insert-modify-hook 'erc-insert-post-hook)
+        (when id (zr-erc-reply--remember)))
+      (add-text-properties start (1+ start)
+                           (map-into erc--msg-props 'plist)))
+    (setq erc-insert-marker (copy-marker (point-max)))
+    start))
+
+(defun zr-erc-display-test--wrap-prefix (text)
+  "Return the expected first-line prefix for visible prefix TEXT.
+Measure a separate buffer containing the literal rendered text."
+  (let ((width (with-temp-buffer
+                 (insert text)
+                 (erc-fill--wrap-measure (point-min) (point-max)))))
+    `(space :width (- erc-fill--wrap-value ,width))))
+
+(ert-deftest zr-erc-display-wrap-width-refresh-and-restore ()
+  (dolist (erc-fill-wrap-use-pixels '(nil t))
+    (zr-erc-display-test--with-wrap
+      (let ((erc-fill-column 12)
+            (zr-erc-display-rules
+             '((:source body :regexp "\\[\\([^]]+\\)\\] "
+                :replace-sender "\\1" :replace-text ""))))
+        (erc-zr-display-mode 1)
+        (let* ((first (zr-erc-display-test--wrapped "終🍥"))
+               (second (zr-erc-display-test--wrapped "A much longer name"))
+               (original (buffer-substring-no-properties (point-min) (point-max))))
+          (should visual-line-mode)
+          (should (= (cl-count ?\n original) 2))
+          (dolist (entry `((,first . "<終🍥> ") (,second . "<A much longer name> ")))
+            (should (equal (get-text-property (car entry) 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix (cdr entry))))
+            (should (equal (get-text-property (car entry) 'wrap-prefix)
+                           '(space :width erc-fill--wrap-value))))
+          ;; Two different relay names from the same IRC sender stay visible.
+          (should-not (text-property-not-all first (point-max) 'erc-fill--wrap-merge nil))
+          (goto-char (point-max))
+          (insert (propertize "ERC> input\n" 'line-prefix "prompt" 'wrap-prefix "input"))
+          (let ((prompt (buffer-substring erc-insert-marker (point-max))))
+            ;; Refreshing while narrowed must leave the input area's properties alone.
+            (save-restriction
+              (narrow-to-region erc-insert-marker (point-max))
+              (erc-zr-display-mode -1))
+            (dolist (pos (list first second))
+              (should (equal (get-text-property pos 'line-prefix)
+                             (zr-erc-display-test--wrap-prefix "<bot> "))))
+            (should (equal (buffer-substring erc-insert-marker (point-max)) prompt)))
+          (erc-zr-display-mode 1)
+          (setq zr-erc-display-rules '((:source sender :replace-sender "")))
+          (zr-erc-display-refresh)
+          (dolist (pos (list first second))
+            (should (equal (get-text-property pos 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix "<> "))))
+          (should (equal (buffer-substring-no-properties (point-min) erc-insert-marker)
+                         original))
+          (setq zr-erc-display-rules nil)
+          (zr-erc-display-refresh)
+          (should (equal (get-text-property first 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "<bot> "))))))))
+
+(ert-deftest zr-erc-display-wrap-history-replies-and-native-refill ()
+  (zr-erc-display-test--with-wrap
+    (let ((erc-zr-reply-mode t)
+          (zr-erc-display-rules
+           '((:source body :regexp "\\[\\([^]]+\\)\\] "
+              :replace-sender "\\1" :replace-text ""))))
+      ;; Enable display after receiving wrapped history.
+      (zr-erc-display-test--wrapped "終🍥" "parent")
+      (let ((child (zr-erc-display-test--wrapped "Other" "child" "parent")))
+        (erc-zr-display-mode 1)
+        (should (equal (get-text-property child 'line-prefix)
+                       (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello] <Other> ")))
+        (let ((outgoing (zr-erc-display-test--wrapped "Local" nil "parent" t)))
+          (should (equal (get-text-property outgoing 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello] <me> ")))
+          (let ((before (buffer-string)))
+            (erc-fill-wrap-refill-buffer nil)
+            (should (equal (buffer-string) before))
+            (zr-erc-display-refresh)
+            (zr-erc-display-refresh)
+            (should (equal (buffer-string) before)))
+          (erc-fill--wrap-nudge 3)
+          (should (equal (get-text-property child 'wrap-prefix)
+                         '(space :width erc-fill--wrap-value)))
+          (erc-zr-display-mode -1)
+          (should (equal (get-text-property child 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix
+                          "[↪ bot: [終🍥] hello] <bot> ")))
+          (should (equal (get-text-property outgoing 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix
+                          "[↪ bot: [終🍥] hello] <me> "))))))))
+
+(ert-deftest zr-erc-display-wrap-margin-timestamps ()
+  (dolist (stamp-function '(erc-insert-timestamp-left erc-insert-timestamp-right))
+    (zr-erc-display-test--with-wrap
+      (let ((erc-timestamp-only-if-changed-flag t)
+            (zr-erc-display-rules
+             '((:source body :regexp "\\[\\([^]]+\\)\\] "
+                :replace-sender "\\1" :replace-text ""))))
+        (erc-zr-display-mode 1)
+        (add-hook 'erc-insert-post-hook
+                  (lambda () (funcall stamp-function (copy-sequence "[00:00]"))) 70 t)
+        (dotimes (_ 2)
+          (let* ((start (zr-erc-display-test--wrapped "終🍥"))
+                 (original (buffer-substring-no-properties start (point-max))))
+            (should (equal (get-text-property start 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix "<終🍥> ")))
+            (goto-char start)
+            (search-forward "[終🍥] ")
+            (should (equal (get-char-property (- (point) 5) 'display) ""))
+            (erc-zr-display-mode -1)
+            (should (equal (get-text-property start 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix "<bot> ")))
+            (erc-zr-display-mode 1)
+            (should (equal (get-text-property start 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix "<終🍥> ")))
+            (should (equal (buffer-substring-no-properties start (point-max)) original))))))))
+
 (provide 'zr-erc-display-test)
 ;;; zr-erc-display-test.el ends here

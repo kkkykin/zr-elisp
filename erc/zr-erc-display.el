@@ -4,9 +4,11 @@
 ;;; Commentary:
 ;; Enable `erc-zr-display-mode' to rename speakers or replace captured text.
 ;; Overlays leave messages and identities intact.
+;; Use `erc-fill-wrap-mode' with `erc-fill-wrap-merge' nil for visual wrapping.
 ;;; Code:
 (require 'zr-erc-common)
 (require 'button)
+(require 'erc-fill)
 
 (defgroup zr-erc-display nil "Local ERC message display." :group 'erc)
 (defcustom zr-erc-display-rules nil
@@ -83,6 +85,33 @@ Nil disables display changes.  This option supports buffer-local values."
 (defun zr-erc-display--clear ()
   "Remove this module's overlays in the accessible region."
   (remove-overlays (point-min) (point-max) 'zr-erc-display t))
+
+(defun zr-erc-display--refill-wrap ()
+  "Remeasure existing `erc-fill-wrap' prefixes after overlay changes.
+Use the live message metadata during insertion, and retained metadata for
+history.  Reuse ERC's display-width measurement, including reply prefixes,
+without inserting line breaks or revisiting consecutive-speaker detection."
+  (when erc-fill-wrap-mode
+    (save-excursion
+      (with-silent-modifications
+        (let ((pos (point-min))
+              (erc-fill--wrap-continued-predicate #'ignore))
+          (while (< pos (point-max))
+            (let* ((prefix (get-text-property pos 'line-prefix))
+                   (end (next-single-property-change pos 'line-prefix nil (point-max))))
+              ;; ERC excludes the final newline from each message's prefixes.
+              (when (and prefix (eq (char-after end) ?\n))
+                (let ((erc--msg-props
+                       (if (get-text-property pos 'erc--msg)
+                           (map-into (text-properties-at pos) 'hash-table)
+                         erc--msg-props)))
+                  (save-restriction
+                    (narrow-to-region pos (1+ end))
+                    ;; Prefixes must be absent while ERC measures the text.
+                    (remove-text-properties (point-min) (point-max)
+                                            '(line-prefix nil wrap-prefix nil))
+                    (erc-fill-wrap))))
+              (setq pos end))))))))
 
 (defun zr-erc-display--overlay (start end text &optional sender)
   "Display TEXT over START to END, optionally identifying SENDER."
@@ -223,7 +252,7 @@ never search for a repeated match fragment."
       (zr-erc-display--overlay (car range) (cdr range) text))))
 
 (defun zr-erc-display--render-replies ()
-  "Render reply references using the quoted messages' original contexts."
+  "Render reply references from original contexts, then update wrap widths."
   (let ((pos (point-min)))
     (while (< pos (point-max))
       (let ((context (get-text-property pos 'zr-erc-reply-speaker-context))
@@ -239,7 +268,8 @@ never search for a repeated match fragment."
                       (string= (buffer-substring-no-properties end (+ end 2)) ": "))
                  (+ end 2) limit)
              limit t)))
-        (setq pos end)))))
+        (setq pos end))))
+  (zr-erc-display--refill-wrap))
 
 (defun zr-erc-display--message-start (start)
   "Skip a reply reference button at message START."
@@ -300,18 +330,19 @@ never search for a repeated match fragment."
   (save-excursion
     (save-restriction
       (widen)
+      (when (and (markerp erc-insert-marker) (marker-position erc-insert-marker))
+        (narrow-to-region (point-min) erc-insert-marker))
       (if (bound-and-true-p erc-zr-display-mode)
-          (save-restriction
-            (when (and (markerp erc-insert-marker) (marker-position erc-insert-marker))
-              (narrow-to-region (point-min) erc-insert-marker))
-            (zr-erc-display--render))
-        (zr-erc-display--clear)))))
+          (zr-erc-display--render)
+        (zr-erc-display--clear)
+        (zr-erc-display--refill-wrap)))))
 
 ;;;###autoload (autoload 'erc-zr-display-mode "zr-erc-display" nil t)
 (define-erc-module zr-display nil
   "Apply name and text replacements in this buffer using overlays.
 Enabling refreshes retained history; disabling restores the original display.
-No reconnect or channel rejoin is needed."
+No reconnect or channel rejoin is needed.  When `erc-fill-wrap-mode' is
+active, also update its indentation to match the displayed text."
   ((add-hook 'erc-insert-post-hook #'zr-erc-display--insert 85 t)
    (add-hook 'erc-send-post-hook #'zr-erc-display--render-replies 85 t)
    (zr-erc-display-refresh))

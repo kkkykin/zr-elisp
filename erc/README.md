@@ -233,6 +233,48 @@ unchanged: completion, replies, stitching and media match the actual message.
 Copying and logging buffer text retain the originals; reply navigation is
 unchanged. Hovering over a replaced nickname shows its IRC nickname.
 
+### Wrapping displayed messages
+
+Use ERC's `fill-wrap` module with display rules. It wraps at the window's
+width without inserting newlines, so hidden body prefixes and replacement
+text take their displayed width. `zr-display` remeasures the first-line
+indentation after applying overlays, including renamed speakers in reply
+references. Refreshing rules or disabling display also updates indentation.
+
+Configure this before connecting:
+
+```elisp
+(require 'zr-erc-display)
+(setq erc-fill-wrap-merge nil)
+(add-to-list 'erc-modules 'fill-wrap)
+(add-to-list 'erc-modules 'zr-display)
+```
+
+Keep `fill` enabled: `fill-wrap` uses it. Disable `erc-fill-wrap-merge`
+because it groups messages by the original IRC nickname; different people
+relayed through the same bot must keep their speaker labels. The display
+module does not change these settings automatically.
+
+In an existing conversation, enable wrapping explicitly:
+
+```elisp
+(setq-local erc-fill-wrap-merge nil)
+(erc-fill-wrap-mode 1)
+(erc-zr-display-mode 1)
+```
+
+This applies to new messages. Old hard-filled history retains its inserted
+newlines; use a fresh buffer for a completely wrapped history. If the buffer
+already used `fill-wrap` with merging enabled, run
+`C-u M-x erc-fill-wrap-refill-buffer` to restore merged speaker labels.
+
+`erc-fill-static-center` controls the common body column. `fill-wrap` places
+timestamps in the window margins; `erc-fill-wrap-margin-width` controls
+their reserved width. Use `erc-fill-wrap-nudge` for interactive adjustments
+and `erc-fill-wrap-refill-buffer` after font-size changes. Ordinary
+`erc-fill-variable` and `erc-fill-static` still insert hard breaks before
+display replacements and do not get this alignment update.
+
 ## Images and downloads
 
 ```elisp
