@@ -292,20 +292,41 @@ was run from."
               (multisession-value zr-face-theme-dark-list) cur-dark))))
   (remove-hook 'server-after-make-frame-hook #'zr-face-theme-list-update))
 
+(defun zr-face--color-to-rgb (color)
+  "Convert COLOR to RGB, including hex colors unavailable on this display."
+  (when (stringp color)
+    (if (string-match-p "\\`#\\(?:[[:xdigit:]]\\{3\\}\\)\\{1,4\\}\\'" color)
+        (let* ((digits (/ (1- (length color)) 3))
+               (scale (float (1- (expt 16 digits)))))
+          (cl-loop for start from 1 below (length color) by digits
+                   collect (/ (string-to-number
+                               (substring color start (+ start digits)) 16)
+                              scale)))
+      (color-name-to-rgb color))))
+
 (defun zr-face-theme-dark-p (&optional theme)
-  "Return non-nil if THEME or current theme has a dark background.
-When THEME is provided, temporarily enables it to check its properties.
-Restores the previous theme state after checking."
-  (if theme
-      (let ((enabled (copy-sequence custom-enabled-themes))
-            result)
-        (unwind-protect
-            (progn
-              (zr-face-theme-enable-only theme t)
-              (setq result (zr-face-theme-dark-p)))
-          (zr-face-theme-enable-only enabled t))
-        result)
-    (color-dark-p (color-name-to-rgb (face-attribute 'default :background)))))
+  "Return non-nil if THEME or the current frame has a dark background.
+Inspect THEME's metadata or default face without enabling or disabling
+themes.  This is safe to call while a daemon's first client frame is being
+created.  If its background color is unspecified, use the frame's
+detected background mode."
+  (let (mode background)
+    (if (memq theme '(nil default))
+        (setq background (face-attribute 'default :background))
+      (unless (memq theme custom-known-themes)
+        (load-theme theme t t))
+      (setq mode (plist-get (get theme 'theme-properties) :background-mode)
+            background
+            (plist-get (zr-face--spec-attrs
+                        (alist-get 'default (zr-face--theme-faces theme)))
+                       :background)))
+    (pcase mode
+      ('dark t)
+      ('light nil)
+      (_ (if-let* ((rgb (zr-face--color-to-rgb background)))
+             (color-dark-p rgb)
+           (eq 'dark (or (terminal-parameter nil 'background-mode)
+                         (frame-parameter nil 'background-mode))))))))
 
 (defun zr-face-system-dark-mode-enabled-p ()
   "Check if system-wide dark mode is enabled.

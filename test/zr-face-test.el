@@ -9,6 +9,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'server)
 
 (load (expand-file-name
        "../zr-face.el"
@@ -28,12 +29,17 @@
 (declare-function zr-face-buffer-setup "zr-face")
 (declare-function zr-face-buffer-setup-all "zr-face")
 (declare-function zr-face-buffer-mode "zr-face")
+(declare-function zr-face-system-dark-mode-enabled-p "zr-face")
+(declare-function zr-face-theme-enable-only "zr-face")
+(declare-function zr-face-theme-dark-p "zr-face")
+(declare-function zr-face-appearance-setup "zr-face")
 
 (defvar zr-face-font-available-alist)
 (defvar zr-face-buffer-theme)
 (defvar zr-face-buffer-font)
 (defvar zr-face-buffer-alist)
 (defvar zr-face-buffer-mode)
+(defvar zr-face-appearance-should-setup-p)
 
 (ert-deftest zr-face-test-system-dark-mode-is-safe-in-terminal ()
   "Use the detected terminal background, falling back to the frame."
@@ -73,7 +79,11 @@
         (progn
           (zr-face-theme-enable-only themes t)
           (should (equal themes custom-enabled-themes))
-          (should-not (zr-face-theme-dark-p 'zr-face-test-light))
+          (cl-letf (((symbol-function 'enable-theme)
+                     (lambda (&rest _) (ert-fail "Theme probe enabled a theme")))
+                    ((symbol-function 'disable-theme)
+                     (lambda (&rest _) (ert-fail "Theme probe disabled a theme"))))
+            (should-not (zr-face-theme-dark-p 'zr-face-test-light)))
           (should (equal themes custom-enabled-themes))
           (should (equal "black" (face-attribute 'default :background)))
           (cl-letf (((symbol-function 'color-name-to-rgb)
@@ -82,6 +92,62 @@
           (should (equal themes custom-enabled-themes))
           (should (equal "black" (face-attribute 'default :background))))
       (zr-face-theme-enable-only original t))))
+
+(ert-deftest zr-face-test-theme-probe-metadata-and-hex ()
+  "Classify themes without asking a terminal to realize their colors."
+  (deftheme zr-face-test-metadata-dark "Dark test theme." :background-mode 'dark)
+  (deftheme zr-face-test-metadata-light "Light test theme." :background-mode 'light)
+  (deftheme zr-face-test-hex)
+  (cl-letf (((symbol-function 'color-name-to-rgb)
+             (lambda (&rest _) (ert-fail "Hex colors need no display"))))
+    (should (zr-face-theme-dark-p 'zr-face-test-metadata-dark))
+    (should-not (zr-face-theme-dark-p 'zr-face-test-metadata-light))
+    (dolist (color '("#123" "#112233" "#111222333" "#111122223333"))
+      (custom-theme-set-faces 'zr-face-test-hex
+                             `(default ((t (:background ,color)))))
+      (should (zr-face-theme-dark-p 'zr-face-test-hex)))
+    (custom-theme-set-faces 'zr-face-test-hex
+                           '(default ((t (:background "#EDEDED")))))
+    (should-not (zr-face-theme-dark-p 'zr-face-test-hex))))
+
+(ert-deftest zr-face-test-theme-probe-unspecified-background ()
+  "An unspecified or unavailable color falls back to detected frame mode."
+  (dolist (background '(unspecified "unspecified-bg" "unknown-color"))
+    (dolist (mode '(dark light nil))
+      (cl-letf (((symbol-function 'face-attribute)
+                 (lambda (&rest _) background))
+                ((symbol-function 'color-name-to-rgb) (lambda (&rest _) nil))
+                ((symbol-function 'terminal-parameter) (lambda (&rest _) nil))
+                ((symbol-function 'frame-parameter) (lambda (&rest _) mode)))
+        (should (eq (eq mode 'dark) (zr-face-theme-dark-p)))))))
+
+(ert-deftest zr-face-test-theme-list-update-does-not-switch-themes ()
+  "A fresh daemon can classify built-in themes without changing its faces."
+  (let* ((multisession-directory (make-temp-file "zr-face-test-" t))
+         (multisession-storage 'files)
+         (zr-face-theme-light-list
+          (make-multisession :package "zr-face-test" :key "light"
+                            :initial-value '(default)))
+         (zr-face-theme-dark-list
+          (make-multisession :package "zr-face-test" :key "dark"
+                            :initial-value nil))
+         (enabled (copy-sequence custom-enabled-themes))
+         (background (face-attribute 'default :background))
+         (server-after-make-frame-hook '(zr-face-theme-list-update)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'custom-available-themes)
+                   (lambda () '(adwaita wombat)))
+                  ((symbol-function 'enable-theme)
+                   (lambda (&rest _) (ert-fail "Theme scan enabled a theme")))
+                  ((symbol-function 'disable-theme)
+                   (lambda (&rest _) (ert-fail "Theme scan disabled a theme"))))
+          (run-hooks 'server-after-make-frame-hook)
+          (should (memq 'adwaita (multisession-value zr-face-theme-light-list)))
+          (should (memq 'wombat (multisession-value zr-face-theme-dark-list)))
+          (should (equal enabled custom-enabled-themes))
+          (should (equal background (face-attribute 'default :background)))
+          (should-not (memq 'zr-face-theme-list-update server-after-make-frame-hook)))
+      (delete-directory multisession-directory t))))
 
 (ert-deftest zr-face-test-font-families-prefer-available ()
   "Fonts of `zr-face-font-available-alist' are offered before the rest."
