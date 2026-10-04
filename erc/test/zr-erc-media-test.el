@@ -4,6 +4,78 @@
 (require 'zr-erc-media)
 (require 'gnutls)
 
+(ert-deftest zr-erc-media-link-parameters-are-local-and-restored ()
+  (let ((original (copy-tree org-link-parameters)))
+    (dolist (local '(nil t))
+      (with-temp-buffer
+        (when local
+          (setq-local org-link-parameters '(("custom" :follow ignore))))
+        (let ((before org-link-parameters))
+          (zr-erc-media--setup-links)
+          (should (local-variable-p 'org-link-parameters))
+          (should (eq (org-link-get-parameter "https" :follow)
+                      #'zr-erc-media--follow-https))
+          (setf (alist-get "custom" org-link-parameters nil nil #'equal)
+                '(:follow ignore))
+          (zr-erc-media--setup-links)
+          (should (eq (org-link-get-parameter "custom" :follow) #'ignore))
+          (zr-erc-media--teardown)
+          (should (eq (local-variable-p 'org-link-parameters) local))
+          (should (eq org-link-parameters before)))))
+    (should (equal org-link-parameters original))))
+
+(ert-deftest zr-erc-media-registered-links-and-local-follow ()
+  (with-temp-buffer
+    (zr-erc-media--setup-links)
+    (let ((erc-message-parsed
+           (make-erc-response :command "PRIVMSG" :sender "bot!u@h"
+                              :contents "links" :unparsed ":bot PRIVMSG #c :links"))
+          calls)
+      (dolist (type '("http" "https" "file" "irc" "ircs" "custom"))
+        (setf (alist-get type org-link-parameters nil nil #'equal)
+              (list :follow (lambda (path arg) (push (list path arg) calls)))))
+      (insert "http://example.test/a https://example.test/a.png "
+              "file:/tmp/a.txt irc://irc.example.com/#channel?key "
+              "ircs://irc.example.com/#channel?key custom:value\n")
+      (zr-erc-media--insert)
+      (let ((button (next-button (point-min) t))
+            (current-prefix-arg '(4)))
+        (while button
+          (button-activate button)
+          (setq button (next-button (button-end button) t))))
+      (should (equal (nreverse calls)
+                     '(("//example.test/a" (4)) ("//example.test/a.png" (4))
+                       ("/tmp/a.txt" (4)) ("//irc.example.com/#channel?key" (4))
+                       ("//irc.example.com/#channel?key" (4)) ("value" (4))))))))
+
+(ert-deftest zr-erc-media-irc-links-preserve-channel-key-and-tls ()
+  (let (calls)
+    (cl-letf (((symbol-function 'erc-handle-irc-url)
+               (lambda (&rest args) (push args calls))))
+      (zr-erc-media--follow-irc "//irc.example.com/#channel?key" nil)
+      (zr-erc-media--follow-ircs "//irc.example.com/#channel?key" nil)
+      (zr-erc-media--follow-ircs "//irc.example.com:7000/#channel?key" nil))
+    (should (equal (nreverse calls)
+                   '(("irc.example.com" 6667 "#channel?key" nil nil "irc")
+                     ("irc.example.com" 6697 "#channel?key" nil nil "ircs")
+                     ("irc.example.com" 7000 "#channel?key" nil nil "ircs"))))))
+
+(ert-deftest zr-erc-media-file-and-ordinary-web-links ()
+  (with-temp-buffer
+    (let (files urls)
+      (cl-letf (((symbol-function 'find-file) (lambda (path) (push path files)))
+                ((symbol-function 'browse-url) (lambda (url &rest _) (push url urls))))
+        (zr-erc-media--follow-file "/tmp/a%20b.png" nil)
+        (zr-erc-media--follow-file "///tmp/a.txt" nil)
+        (zr-erc-media--follow-file "//localhost/tmp/b.txt" nil)
+        (should-error (zr-erc-media--follow-file "//remote/tmp/a" nil)
+                      :type 'user-error)
+        (zr-erc-media--follow-http "//example.test/page" nil)
+        (zr-erc-media--follow-https "//example.test/page" nil))
+      (should (equal (nreverse files) '("/tmp/a b.png" "/tmp/a.txt" "/tmp/b.txt")))
+      (should (equal (nreverse urls)
+                     '("http://example.test/page" "https://example.test/page"))))))
+
 (defconst zr-erc-media-test--server-file
   (expand-file-name "media-server.py"
                     (file-name-directory (or load-file-name

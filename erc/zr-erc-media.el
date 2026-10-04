@@ -1,8 +1,9 @@
-;;; zr-erc-media.el --- Image previews and file downloads in ERC -*- lexical-binding: t; -*-
+;;; zr-erc-media.el --- Org link handlers and media previews in ERC -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "30.1"))
 ;;; Commentary:
-;; Enable `erc-zr-media-mode'.  Recognized URLs become buttons: images can
+;; Enable `erc-zr-media-mode'.  Buffer-local `org-link-parameters' dispatch
+;; web, local file and IRC links.  Recognized URLs become buttons: images can
 ;; be previewed inline, files downloaded.  `zr-erc-media-show' toggles images
 ;; at point, in the region, or in the visible window.  `zr-erc-media-download'
 ;; downloads either type.  Automatic previews are opt-in.  Options support
@@ -11,6 +12,8 @@
 ;;; Code:
 (require 'zr-erc-common)
 (require 'button)
+(require 'ol)
+(require 'url-irc)
 (require 'auth-source)
 (require 'url)
 (require 'url-http)
@@ -90,6 +93,70 @@ to the media request, without changing other Emacs network requests."
   buffer anchor item destination overwrite request process timer raw preview overlay
   timeout max-bytes ffmpeg width height done error)
 (defvar-local zr-erc-media--jobs nil)
+(defvar-local zr-erc-media--saved-links nil)
+
+(defun zr-erc-media--setup-links ()
+  "Install buffer-local link handlers once, preserving previous settings."
+  (unless zr-erc-media--saved-links
+    (setq zr-erc-media--saved-links
+          (list (local-variable-p 'org-link-parameters) org-link-parameters))
+    (setq-local org-link-parameters (copy-tree org-link-parameters))
+    (dolist (entry '(("http" . zr-erc-media--follow-http)
+                     ("https" . zr-erc-media--follow-https)
+                     ("file" . zr-erc-media--follow-file)
+                     ("irc" . zr-erc-media--follow-irc)
+                     ("ircs" . zr-erc-media--follow-ircs)))
+      (setf (alist-get (car entry) org-link-parameters nil nil #'equal)
+            (plist-put (cdr (assoc (car entry) org-link-parameters))
+                       :follow (cdr entry))))))
+
+(defun zr-erc-media--teardown ()
+  "Release media resources and restore the buffer's link parameters."
+  (zr-erc-media--cleanup-buffer)
+  (when zr-erc-media--saved-links
+    (if (car zr-erc-media--saved-links)
+        (setq-local org-link-parameters (cadr zr-erc-media--saved-links))
+      (kill-local-variable 'org-link-parameters))
+    (setq zr-erc-media--saved-links nil)))
+
+(defun zr-erc-media--follow-web (scheme path)
+  "Follow SCHEME and PATH, using media metadata at point when available."
+  (if-let* ((button (button-at (point)))
+            (item (button-get button 'zr-erc-media-item)))
+      (if (eq (plist-get item :type) 'image)
+          (zr-erc-media-show)
+        (call-interactively #'zr-erc-media-download))
+    (browse-url (concat scheme ":" path))))
+
+(defun zr-erc-media--follow-http (path _arg)
+  "Open HTTP PATH or activate its media preview/download."
+  (zr-erc-media--follow-web "http" path))
+
+(defun zr-erc-media--follow-https (path _arg)
+  "Open HTTPS PATH or activate its media preview/download."
+  (zr-erc-media--follow-web "https" path))
+
+(defun zr-erc-media--follow-file (path _arg)
+  "Open local file PATH, including file:// URLs."
+  (when (string-prefix-p "//" path)
+    (let ((url (url-generic-parse-url (concat "file:" path))))
+      (unless (member (url-host url) '(nil "" "localhost"))
+        (user-error "File URL must refer to the local host"))
+      (setq path (url-filename url))))
+  (find-file (decode-coding-string (url-unhex-string path) 'utf-8)))
+
+(defun zr-erc-media--follow-chat (scheme path)
+  "Open IRC SCHEME and PATH using ERC, including channel keys."
+  (let ((url-irc-function #'url-irc-erc))
+    (url-irc (url-generic-parse-url (concat scheme ":" path)))))
+
+(defun zr-erc-media--follow-irc (path _arg)
+  "Visit IRC PATH with ERC."
+  (zr-erc-media--follow-chat "irc" path))
+
+(defun zr-erc-media--follow-ircs (path _arg)
+  "Visit TLS IRC PATH with ERC."
+  (zr-erc-media--follow-chat "ircs" path))
 (defvar erc-zr-media-mode)
 
 (defun zr-erc-media--option (rule key fallback)
@@ -455,18 +522,27 @@ Existing files require explicit OVERWRITE permission."
     (zr-erc-media--fetch item (button-end button) (expand-file-name destination) overwrite)))
 
 (defun zr-erc-media--activate (button)
-  "Activate media BUTTON."
+  "Activate BUTTON through the current buffer's Org link parameters."
   (goto-char (button-start button))
-  (if (eq (plist-get (button-get button 'zr-erc-media-item) :type) 'image)
-      (zr-erc-media-show)
-    (call-interactively #'zr-erc-media-download)))
+  (let* ((link (button-get button 'zr-erc-media-link))
+         (follow (org-link-get-parameter (car link) :follow)))
+    (unless (functionp follow) (user-error "No handler for %s links" (car link)))
+    (funcall follow (cdr link) current-prefix-arg)))
 
-(defun zr-erc-media--buttonize (start end item)
-  "Turn START to END into an ITEM button."
-  (remove-text-properties start end '(keymap nil erc-callback nil erc-data nil))
-  (make-text-button start end 'action #'zr-erc-media--activate
-                    'keymap button-map 'follow-link t 'zr-erc-media-item item
-                    'help-echo "RET: toggle image / download file; M-x zr-erc-media-download: save")
+(defun zr-erc-media--buttonize (start end item &optional url)
+  "Turn START to END into a link button for URL and optional media ITEM."
+  (zr-erc-media--setup-links)
+  (setq url (or url (plist-get item :url)))
+  (let* ((colon (string-search ":" url))
+         (type (substring url 0 colon))
+         (path (substring url (1+ colon))))
+    (remove-text-properties start end '(keymap nil erc-callback nil erc-data nil))
+    (make-text-button start end 'action #'zr-erc-media--activate
+                      'keymap button-map 'follow-link t 'zr-erc-media-item item
+                      'zr-erc-media-link (cons type path)
+                      'help-echo (if item
+                                     "RET: toggle image / download file; M-x zr-erc-media-download: save"
+                                   "RET: open link")))
   (when (and (eq (plist-get item :type) 'image) (display-images-p)
              (not (zr-erc-media--expired-p item))
              (zr-erc-media--option (plist-get item :rule) :auto-show zr-erc-media-auto-show))
@@ -476,18 +552,29 @@ Existing files require explicit OVERWRITE permission."
         (error (message "ERC media: automatic preview could not start"))))))
 
 (defun zr-erc-media--insert ()
-  "Recognize media in the narrowed incoming message after ERC formatting."
+  "Recognize registered links in the narrowed incoming ERC message."
+  (zr-erc-media--setup-links)
   (when (and (erc-response-p erc-message-parsed)
              (member (erc-response.command erc-message-parsed) '("PRIVMSG" "NOTICE")))
-    (let ((context (zr-erc-context erc-message-parsed)) seen)
+    (let ((context (zr-erc-context erc-message-parsed))
+          (case-fold-search nil)
+          (regexp (concat
+                   "\\b"
+                   (regexp-opt
+                    (mapcar #'car
+                            (cl-remove-if-not
+                             (lambda (entry) (functionp (plist-get (cdr entry) :follow)))
+                             org-link-parameters)))
+                   ":[^[:space:]<>\"\x01]+"))
+          seen)
       (save-excursion
         (goto-char (point-min))
-        (while (re-search-forward "https?://[^[:space:]<>\"\x01]+" nil t)
+        (while (re-search-forward regexp nil t)
           (let ((start (match-beginning 0)) (end (match-end 0)) (url (match-string-no-properties 0)))
             (unless (button-at start)
-              (when-let* ((item (zr-erc-media--item url context)))
+              (let ((item (zr-erc-media--item url context)))
                 (push url seen)
-                (zr-erc-media--buttonize start end item)))))
+                (zr-erc-media--buttonize start end item url)))))
         (dolist (rule zr-erc-media-rules)
           (when-let* ((tag (plist-get rule :url-tag))
                       (url (cdr (assoc tag (plist-get context :tags))))
@@ -502,10 +589,13 @@ Existing files require explicit OVERWRITE permission."
 
 ;;;###autoload (autoload 'erc-zr-media-mode "zr-erc-media" nil t)
 (define-erc-module zr-media nil
-  "Recognize media links, preview images and download files."
-  ((add-hook 'erc-insert-post-hook #'zr-erc-media--insert 95))
-  ((remove-hook 'erc-insert-post-hook #'zr-erc-media--insert)
-   (erc-buffer-list #'zr-erc-media--cleanup-buffer)))
+  "Open links using local Org handlers, preview images and download files."
+  ((add-hook 'erc-mode-hook #'zr-erc-media--setup-links)
+   (erc-buffer-list #'zr-erc-media--setup-links)
+   (add-hook 'erc-insert-post-hook #'zr-erc-media--insert 95))
+  ((remove-hook 'erc-mode-hook #'zr-erc-media--setup-links)
+   (remove-hook 'erc-insert-post-hook #'zr-erc-media--insert)
+   (erc-buffer-list #'zr-erc-media--teardown)))
 
 (provide 'zr-erc-media)
 ;;; zr-erc-media.el ends here

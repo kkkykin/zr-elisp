@@ -282,7 +282,32 @@ display replacements and do not get this alignment update.
 (erc-zr-media-mode 1)
 ```
 
-Recognized links become buttons. RET/mouse-2 toggles an image preview or prompts
+Links are dispatched through buffer-local `org-link-parameters` from `ol`.
+HTTP(S) media links use the rules below; ordinary web links open in the browser.
+`file:/path` and `file:///path` open local files (including images) in Emacs.
+`irc://irc.example.com/#channel?key` and
+`ircs://irc.example.com/#channel?key` open ERC and join the channel with its
+optional key; `ircs` uses TLS for new connections. Explicit ports are supported.
+ERC controls connection reuse and any prompts needed to establish a connection.
+
+The module installs local handlers in existing and new ERC buffers and restores
+previous parameters when disabled. After enabling it, customize a buffer with:
+
+```elisp
+;; Replace an existing handler without affecting Org or other ERC buffers.
+(org-link-set-parameters "https" :follow
+                         (lambda (path _arg) (browse-url (concat "https:" path))))
+;; Add a type directly, without rebuilding Org's global link regexps.
+(setf (alist-get "project" org-link-parameters nil nil #'equal)
+      '(:follow my-project-open)) ; receives PATH and prefix ARG
+```
+
+Registered plain `type:path` links in new messages become buttons. Handlers are
+looked up when clicked, so changes also apply to existing buttons. File handlers
+use the same dispatch as other types. Org markup and Org font locking are not
+enabled in ERC buffers.
+
+Recognized media links become buttons. RET/mouse-2 toggles an image preview or prompts
 for a file destination. `M-x zr-erc-media-show` toggles the image at point, or
 all image links overlapping the active region. With a prefix argument
 (`C-u M-x zr-erc-media-show`), it toggles images in the selected window's
