@@ -18,7 +18,7 @@ Alternatively, configure ERC's module list before connecting:
 (add-to-list 'erc-modules 'zr-reply)
 ```
 
-The other global module names are `zr-stitch`, `zr-completion` and `zr-media`.
+The other global module names are `zr-stitch`, `zr-completion` and `zr-link`.
 After changing `erc-modules` in an existing session, run
 `M-x erc-update-modules` to enable listed global modules. If they are already
 enabled through this list or earlier configuration, changing rules takes
@@ -275,42 +275,61 @@ and `erc-fill-wrap-refill-buffer` after font-size changes. Ordinary
 `erc-fill-variable` and `erc-fill-static` still insert hard breaks before
 display replacements and do not get this alignment update.
 
-## Images and downloads
+## Link rules, images and downloads
 
 ```elisp
-(require 'zr-erc-media)
-(erc-zr-media-mode 1)
+(require 'zr-erc-link)
+(erc-zr-link-mode 1)
 ```
 
-Links are dispatched through buffer-local `org-link-parameters` from `ol`.
-HTTP(S) media links use the rules below; ordinary web links open in the browser.
-`file:/path` and `file:///path` open local files (including images) in Emacs.
-`irc://irc.example.com/#channel?key` and
-`ircs://irc.example.com/#channel?key` open ERC and join the channel with its
-optional key; `ircs` uses TLS for new connections. Explicit ports are supported.
-ERC controls connection reuse and any prompts needed to establish a connection.
+`zr-erc-link-rules` matches displayed message text with `:regexp` and turns
+matches into buttons. Rules run in order; earlier rules win overlapping
+ranges. A rule can match multiple occurrences. Empty matches are ignored,
+and nil rules disable recognition. `:match` uses the same message selectors
+as the other modules. `:replace` expands regexp backreferences with case
+preserved; without it, the matched text is the action target. The displayed
+text remains unchanged. There is no automatic punctuation trimming.
 
-The module installs local handlers in existing and new ERC buffers and restores
-previous parameters when disabled. After enabling it, customize a buffer with:
+| `:type` | Action on RET/mouse-2 |
+| --- | --- |
+| `image` | Toggle an inline image from an HTTP(S) target |
+| `file` | Download an HTTP(S) target |
+| `command` | Execute the target as one ERC slash command in the clicked buffer |
+| `org` | Pass the target to `org-link-open-from-string` from `ol` |
+
+The default rules recognize common image/file extensions and send ordinary
+HTTP(S) and `file:` links to Org. Org handles opening links using its existing
+configuration; this module does not install or modify `org-link-parameters`.
+Custom Org link types need an appropriate `org` rule. Only image previews
+can run automatically; `command` and `org` always require activation.
+
+For a bridge's merged-forward message, put a command rule before the defaults:
 
 ```elisp
-;; Replace an existing handler without affecting Org or other ERC buffers.
-(org-link-set-parameters "https" :follow
-                         (lambda (path _arg) (browse-url (concat "https:" path))))
-;; Add a type directly, without rebuilding Org's global link regexps.
-(setf (alist-get "project" org-link-parameters nil nil #'equal)
-      '(:follow my-project-open)) ; receives PATH and prefix ARG
+(setq-local zr-erc-link-rules
+            (cons
+             '(:regexp "\\[查看合并转发：ircs?://[^/[:space:]]+/\\(#[^?[:space:]]+\\)\\?\\([^][:space:]]+\\)\\]"
+               :replace "/join \\1 \\2"
+               :type command)
+             zr-erc-link-rules))
 ```
 
-Registered plain `type:path` links in new messages become buttons. Handlers are
-looked up when clicked, so changes also apply to existing buttons. File handlers
-use the same dispatch as other types. Org markup and Org font locking are not
-enabled in ERC buffers.
+This turns `[查看合并转发：ircs://host:6697/#channel?key]` into a button
+that executes `/join #channel key`. It uses the current connection; the URL
+host does not select or establish a different connection. Use `:match` to
+scope a bridge rule to the appropriate server/channel. Command targets must
+start with a slash command and cannot contain newlines.
+
+An Org rule can also extract a target from surrounding text:
+
+```elisp
+'(:regexp "文档(\\([^)]*\\))" :replace "\\1" :type org)
+```
 
 Recognized media links become buttons. RET/mouse-2 toggles an image preview or prompts
-for a file destination. `M-x zr-erc-media-show` toggles the image at point, or
+for a file destination. `M-x zr-erc-link-show` toggles the image at point, or
 all image links overlapping the active region. With a prefix argument
-(`C-u M-x zr-erc-media-show`), it toggles images in the selected window's
+(`C-u M-x zr-erc-link-show`), it toggles images in the selected window's
 visible range, taking precedence over the region. If any targeted image is
 displayed or loading, all targeted previews are hidden and pending image
 requests canceled; otherwise, they are fetched and shown. This also hides
@@ -318,20 +337,20 @@ automatically displayed images, even after their links have expired. Range
 previews skip file links and continue if an image has expired or a request
 fails. These manual previews work with automatic image fetching disabled.
 
-`M-x zr-erc-media-download` saves either type. Downloads
+`M-x zr-erc-link-download` saves either type. Downloads
 run asynchronously, and overwriting a file requires confirmation. Automatic
 image fetching is off by default; it can be enabled globally, per buffer, or
 per rule. Inline images need an Emacs display with image support; downloads
 also work in terminal Emacs.
 
-Set `zr-erc-media-max-age` to an age limit in seconds, globally or per buffer,
+Set `zr-erc-link-max-age` to an age limit in seconds, globally or per buffer,
 to avoid requesting expired links. The default is nil (unlimited). A rule's
 `:max-age` overrides the option; an explicit `:max-age nil` disables the limit
 for that rule. For example, only request these image links for one hour:
 
 ```elisp
-(setq-local zr-erc-media-rules
-            '((:regexp "\\`https://multimedia\\.nt\\.qq\\.com\\.cn/download\\?"
+(setq-local zr-erc-link-rules
+            '((:regexp "https://multimedia\\.nt\\.qq\\.com\\.cn/download\\?[^[:space:]]+"
                :type image :auto-show t :max-age 3600)))
 ```
 
@@ -342,14 +361,14 @@ links remain buttons but skip automatic previews; manual previews and
 downloads report expiration before starting a request or asking for a save
 destination. Age is checked again for each request. Existing previews and
 requests already in progress are retained. This is separate from
-`zr-erc-media-timeout`, which limits how long a request may run.
+`zr-erc-link-timeout`, which limits how long a request may run.
 
-Use `zr-erc-media-proxy` to select an HTTP proxy for both previews and
+Use `zr-erc-link-proxy` to select an HTTP proxy for both previews and
 downloads. It supports global and buffer-local settings, with per-rule
 overrides via `:proxy`:
 
 ```elisp
-(setq-local zr-erc-media-proxy "http://127.0.0.1:7890")
+(setq-local zr-erc-link-proxy "http://127.0.0.1:7890")
 ;; Alternatively, add this to an existing media rule:
 ;; :proxy "http://127.0.0.1:7890"
 ```
@@ -366,8 +385,8 @@ do not alter the proxy configuration used by other Emacs packages.
 Example for an authenticated image proxy and ordinary downloadable files:
 
 ```elisp
-(setq-local zr-erc-media-rules
-            '((:regexp "\\`https://cdn\\.example/images/\\(.*\\)\\'"
+(setq-local zr-erc-link-rules
+            '((:regexp "https://cdn\\.example/images/\\([^[:space:]]+\\)"
                :replace "https://gateway.example/media/\\1"
                :type image
                :headers (("X-Client" . "erc"))
@@ -375,7 +394,7 @@ Example for an authenticated image proxy and ordinary downloadable files:
                :auth-scheme bearer
                :auto-show t :ffmpeg t
                :max-width 0.85 :max-height 0.6)
-              (:regexp "\\.\\(?:pdf\\|zip\\)\\(?:[?#].*\\)?\\'" :type file)))
+              (:regexp "https?://[^[:space:]]+\\.\\(?:pdf\\|zip\\)\\(?:[?#][^[:space:]]*\\)?" :type file)))
 ```
 
 The visible label keeps the original link; requests use the rewritten URL.
@@ -396,27 +415,27 @@ As with the other modules, `:match` accepts message selectors. A URL can also
 come from a tag rather than the body:
 
 ```elisp
-(setq-local zr-erc-media-rules
+(setq-local zr-erc-link-rules
             '((:match (:tags (("+media-kind" . "^image$")))
                :url-tag "+media-url" :regexp "\\`https://" :type image)))
 ```
 
-`zr-erc-media-use-ffmpeg` enables FFmpeg conversion by default; a rule's
+`zr-erc-link-use-ffmpeg` enables FFmpeg conversion by default; a rule's
 `:ffmpeg` overrides it. Conversion produces a single-frame PNG preview,
 preserves aspect ratio and does not enlarge small images. Downloads always
-save the original data. `zr-erc-media-max-width` / `-max-height` accept integer
+save the original data. `zr-erc-link-max-width` / `-max-height` accept integer
 pixels or floating-point fractions of the current window. Preview again to
-fit a changed window size. `zr-erc-media-ffmpeg-program` selects the executable.
+fit a changed window size. `zr-erc-link-ffmpeg-program` selects the executable.
 
-Requests and conversions use `zr-erc-media-timeout`; responses larger than
-`zr-erc-media-max-bytes` are rejected. Temporary previews and pending requests
+Requests and conversions use `zr-erc-link-timeout`; responses larger than
+`zr-erc-link-max-bytes` are rejected. Temporary previews and pending requests
 are cleaned when the module is disabled or the buffer is killed; removing a
-link from scrollback also removes its preview. `zr-erc-media-download-directory`
+link from scrollback also removes its preview. `zr-erc-link-download-directory`
 sets the initial save directory.
 
 ## Configuration scope
 
-The stitch, completion, display and media options are ordinary `defcustom` variables
+The stitch, completion, display and link options are ordinary `defcustom` variables
 with global defaults. Loading or enabling these modules does not create local
 bindings for their options. Use `setq` or `setopt` for global configuration,
 or `setq-local` in an ERC buffer to override an option for that buffer only.
@@ -441,7 +460,7 @@ enabling `erc-zr-reply-mode` negotiates `message-tags`. The regexp-only paths
 work independently of the reply module.
 
 Run all ERC tests with `make test TEST_FILE="$(echo erc/test/*-test.el)"`.
-The media tests start a temporary loopback HTTP server when Python 3 is
+The link tests start a temporary loopback HTTP server when Python 3 is
 available and exercise actual FFmpeg conversion when FFmpeg/ffprobe are
 available. Proxy tests use a loopback HTTP proxy; HTTPS CONNECT tests also
 require OpenSSL and Emacs GnuTLS support. The current terminal test environment
