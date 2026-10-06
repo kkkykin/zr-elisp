@@ -20,6 +20,8 @@
 (require 'org-element)
 (require 'subr-x)
 
+(autoload 'zr-org-link-open-at-point "zr-org-link")
+
 (defgroup zr-org-babel nil
   "Babel helpers."
   :group 'org-babel)
@@ -67,17 +69,20 @@
   (if (derived-mode-p 'org-mode)
       (pcase (org-element-type (org-element-context))
         ('link
-         (org-open-at-point)
+         (or (zr-org-link-open-at-point)
+             (org-open-at-point))
          t)
         ((or 'src-block 'inline-src-block 'babel-call 'inline-babel-call)
          (zr-org-babel-execute)
          t))
     (when (org-in-regexp org-link-any-re)
-      (org-open-at-point-global)
+      (or (zr-org-link-open-at-point)
+          (org-open-at-point-global))
       t)))
 
 (defun zr-org-babel-execute-nearby (&optional argument file)
   "Open a link or execute nearby Babel, optionally in FILE.
+HTTP links use WezTerm in an SSH session.
 Negative ARGUMENT searches backward; C-u searches from the buffer start."
   (interactive "P")
   (with-current-buffer (if file

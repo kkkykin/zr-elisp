@@ -8,7 +8,7 @@
 
 ;;; Commentary:
 
-;; Enable dictionary links explicitly.  WezTerm opening is an independent command.
+;; Enable dictionary links explicitly.  WezTerm opening is an independent helper.
 
 ;;; Code:
 
@@ -40,10 +40,24 @@
   (zr-wezterm-send-json `((type . "open_uri") (uri . ,url))))
 
 (defun zr-org-link-open-at-point ()
-  "Open an HTTP link through WezTerm in an SSH frame.
+  "Open an HTTP link at point through WezTerm in an SSH session.
+Check both frame and process environments.  Also recognize Org links
+outside Org mode.
 Suitable for `org-open-at-point-functions'; return nil for other links."
-  (when (getenv "SSH_CONNECTION" (selected-frame))
-    (let* ((element (org-element-context))
+  (when (or (getenv "SSH_CONNECTION" (selected-frame))
+            (getenv "SSH_CLIENT" (selected-frame))
+            (getenv "SSH_CONNECTION")
+            (getenv "SSH_CLIENT"))
+    (let* ((element
+            (if (derived-mode-p 'org-mode)
+                (org-element-context)
+              (when (org-in-regexp org-link-any-re)
+                (let ((link (match-string-no-properties 0)))
+                  (with-temp-buffer
+                    (insert link)
+                    (delay-mode-hooks (org-mode))
+                    (goto-char (point-min))
+                    (org-element-link-parser))))))
            (type (org-element-property :type element)))
       (when (and (eq (org-element-type element) 'link) (member type '("http" "https")))
         (zr-org-link-open-wezterm (org-element-property :raw-link element))
