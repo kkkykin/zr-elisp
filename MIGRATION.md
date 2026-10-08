@@ -23,7 +23,7 @@
 | init-viper、init-org | zr-viper | Ex 扩展、临时行号、Wdired/Org 编辑保存；使用 Org 功能时才加载相应库 |
 | init-net | zr-eww | 配置驱动的 URL 重写、认证、阅读模式、文本源码显示 |
 | init-misc、init-android | zr-notify、zr-termux | 通知与预约参数适配，Termux API 通知/Toast、状态查询及已有 TRAMP 连接配置 |
-| init-winnt | zr-windows | UWP 回环、Shell 切换、编码、自解压归档、IME 控制 |
+| init-winnt | zr-windows | UWP 回环、Shell 切换、编码、自解压归档；摸鱼：`zr-windows-ime-mode`、`zr-windows-quit-ime-buffers` |
 | init-android、init-misc | zr-android | 屏幕、软键盘、修饰栏、ADB 与应用操作 |
 | init-misc | zr-data、zr-elisp | JSON 读取合并、SOPS、UUID、密码、Emacs 源码 URL |
 
@@ -61,6 +61,12 @@
 ```
 
 全局或局部 minor mode 用参数 `-1` 关闭。只加载库不启用功能、不执行平台命令。Hook 函数只在配置加入后运行。
+
+“摸鱼”功能在 `zr-windows` 中：加载库后，在目标 buffer 执行 `M-x zr-windows-ime-mode`，
+获得焦点或切换到该 buffer 时关闭 Windows IME；仅处理已确认获得焦点的 frame 中选中的窗口。
+需要 Windows 且 Emacs 提供 `w32-set-ime-open-status`。
+`M-x zr-windows-quit-ime-buffers` 收起所有 frame 上启用了该模式的 buffer 窗口，保留 buffer 内容和模式状态。
+关闭模式、杀掉 buffer 或切换主模式时会清理对应回调，最后一个 buffer 退出后移除共享焦点回调。
 
 旧 `zn/has-public-ipv6-addr-p` 改用独立模块 `zr-network`：
 

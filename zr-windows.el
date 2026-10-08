@@ -10,6 +10,8 @@
 
 ;; Platform commands and opt-in encoding/IME modes.  No terminal focusing,
 ;; OneDrive, elevation scripts or environment changes are performed here.
+;; For "moyu", enable `zr-windows-ime-mode' in selected buffers and use
+;; `zr-windows-quit-ime-buffers' to hide their windows without killing them.
 
 ;;; Code:
 
@@ -193,10 +195,21 @@
                                       (zr-windows-process-coding process input)
                                       (comint-simple-send process input)))))
 
-(defun zr-windows-ime-close (&rest _)
-  "Close the IME in a focused buffer using `zr-windows-ime-mode'."
-  (when (and zr-windows-ime-mode (frame-focus-state) (fboundp 'w32-set-ime-open-status))
-    (w32-set-ime-open-status nil)))
+(defun zr-windows-ime-close (&optional window)
+  "Close the IME for focused windows using `zr-windows-ime-mode'.
+When WINDOW is supplied by a buffer-local window hook, act only if it
+is its frame's selected window.  Otherwise inspect all frames, since
+focus notifications can run with an unrelated current buffer or frame."
+  (when (and (eq system-type 'windows-nt)
+             (fboundp 'w32-set-ime-open-status)
+             (or (null window) (window-live-p window)))
+    (dolist (frame (if window (list (window-frame window)) (frame-list)))
+      (let ((selected (frame-selected-window frame)))
+        (when (and (or (null window) (eq window selected))
+                   (eq (frame-focus-state frame) t)
+                   (buffer-local-value 'zr-windows-ime-mode (window-buffer selected)))
+          (with-selected-window selected
+            (w32-set-ime-open-status nil)))))))
 
 (defun zr-windows--ime-cleanup ()
   "Remove the shared focus callback after its last buffer is gone."
@@ -211,7 +224,10 @@
   (zr-windows-ime-mode -1))
 
 (define-minor-mode zr-windows-ime-mode
-  "Keep the IME closed in this buffer while it has focus."
+  "Keep the Windows IME closed while this buffer's window has focus.
+Only the selected window of a frame known to have focus is affected.
+Requires Windows with `w32-set-ime-open-status' support.
+Use `zr-windows-quit-ime-buffers' to hide all buffers using this mode."
   :lighter " IME-"
   (if zr-windows-ime-mode
       (progn
@@ -231,7 +247,8 @@
     (zr-windows--ime-cleanup)))
 
 (defun zr-windows-quit-ime-buffers ()
-  "Quit windows displaying any buffer with `zr-windows-ime-mode'."
+  "Quit windows on all frames displaying buffers with `zr-windows-ime-mode'.
+The buffers remain alive with the mode enabled."
   (interactive)
   (dolist (buffer (buffer-list))
     (when (buffer-local-value 'zr-windows-ime-mode buffer)
