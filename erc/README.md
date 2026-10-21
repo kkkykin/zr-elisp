@@ -74,8 +74,8 @@ CTCP actions are not collected.
 ;; These options also support setq-local in an ERC buffer.
 (setq zr-erc-completion-rules
       '((:source sender
-         :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2))
-        (:source text :regexp "^<\\(.+\\)-\\([0-9]+\\)/onebot> " :groups (1 2))
+         :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2) :break t)
+        (:source text :regexp "^<\\(.+\\)-\\([0-9]+\\)/onebot> " :groups (1 2) :break t)
         (:source text :regexp "^<\\([^>]+\\)> " :groups (1))))
 ```
 
@@ -89,13 +89,19 @@ All parts are configurable with buffer-local options:
 
 ```elisp
 (setq-local zr-erc-completion-rules
-            '((:source sender
-               :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2))
-              (:source (:tag "+display-name"))
+            '((:source (:tag "+display-name"))
+              (:source sender
+               :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2) :break t)
               (:source text :regexp "^<\\([^>]+\\)> " :groups (1))))
 ```
 
-The first successful rule wins. `:groups (2)` would offer only the numeric ID.
+Rules collect candidates in order, removing duplicates while keeping the first
+occurrence. By default, matching continues (`:break nil`). A rule with `:break t`
+stops further rules for that message once it yields valid candidates, even if
+they duplicate earlier candidates. Rules yielding no valid candidates are skipped.
+In the examples, `:break t` keeps a successful relay extraction from also adding
+the raw nickname through the fallback. The second example combines a tag display
+name with the sender's name and numeric ID. `:groups (2)` extracts only the ID.
 `:source body` extracts from the message body; `:match` accepts the same
 selectors as stitching. `zr-erc-completion-input-regexp` and
 `zr-erc-completion-input-group` control the trigger and the portion replaced.
@@ -127,8 +133,13 @@ the conversation buffer; no rejoin is needed:
 For `<nichi_bot> [nami.yti] 强大v5`, the nickname becomes `nami.yti` and
 the matched prefix `[nami.yti] ` is hidden, leaving `<nami.yti> 强大v5`.
 Both `:replace-sender` and `:replace-text` are optional: nil or omitted means
-no change, while an empty string hides that part. The first rule yielding a
-replacement wins; a matching rule with neither action is skipped.
+no change, while an empty string hides that part. Rules are evaluated in order.
+By default, matching rules continue to be evaluated (`:break nil`), allowing
+separate rules for speaker renaming and text replacement. Specify `:break t` on
+a rule to stop evaluating further rules once it yields a replacement. The first
+effective rule specifying `:replace-sender` sets the nickname; multiple text
+replacements apply in order, skipping overlapping ranges. Matching rules with
+neither action are skipped.
 
 String replacements use Emacs `replace-match` backreferences: `"\\1"` selects
 group 1, `"\\&"` selects the full match, and `"user: \\1"` adds a prefix.

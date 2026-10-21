@@ -357,10 +357,16 @@
 
 (ert-deftest zr-erc-display-independent-name-and-hide-actions ()
   (let ((zr-erc-display-rules
-         '((:source body :regexp "\\(\\[[^]]+\\]\\)" :replace-sender nil :replace-text "")
+         '((:source body :regexp "\\(\\[[^]]+\\]\\)" :replace-sender nil :replace-text "" :break t)
            (:source sender :replace-sender "\\&"))))
     (should (equal (zr-erc-display--match '(:body "[Hidden]" :sender "bot"))
                    '(:sender nil :text "" :source body :value "[Hidden]" :begin 0 :end 8))))
+  (let ((zr-erc-display-rules
+         '((:source body :regexp "\\(\\[[^]]+\\]\\)" :replace-sender nil :replace-text "")
+           (:source sender :replace-sender "\\&"))))
+    ;; Without :break, subsequent rules continue and can replace sender.
+    (should (equal (zr-erc-display--match '(:body "[Hidden]" :sender "bot"))
+                   '(:sender "bot" :text "" :source body :value "[Hidden]" :begin 0 :end 8))))
   (let ((zr-erc-display-rules
          '((:source body :regexp "\\(\\[[^]]+\\]\\) \\(.*\\)"
             :replace-sender "\\2" :replace-text ""))))
@@ -847,6 +853,57 @@ Measure a separate buffer containing the literal rendered text."
             (should (equal (get-text-property start 'line-prefix)
                            (zr-erc-display-test--wrap-prefix "<終🍥> ")))
             (should (equal (buffer-substring-no-properties start (point-max)) original))))))))
+
+(ert-deftest zr-erc-display-break-and-multiple-replacements ()
+  ;; Multiple rules without :break all apply (sender + multiple texts).
+  (let ((zr-erc-display-rules
+         '((:source sender :regexp "\\`\\(.+\\)-[0-9]+/onebot\\'" :replace-sender "\\1")
+           (:match (:body "\\[图片\\] ")
+            :source body :regexp "https?://[^[:space:]]+" :replace-text "[看看]")
+           (:match (:body "\\`\\[合并转发\\] ")
+            :source body :regexp "\\[查看合并转发：\\(/join #[^]\n]+\\)\\]" :replace-text "[查看合并转发]"))))
+    (let ((res (zr-erc-display--match
+                '(:sender "Alice-12345/onebot"
+                  :body "[合并转发] 记录\n[查看合并转发：/join #test]"))))
+      (should (equal (plist-get res :sender) "Alice"))
+      (should (equal (plist-get res :text) "[查看合并转发]"))
+      (should (equal (plist-get res :source) 'body)))
+
+    ;; With :break t, matching stops after the effective rule.
+    (let ((zr-erc-display-rules
+           '((:source sender :regexp "\\`\\(.+\\)-[0-9]+/onebot\\'" :replace-sender "\\1" :break t)
+             (:source body :regexp "https?://[^[:space:]]+" :replace-text "[看看]"))))
+      (let ((res (zr-erc-display--match
+                  '(:sender "Alice-12345/onebot"
+                    :body "[图片] https://example.com/a.png"))))
+        (should (equal (plist-get res :sender) "Alice"))
+        (should-not (plist-get res :text))
+        (should-not (plist-get res :texts))))
+
+    ;; Overlapping text ranges: earlier rule wins.
+    (let ((zr-erc-display-rules
+           '((:source body :regexp "hello world" :replace-text "HI")
+             (:source body :regexp "world" :replace-text "EARTH"))))
+      (let ((res (zr-erc-display--match '(:body "hello world"))))
+        (should (equal (plist-get res :text) "HI"))
+        (should (= (length (or (plist-get res :texts) (list res))) 2))))
+
+    ;; Buffer test: both sender and body overlay are applied in live ERC buffer.
+    (with-temp-buffer
+      (erc-mode)
+      (erc-zr-display-mode 1)
+      (let* ((body "[图片] https://example.com/pic.png")
+             (erc-message-parsed
+              (make-erc-response :sender "Alice-12345/onebot!u@h" :command "PRIVMSG"
+                                 :contents body
+                                 :unparsed ":Alice-12345/onebot PRIVMSG #c :[图片] https://example.com/pic.png")))
+        (insert "<Alice-12345/onebot> [图片] https://example.com/pic.png\n")
+        (put-text-property (point-min) (point-max) 'erc-parsed erc-message-parsed)
+        (put-text-property 2 20 'erc--speaker "Alice-12345/onebot")
+        (run-hooks 'erc-insert-post-hook)
+        (should (equal (get-char-property 2 'display) "Alice"))
+        (search-backward "https")
+        (should (equal (get-char-property (point) 'display) "[看看]"))))))
 
 (provide 'zr-erc-display-test)
 ;;; zr-erc-display-test.el ends here

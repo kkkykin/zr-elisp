@@ -12,9 +12,15 @@
 
 (defgroup zr-erc-display nil "Local ERC message display." :group 'erc)
 (defcustom zr-erc-display-rules nil
-  "Ordered display rules; the first rule yielding a name or text replacements wins.
+  "Ordered display rules for speaker names and message text.
+Rules are evaluated in order.  When a rule yields a replacement,
+evaluation stops if that rule specifies :break non-nil; otherwise
+subsequent rules continue to be evaluated.  The first effective rule
+specifying :replace-sender sets the displayed nickname.  Multiple rules
+yielding text replacements are applied in order, skipping overlapping ranges.
 Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
-body, text, or (:tag TAG), default text), and an optional :regexp.
+body, text, or (:tag TAG), default text), :break (default nil), and an
+optional :regexp.
 :replace-sender and :replace-text are optional strings or functions.
 Strings use `replace-match' backreferences, with case preserved.  Functions
 receive the original context plus :source, :value and a :groups vector
@@ -37,7 +43,7 @@ Nil disables display changes.  This option supports buffer-local values."
   (save-match-data
     (let ((result (cond ((null replacement) nil)
                         ((stringp replacement)
-                         (match-substitute-replacement replacement t nil value))
+                          (match-substitute-replacement replacement t nil value))
                         ((functionp replacement)
                          (funcall replacement (copy-tree context t)))
                         (t (error "Invalid display replacement: %S" replacement)))))
@@ -46,17 +52,23 @@ Nil disables display changes.  This option supports buffer-local values."
       (and result (substring-no-properties result)))))
 
 (defun zr-erc-display--match (context)
-  "Return a replacement plist with source offsets for the first effective rule."
+  "Return replacement descriptors for matching rules in `zr-erc-display-rules'.
+Evaluate rules in order.  When a rule yields a sender or text replacement,
+stop evaluating further rules if the rule has :break non-nil; otherwise
+continue matching.  The first effective rule specifying :replace-sender sets
+:sender.  All effective text replacements are collected."
   (save-match-data
-    (let ((case-fold-search nil))
+    (let ((case-fold-search nil)
+          sender sender-info texts stopped)
       (cl-loop
        for rule in zr-erc-display-rules
+       until stopped
        for source = (or (plist-get rule :source) 'text)
        for value = (if (consp source)
                        (cdr (assoc (cadr source) (plist-get context :tags)))
                      (plist-get context (intern (concat ":" (symbol-name source)))))
        when (and value (zr-erc-match-p (plist-get rule :match) context))
-       thereis
+       do
        (let ((regexp (plist-get rule :regexp)))
          (when (if regexp (string-match regexp value)
                  (set-match-data (list 0 (length value))) t)
@@ -78,9 +90,32 @@ Nil disables display changes.  This option supports buffer-local values."
                              (or (string-empty-p name) (not (string-blank-p name)))
                              (not (string-match-p "[[:cntrl:]]" name)) name))
              (when (= begin end) (setq text nil))
-             (when (or name text)
-               (list :sender name :text text :source source :value value
-                     :begin begin :end end)))))))))
+             (let ((effective nil))
+               (when name
+                 (unless sender
+                   (setq sender name
+                         sender-info (list :source source :value value
+                                           :begin begin :end end)))
+                 (setq effective t))
+               (when text
+                 (push (list :text text :source source :value value
+                             :begin begin :end end)
+                       texts)
+                 (setq effective t))
+               (when (and effective (plist-get rule :break))
+                 (setq stopped t)))))))
+      (when (or sender texts)
+        (let* ((all-texts (nreverse texts))
+               (first-text (car all-texts))
+               (base-info (or first-text sender-info)))
+          (append (list :sender sender
+                        :text (and first-text (plist-get first-text :text))
+                        :source (plist-get base-info :source)
+                        :value (plist-get base-info :value)
+                        :begin (plist-get base-info :begin)
+                        :end (plist-get base-info :end))
+                  (when (cdr all-texts)
+                    (list :texts all-texts))))))))
 
 (defun zr-erc-display--clear ()
   "Remove this module's overlays in the accessible region."
@@ -246,10 +281,16 @@ never search for a repeated match fragment."
   (when-let* ((result (zr-erc-display--match context)))
     (when-let* ((name (plist-get result :sender)))
       (zr-erc-display--overlay speaker-start speaker-end name (plist-get context :sender)))
-    (when-let* ((text (plist-get result :text))
-                (range (zr-erc-display--locate
-                        result context start end speaker-end reference)))
-      (zr-erc-display--overlay (car range) (cdr range) text))))
+    (let (applied-ranges)
+      (dolist (item (or (plist-get result :texts)
+                        (and (plist-get result :text) (list result))))
+        (when-let* ((range (zr-erc-display--locate
+                            item context start end speaker-end reference)))
+          (unless (cl-some (lambda (r) (and (< (car range) (cdr r))
+                                            (< (car r) (cdr range))))
+                           applied-ranges)
+            (push range applied-ranges)
+            (zr-erc-display--overlay (car range) (cdr range) (plist-get item :text))))))))
 
 (defun zr-erc-display--render-replies ()
   "Render reply references from original contexts, then update wrap widths."

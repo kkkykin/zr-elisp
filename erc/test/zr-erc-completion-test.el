@@ -4,8 +4,8 @@
 (require 'zr-erc-completion)
 
 (defvar zr-erc-completion-test--rules
-  '((:source sender :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2))
-    (:source text :regexp "^<\\(.+\\)-\\([0-9]+\\)/onebot> " :groups (1 2))
+  '((:source sender :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'" :groups (1 2) :break t)
+    (:source text :regexp "^<\\(.+\\)-\\([0-9]+\\)/onebot> " :groups (1 2) :break t)
     (:source text :regexp "^<\\([^>]+\\)> " :groups (1))))
 
 (ert-deftest zr-erc-completion-relay-sender-and-custom-groups ()
@@ -27,6 +27,56 @@
                     '(:tags (("+bridge" . "onebot") ("+name" . "白雪/onebot"))))
                    '("白雪")))
     (should-not (zr-erc-completion--extract '(:tags (("+name" . "白雪/onebot")))))))
+
+(ert-deftest zr-erc-completion-accumulates-rules-in-order ()
+  (let ((zr-erc-completion-rules
+         '((:source (:tag "+display-name"))
+           (:source sender :regexp "\\`\\(.+\\)-\\([0-9]+\\)/onebot\\'"
+            :groups (1 2 1) :break nil)
+           (:source body :regexp "@\\([^ ]+\\)" :groups (1))
+           (:source (:tag "+display-name")))))
+    (string-match "\\(outer\\)" "outer")
+    (let ((before (match-data)))
+      (should (equal (zr-erc-completion--extract
+                      '(:sender "白雪-17225180/onebot" :body "hello @Friend"
+                        :tags (("+display-name" . "雪"))))
+                     '("雪" "白雪" "17225180" "Friend")))
+      (should (equal (match-data) before)))))
+
+(ert-deftest zr-erc-completion-break-keeps-earlier-candidates ()
+  (let ((zr-erc-completion-rules
+         '((:source (:tag "+display-name"))
+           (:source sender :regexp "\\`.+-\\([0-9]+\\)/onebot\\'"
+            :groups (1) :break t)
+           (:source body))))
+    (should (equal (zr-erc-completion--extract
+                    '(:sender "白雪-17225180/onebot" :body "fallback"
+                      :tags (("+display-name" . "雪"))))
+                   '("雪" "17225180")))))
+
+(ert-deftest zr-erc-completion-break-requires-valid-candidates ()
+  (dolist (case '(((:source body :regexp "missing" :break t) (:body "hello"))
+                  ((:source (:tag "+missing") :break t) nil)
+                  ((:match (:sender "^other$") :source body :break t) (:body "name"))
+                  ((:source body :break t) (:body ""))
+                  ((:source body :break t) (:body "   "))
+                  ((:source body :break t) (:body "bad\nname"))
+                  ((:source body :regexp "\\(name\\)?id" :groups (1) :break t)
+                   (:body "id"))))
+    (let ((zr-erc-completion-rules (list (car case) '(:source sender))))
+      (should (equal (zr-erc-completion--extract
+                      (append (cadr case) '(:sender "fallback")))
+                     '("fallback"))))))
+
+(ert-deftest zr-erc-completion-break-on-duplicate-candidates ()
+  (let ((zr-erc-completion-rules
+         '((:source sender)
+           (:source (:tag "+display-name") :break t)
+           (:source body))))
+    (should (equal (zr-erc-completion--extract
+                    '(:sender "白雪" :body "fallback"
+                      :tags (("+display-name" . "白雪"))))
+                   '("白雪")))))
 
 (ert-deftest zr-erc-completion-history-tab-and-isolation ()
   (let ((erc-modules nil))
@@ -65,16 +115,25 @@
 
 (ert-deftest zr-erc-completion-metadata-survives-formatting ()
   (let ((erc-modules nil)
-        (zr-erc-completion-rules zr-erc-completion-test--rules))
+        (zr-erc-completion-rules
+         (cons '(:source (:tag "+display-name")) zr-erc-completion-test--rules)))
     (with-temp-buffer
       (erc-mode)
       (let ((erc-message-parsed
              (make-erc-response :sender "白雪-17225180/onebot!u@h" :command "PRIVMSG"
-                                :contents "hello" :unparsed ":relay PRIVMSG #c :hello")))
+                                :contents "hello"
+                                :unparsed "@+display-name=Sydney :relay PRIVMSG #c :hello")))
         (insert "[↪ someone: quoted message] <白雪-17225180/onebot> hello\n")
         (zr-erc-completion--remember))
       (setq erc-insert-marker (copy-marker (point-max)))
-      (should (equal (zr-erc-completion--candidates) '("白雪" "17225180"))))))
+      (should (equal (zr-erc-completion--candidates) '("Sydney" "白雪" "17225180")))
+      (insert "ERC> ")
+      (setq erc-input-marker (copy-marker (point)))
+      (insert "@Sy")
+      (let ((erc-complete-functions '(zr-erc-completion-at-point)))
+        (erc-tab 1)
+        (should (equal (buffer-substring-no-properties erc-input-marker (point-max))
+                       "@Sydney"))))))
 
 (provide 'zr-erc-completion-test)
 ;;; zr-erc-completion-test.el ends here

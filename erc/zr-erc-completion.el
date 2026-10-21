@@ -10,7 +10,12 @@
 
 (defgroup zr-erc-completion nil "Complete relayed names." :group 'erc)
 (defcustom zr-erc-completion-rules nil
-  "Ordered extraction rules; use the first rule that yields candidates.
+  "Ordered extraction rules; collect candidates from all matching rules.
+Candidates keep rule and capture-group order, with duplicates removed.
+When a rule yields valid candidates, :break non-nil stops further rules
+for that message, even if its candidates duplicate earlier ones.
+The default :break nil continues matching; rules yielding no valid
+candidates never stop matching.
 Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
 body, text, or (:tag TAG)), :regexp, and :groups (capture numbers, default
 \=(0)).  Without :regexp, the entire source is group 0.  For example a
@@ -31,27 +36,31 @@ Only `zr-erc-completion-input-group' is replaced, so @ stays in the input."
   :type 'integer :group 'zr-erc-completion)
 
 (defun zr-erc-completion--extract (context)
-  "Extract candidate names from CONTEXT according to the current rules."
+  "Collect unique candidate names from CONTEXT, respecting each rule's :break."
   (save-match-data
     (let ((case-fold-search nil))
-      (cl-loop
-       for rule in zr-erc-completion-rules
-       for source = (or (plist-get rule :source) 'text)
-       for value = (if (consp source)
-                       (cdr (assoc (cadr source) (plist-get context :tags)))
-                     (plist-get context (intern (concat ":" (symbol-name source)))))
-       when (and value (zr-erc-match-p (plist-get rule :match) context))
-       thereis
-       (let ((regexp (plist-get rule :regexp)))
-         (when (if regexp (string-match regexp value)
-                 (set-match-data (list 0 (length value))) t)
-           (delq nil
-                 (mapcar (lambda (group)
-                           (when-let* ((name (match-string group value))
-                                       ((not (string-blank-p name)))
-                                       ((not (string-match-p "[[:cntrl:]]" name))))
-                             name))
-                         (or (plist-get rule :groups) '(0))))))))))
+      (delete-dups
+       (cl-loop
+        for rule in zr-erc-completion-rules
+        for source = (or (plist-get rule :source) 'text)
+        for value = (if (consp source)
+                        (cdr (assoc (cadr source) (plist-get context :tags)))
+                      (plist-get context (intern (concat ":" (symbol-name source)))))
+        for names =
+        (when (and value (zr-erc-match-p (plist-get rule :match) context))
+          (let ((regexp (plist-get rule :regexp)))
+            (when (if regexp (string-match regexp value)
+                    (set-match-data (list 0 (length value))) t)
+              (delq nil
+                    (mapcar (lambda (group)
+                              (when-let* ((name (match-string group value))
+                                          ((not (string-blank-p name)))
+                                          ((not (string-match-p "[[:cntrl:]]" name))))
+                                name))
+                            (or (plist-get rule :groups) '(0)))))))
+        nconc names into candidates
+        when (and names (plist-get rule :break)) return candidates
+        finally return candidates)))))
 
 (defun zr-erc-completion--remember ()
   "Retain metadata needed for tag/sender-based completion before ERC drops it."
