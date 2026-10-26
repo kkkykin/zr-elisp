@@ -24,6 +24,7 @@
   `(zr-test-with-temp-directory
     (let ((zr-org-srs-x-directory (expand-file-name "srs"))
           (dictionary-default-dictionary nil)
+          (zr-org-srs-x-dictionary-name-function #'zr-org-srs-x-format-dictionary-name)
           (zr-org-srs-x-media-path-function #'identity)
           (zr-org-srs-x-model-alist (default-value 'zr-org-srs-x-model-alist))
           (zr-org-srs-x--server nil)
@@ -115,6 +116,15 @@
               (zr-org-srs-x--object "edict" (url-hexify-string "<div>cat; feline</div>")
                                     "local" (url-hexify-string "<p>ネコ科の動物</p><script>SECRET_SCRIPT</script>"))))))
 
+(defun zr-org-srs-x-test--card-subtree-text (region)
+  "Return the text of heading REGION, including its child subheadings."
+  (buffer-substring-no-properties
+   (car region)
+   (save-excursion
+     (goto-char (car region))
+     (org-end-of-subtree t t)
+     (point))))
+
 (ert-deftest zr-org-srs-x-test-model-templates-and-fallback ()
   (let* ((fields '(("word" . "猫") ("example_sentence" . "A $dictionary \\1 example")
                    ("remarks" . "remark")))
@@ -177,7 +187,7 @@
        (should (equal (org-get-heading t t t t) "猫 ねこ"))
        (cl-multiple-value-bind (front back) (org-srs-item-card-regions)
          (let ((front-text (buffer-substring-no-properties (car front) (cdr front)))
-               (back-text (buffer-substring-no-properties (car back) (cdr back))))
+               (back-text (zr-org-srs-x-test--card-subtree-text back)))
            (should (string-match-p "二行目" front-text))
            (should-not (string-match-p "file:\\|from DICT\\|備考" front-text))
            (should (string-match-p "備考 & メモ" back-text))
@@ -414,7 +424,7 @@
          (should (org-srs-item-exists-p '(card back)))
          (cl-multiple-value-bind (front back) (org-srs-item-card-regions)
            (let ((front-text (buffer-substring-no-properties (car front) (cdr front)))
-                 (back-text (buffer-substring-no-properties (car back) (cdr back))))
+                 (back-text (zr-org-srs-x-test--card-subtree-text back)))
              (should (string-match-p "猫.*\n" front-text))
              (should (string-match-p "二行目" front-text))
              (should-not (string-match-p "備考 & メモ\\|from DICT" front-text))
@@ -424,8 +434,10 @@
              (should-not (string-match-p "SECRET_SCRIPT\\|cat; feline\\|ネコ科" (buffer-string)))
              (if (not (equal deck "日本語"))
                  (progn (should (string-match-p "cat from DICT" back-text))
+                        (should (string-match-p "^\\*\\*\\* \\[edict\\]$" back-text))
                         (should-not (string-match-p "猫の定義" back-text)))
                (should (string-match-p "猫の定義 from DICT" back-text))
+               (should (string-match-p "^\\*\\*\\* \\[local\\]$" back-text))
                (should-not (string-match-p "cat from DICT" back-text)))))
          (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json"
                                                     zr-org-srs-x-directory))))))
@@ -457,9 +469,104 @@
     (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
     (should (member "define * \"猫\"" dictionary-commands))
     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
-      (should (string-match-p "英和辞典.*\ncat from DICT" (buffer-string)))
-      (should (string-match-p "国語辞典.*\n猫の定義 from DICT" (buffer-string)))
+      (should (string-match-p "^\\*\\*\\* \\[edict\\]\ncat from DICT" (buffer-string)))
+      (should (string-match-p "^\\*\\*\\* \\[local\\]\n猫の定義 from DICT" (buffer-string)))
+      (should-not (string-match-p "英和辞典\\|国語辞典" (buffer-string)))
       (should-not (string-match-p "cat; feline\\|ネコ科" (buffer-string)))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-headings-group-definitions-and-preserve-card-regions ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (zr-org-srs-x-test--with-dictionary
+    (setq dictionary-response-function
+          (lambda (_command)
+            (concat "150 3 definitions\r\n"
+                    "151 \"hamlet\" dictd-db-eng-zho \"English-中文 FreeDict+WikDict ver. 2025.11.23\"\r\n"
+                    "hamlet //ˈhæm.lət//\r\n村\r\nA small village or a group of houses.\r\n.\r\n"
+                    "151 \"hamlet\" dict-db-wordnet-542 \"WordNet (r) 2.1 (2005)\"\r\n"
+                    "hamlet\r\n    n 1: a community of people smaller than a village\r\n.\r\n"
+                    "151 \"hamlet\" dictd-db-eng-zho \"English-中文 FreeDict+WikDict ver. 2025.11.23\"\r\n"
+                    "Another definition.\r\n* raw heading\r\n*** [dictd-db-eng-zho]\r\n"
+                    "#+begin_src emacs-lisp\r\n:END:\r\n.\r\n250 ok\r\n")))
+    (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "hamlet")))
+   (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+     (let (headings)
+       (org-map-entries (lambda () (push (cons (org-outline-level) (org-get-heading t)) headings)) nil 'file)
+       (should (equal (nreverse headings)
+                      '((1 . "hamlet") (2 . "Front") (2 . "Back")
+                        (3 . "[dictd-db-eng-zho]") (3 . "[dict-db-wordnet-542]")))))
+     (goto-char (point-min))
+     (re-search-forward "^\\* ")
+     (org-back-to-heading)
+     (cl-multiple-value-bind (front back) (org-srs-item-card-regions)
+       (let ((front-text (buffer-substring-no-properties (car front) (cdr front)))
+             (back-text (zr-org-srs-x-test--card-subtree-text back)))
+         (should-not (string-match-p "dictd-db-eng-zho\\|Another definition" front-text))
+         (should (string-match-p "hamlet //ˈhæm.lət//\n村" back-text))
+         (should (string-match-p (regexp-quote "A small village or a group of houses.\n\nAnother definition.")
+                                 back-text))
+         (should (string-match-p "^,\\* raw heading" back-text))
+         (should (string-match-p "^,\\*\\*\\* \\[dictd-db-eng-zho\\]" back-text))
+         (should (string-match-p "^,#\\+begin_src" back-text))
+         (should (string-match-p "^,:END:" back-text))
+         (should (string-match-p "n 1: a community" back-text))
+         (should-not (string-match-p "FreeDict\\|WikDict\\|WordNet (r)" back-text))))
+     (let ((definition (save-excursion
+                         (search-forward "A small village")
+                         (point))))
+       (org-srs-item-card-hide :back)
+       (should (invisible-p definition))
+       (org-srs-item-card-show)
+       (should-not (invisible-p definition)))
+     (should (= (length (org-srs-query-buffer (org-srs-query-predicate-new))) 1))
+     (should (equal (org-element-map (org-element-parse-buffer) 'node-property
+                      (lambda (property) (org-element-property :key property)))
+                    '("ID")))
+     ;; Generated headings and escaped source lines must survive saving.
+     (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                    (with-temp-buffer
+                      (insert-file-contents (zr-org-srs-x--deck-file "lunadeck"))
+                      (buffer-string)))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-names-handle-unknown-and-custom-function ()
+  (zr-org-srs-x-test--require-srs)
+  (dolist (custom '(nil t))
+    (zr-org-srs-x-test--with-decks
+     (zr-org-srs-x-test--create-model)
+     (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+     (let* ((names nil)
+            (zr-org-srs-x-dictionary-name-function
+             (if custom
+                 (lambda (name id)
+                   (should (equal buffer-file-name (zr-org-srs-x--deck-file "lunadeck")))
+                   (push (cons name id) names)
+                   (format "%s [%s]" name id))
+               #'zr-org-srs-x-format-dictionary-name)))
+       (zr-org-srs-x-test--with-dictionary
+        (setq dictionary-response-function
+              (lambda (_command)
+                (concat "150 4 definitions\r\n"
+                        "151 \"word\" unknown \"甲词典\"\r\nAlpha definition.\r\n.\r\n"
+                        "151 \"word\" known \"Known Dictionary\"\r\nKnown definition.\r\n.\r\n"
+                        "151 \"word\" unknown \"乙词典\"\r\nBeta definition.\r\n.\r\n"
+                        "151 \"word\" unknown \"甲词典\"\r\nMore alpha.\r\n.\r\n250 ok\r\n")))
+        (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "word")))
+       (when custom
+         (should (equal (nreverse names)
+                        '(("甲词典" . "unknown") ("Known Dictionary" . "known")
+                          ("乙词典" . "unknown") ("甲词典" . "unknown")))))
+       (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+         (let (headings)
+           (org-map-entries (lambda () (push (org-get-heading t) headings)) "LEVEL=3" 'file)
+           (should (equal (nreverse headings)
+                          (if custom
+                              '("甲词典 [unknown]" "Known Dictionary [known]" "乙词典 [unknown]")
+                            '("甲词典" "[known]" "乙词典")))))
+         (should (string-match-p (regexp-quote "Alpha definition.\n\nMore alpha.") (buffer-string)))
+         (should (string-match-p "Known definition" (buffer-string)))
+         (should (string-match-p "Beta definition" (buffer-string))))))))
 
 (ert-deftest zr-org-srs-x-test-media-import-with-client-path-mapping ()
   (zr-org-srs-x-test--require-srs)
@@ -824,7 +931,7 @@
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
    (let ((note (zr-org-srs-x-test--note "lunadeck")))
-     (puthash "remarks" "<p>* new heading</p><p>#+begin_src emacs-lisp</p><p>:END:</p>"
+     (puthash "remarks" "<p>* new heading</p><p>*** [edict]</p><p>#+begin_src emacs-lisp</p><p>:END:</p>"
               (gethash "fields" note))
      (zr-org-srs-x-test--call "addNote" "note" note))
    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
@@ -832,6 +939,7 @@
        (org-map-entries (lambda () (push (org-get-heading t t t t) headings)) nil 'file)
        (should (equal (nreverse headings) '("猫" "Front" "Back"))))
      (should (string-match-p ",#\\+begin_src" (buffer-string)))
+     (should (string-match-p "^,\\*\\*\\* \\[edict\\]" (buffer-string)))
      (should (string-match-p ",:END:" (buffer-string))))))
 
 (defun zr-org-srs-x-test--http (parts)

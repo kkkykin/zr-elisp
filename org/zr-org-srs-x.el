@@ -71,6 +71,20 @@ The Anki deck A::B corresponds to A/B.org in this directory."
   "Maximum seconds spent looking up a card's word through dictionary.el."
   :type 'number)
 
+(defun zr-org-srs-x-format-dictionary-name (name id)
+  "Format dictionary NAME and ID as a card heading.
+Prefer [ID], falling back to NAME when ID is unknown."
+  (if (string-equal-ignore-case id "unknown")
+      name
+    (concat "[" id "]")))
+
+(defcustom zr-org-srs-x-dictionary-name-function #'zr-org-srs-x-format-dictionary-name
+  "Function formatting dictionary headings from (NAME ID).
+NAME is the decoded full description; ID is the DICT database identifier.
+Return nonempty, single-line Org heading text without leading stars.
+Definitions with the same resulting heading are grouped together."
+  :type 'function)
+
 (defcustom zr-org-srs-x-media-path-function #'identity
   "Function translating a client's media path to an Emacs-readable path.
 For example, customize this when LunaTranslator runs on Windows and
@@ -282,8 +296,11 @@ up the buffer even when connecting fails or times out."
 
 (defun zr-org-srs-x--dictionary-text (word)
   "Look up WORD with dictionary.el in the current deck's configuration.
-Return all definitions as Org text.  Use a separate connection so capture
-does not consume replies belonging to an interactive Dictionary buffer."
+Return definitions grouped under level-three dictionary headings.
+Format names with `zr-org-srs-x-dictionary-name-function'.
+Mark generated headings so card escaping preserves them.  Use a separate
+connection so capture does not consume replies belonging to an interactive
+Dictionary buffer."
   (require 'dictionary)
   (if (or (null dictionary-default-dictionary) (string-blank-p word))
       ""
@@ -312,13 +329,24 @@ does not consume replies belonging to an interactive Dictionary buffer."
                        (let* ((parts (dictionary-reply-list reply))
                               (database (nth 2 parts))
                               (description (dictionary-decode-charset (nth 3 parts) database))
+                              (name (zr-org-srs-x--string
+                                     (funcall zr-org-srs-x-dictionary-name-function description database)))
                               (text (string-trim
                                      (dictionary-decode-charset (dictionary-read-answer) database))))
-                         (push (concat "*" description " [" database "]*\n" text) definitions))
+                         (when (or (string-blank-p name) (string-match-p "[\r\n]" name))
+                           (error "Dictionary name must be nonempty and on one line"))
+                         (if-let* ((entry (assoc name definitions)))
+                             (push text (cdr entry))
+                           (push (list name text) definitions)))
                        (setq reply (dictionary-read-reply-and-split)))
                      (unless (dictionary-check-reply reply 250)
                        (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
-                     (string-join (nreverse definitions) "\n\n")))
+                     (mapconcat
+                      (lambda (entry)
+                        (concat (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
+                                (car entry) "\n"
+                                (string-join (nreverse (cdr entry)) "\n\n")))
+                      (nreverse definitions) "\n\n")))
                  t)
                 ""))
         (dictionary-connection-close dictionary-connection)))))
@@ -433,9 +461,16 @@ Return an alist of audio/picture/video Org links for card templates."
     (nreverse variables)))
 
 (defun zr-org-srs-x--body (text)
-  "Escape structural Org lines in card TEXT, preserving card subheadings."
+  "Escape structural Org lines in card TEXT, preserving dictionary headings."
   (replace-regexp-in-string
-   "^\\([ \t]*\\)\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:[ \t]*$\\)" "\\1,\\2" text))
+   "^\\([ \t]*\\)\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:[ \t]*$\\)"
+   (lambda (line)
+     (save-match-data
+       (let ((start (string-match "[^ \t]" line)))
+         (if (get-text-property start 'zr-org-srs-x--dictionary-heading line)
+             line
+           (concat (substring line 0 start) "," (substring line start))))))
+   text t t))
 
 (defun zr-org-srs-x--note-id ()
   "Return the current entry's canonical positive integer ID, or nil."

@@ -62,7 +62,31 @@ HTML 转成 Org 文本和链接，脚本、样式不参与正文。
 
 LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
 不解析、不保存。制卡时用 Emacs 自带的 `dictionary.el` 查询单词，将返回的
-全部释义追加到背面，保留词典名称。没有命中时仍保存单词、翻译和其他内容。
+全部释义追加到背面。每个词典默认使用 `*** [数据库 id]` 子标题，
+id 为 `unknown` 时使用完整词典名；多个词典分别分段，同一显示名称的多条释义放在同一子标题下。
+没有命中时仍保存单词、翻译和其他内容。
+
+```org
+** Back
+一个小村庄
+
+*** [dictd-db-eng-zho]
+hamlet
+村
+A small village or a group of houses.
+
+*** [dict-db-wordnet-542]
+hamlet
+    n 1: a community of people smaller than a village
+```
+
+可通过 `zr-org-srs-x-dictionary-name-function` 自定义标题。
+函数接收完整词典名和数据库 id，返回不含开头星号的单行标题文字。例如始终显示完整名称和 id：
+
+```elisp
+(setq zr-org-srs-x-dictionary-name-function
+      (lambda (name id) (format "%s [%s]" name id)))
+```
 
 服务地址和端口使用现有的 `dictionary-server`、`dictionary-port` 配置，例如：
 
