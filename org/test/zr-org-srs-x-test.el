@@ -9,6 +9,8 @@
 (require 'zr-test-helpers)
 (require 'zr-org-srs-x)
 
+(defvar dictionary-current-server)
+
 (defun zr-org-srs-x-test--require-srs ()
   "Load the installed Org-srs and FSRS packages without personal init files."
   (let* ((elpa (expand-file-name "elpa" user-emacs-directory))
@@ -23,7 +25,7 @@
   (declare (indent 0) (debug t))
   `(zr-test-with-temp-directory
     (let ((zr-org-srs-x-directory (expand-file-name "srs"))
-          (dictionary-default-dictionary nil)
+          (zr-org-srs-x-dictionaries nil)
           (zr-org-srs-x-dictionary-name-function #'zr-org-srs-x-format-dictionary-name)
           (zr-org-srs-x-media-path-function #'identity)
           (zr-org-srs-x-model-alist (default-value 'zr-org-srs-x-model-alist))
@@ -50,6 +52,7 @@
           (dictionary-server "127.0.0.1")
           (dictionary-use-http-proxy nil)
           (dictionary-default-dictionary "*")
+          (zr-org-srs-x-dictionaries '("*" similar))
           (zr-org-srs-x-dictionary-timeout 1)
           (server
            (make-network-process
@@ -80,6 +83,15 @@
        (delete-process server)
        (dolist (client dictionary-clients)
          (when (process-live-p client) (delete-process client))))))
+
+(defun zr-org-srs-x-test--dict-definition (database text)
+  "Return a DICT definition response for DATABASE containing TEXT."
+  (format "150 1 definition\r\n151 \"word\" %s \"Dictionary %s\"\r\n%s\r\n.\r\n250 ok\r\n"
+          database database text))
+
+(defun zr-org-srs-x-test--dict-queries (commands)
+  "Return recorded COMMANDS in sending order, excluding client identification."
+  (reverse (cl-remove-if (lambda (command) (string-prefix-p "client " command)) commands)))
 
 (defun zr-org-srs-x-test--call (action &rest pairs)
   "Invoke ACTION with parameter PAIRS, returning its successful result."
@@ -316,29 +328,29 @@
    (make-directory zr-org-srs-x-directory t)
    (let ((file (zr-org-srs-x--deck-file "英語"))
          (safe-local-variable-values
-          (cons '(dictionary-default-dictionary . "dictd-db-eng-zho")
+          (cons '(zr-org-srs-x-dictionaries . ((dictd-db-eng-zho "gcide") similar))
                 safe-local-variable-values)))
      (with-temp-file file
-       (insert "# -*- mode: text; dictionary-default-dictionary: \"dictd-db-eng-zho\"; -*-\n"
+       (insert "# -*- mode: text; zr-org-srs-x-dictionaries: ((dictd-db-eng-zho \"gcide\") similar); -*-\n"
                "#+title: 英語\n"))
      (with-current-buffer (zr-org-srs-x--buffer file)
        (should (derived-mode-p 'org-mode))
-       (should (local-variable-p 'dictionary-default-dictionary))
-       (should (equal dictionary-default-dictionary "dictd-db-eng-zho"))
+       (should (local-variable-p 'zr-org-srs-x-dictionaries))
+       (should (equal zr-org-srs-x-dictionaries '((dictd-db-eng-zho "gcide") similar)))
        ;; Reusing a visited deck must keep its current buffer-local settings.
-       (setq-local dictionary-default-dictionary nil)
+       (setq-local zr-org-srs-x-dictionaries nil)
        (should (eq (zr-org-srs-x--buffer file) (current-buffer)))
-       (should-not dictionary-default-dictionary)))))
+       (should-not zr-org-srs-x-dictionaries)))))
 
 (ert-deftest zr-org-srs-x-test-directory-locals-and-file-override ()
   (zr-org-srs-x-test--with-decks
    (make-directory zr-org-srs-x-directory t)
    (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
-     (insert "((org-mode . ((dictionary-default-dictionary . \"dictd-db-eng-zho\"))))\n"))
+     (insert "((org-mode . ((zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) similar)))))\n"))
    (let ((safe-local-variable-values
-          (append '((dictionary-default-dictionary . "dictd-db-eng-zho")
-                    (dictionary-default-dictionary . "gcide")
-                    (dictionary-default-dictionary . nil))
+          (append '((zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) similar))
+                    (zr-org-srs-x-dictionaries . ("gcide"))
+                    (zr-org-srs-x-dictionaries . nil))
                   safe-local-variable-values)))
      ;; Include a new deck and a deck whose automatic mode is not Org.
      (dolist (deck '("new" "existing" "fallback" "override" "disabled"))
@@ -349,42 +361,42 @@
            (with-temp-file file
              (insert
               (pcase deck
-                ("override" "# -*- dictionary-default-dictionary: \"gcide\"; -*-\n")
-                ("disabled" "# -*- dictionary-default-dictionary: nil; -*-\n")
+                ("override" "# -*- zr-org-srs-x-dictionaries: (\"gcide\"); -*-\n")
+                ("disabled" "# -*- zr-org-srs-x-dictionaries: nil; -*-\n")
                 (_ ""))
               "#+title: 英語\n")))
          (with-current-buffer (zr-org-srs-x--buffer file (equal deck "new"))
            (should (derived-mode-p 'org-mode))
-           (should (local-variable-p 'dictionary-default-dictionary))
-           (should (equal dictionary-default-dictionary
+           (should (local-variable-p 'zr-org-srs-x-dictionaries))
+           (should (equal zr-org-srs-x-dictionaries
                           (pcase deck
-                            ("override" "gcide")
+                            ("override" '("gcide"))
                             ("disabled" nil)
-                            (_ "dictd-db-eng-zho"))))))))
-   (should-not dictionary-default-dictionary)))
+                            (_ '((dictd-db-eng-zho gcide) similar)))))))))
+   (should-not zr-org-srs-x-dictionaries)))
 
-(ert-deftest zr-org-srs-x-test-file-local-dictionary-requires-string ()
+(ert-deftest zr-org-srs-x-test-file-local-dictionaries-require-stage-list ()
   (zr-org-srs-x-test--with-decks
    (make-directory zr-org-srs-x-directory t)
    (let ((file (zr-org-srs-x--deck-file "英語"))
          (safe-local-variable-values
-          (cons '(dictionary-default-dictionary . dictd-db-eng-zho)
+          (cons '(zr-org-srs-x-dictionaries . dictd-db-eng-zho)
                 safe-local-variable-values)))
      (with-temp-file file
-       (insert "# -*- dictionary-default-dictionary: dictd-db-eng-zho; -*-\n"))
+       (insert "# -*- zr-org-srs-x-dictionaries: dictd-db-eng-zho; -*-\n"))
      (with-current-buffer (zr-org-srs-x--buffer file)
-       (should (eq dictionary-default-dictionary 'dictd-db-eng-zho))
+       (should (eq zr-org-srs-x-dictionaries 'dictd-db-eng-zho))
        (let ((err (should-error (zr-org-srs-x--dictionary-text "hello"))))
-         (should (string-match-p "dictd-db-eng-zho.*DICT database name string"
+         (should (string-match-p "Expected a list of dictionary search stages"
                                  (error-message-string err))))))))
 
-(ert-deftest zr-org-srs-x-test-real-card-and-dictionary-default-by-file-and-directory ()
+(ert-deftest zr-org-srs-x-test-real-card-and-dictionaries-by-file-and-directory ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (make-directory zr-org-srs-x-directory t)
    (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
-     (insert "((org-mode . ((dictionary-default-dictionary . \"edict\"))))\n"))
+     (insert "((org-mode . ((zr-org-srs-x-dictionaries . (edict)))))\n"))
    (zr-org-srs-x-test--call "createDeck" "deck" "英語")
    (zr-org-srs-x-test--call "createDeck" "deck" "日本語")
    (zr-org-srs-x-test--call "createDeck" "deck" "英語::directory")
@@ -394,8 +406,8 @@
        (with-current-buffer (zr-org-srs-x--buffer file)
          (unless (equal deck "英語::directory")
            (goto-char (point-min))
-           (insert (format "# -*- dictionary-default-dictionary: %S; -*-\n"
-                           (if (equal deck "英語") "edict" "local")))
+           (insert (format "# -*- zr-org-srs-x-dictionaries: %S; -*-\n"
+                           (if (equal deck "英語") '(edict) '("local"))))
            (zr-org-srs-x--save))
          (kill-buffer (current-buffer)))))
    (zr-org-srs-x-test--with-dictionary
@@ -407,8 +419,8 @@
     (dolist (deck '("英語" "日本語" "英語::directory"))
      (let* ((note (zr-org-srs-x-test--note deck))
             (safe-local-variable-values
-             (append '((dictionary-default-dictionary . "edict")
-                       (dictionary-default-dictionary . "local"))
+             (append '((zr-org-srs-x-dictionaries . (edict))
+                       (zr-org-srs-x-dictionaries . ("local")))
                      safe-local-variable-values))
             (id (zr-org-srs-x-test--call "addNote" "note" note))
             (file (zr-org-srs-x--deck-file deck)))
@@ -443,7 +455,7 @@
                                                     zr-org-srs-x-directory))))))
     (should (member "define edict \"猫\"" dictionary-commands))
     (should (member "define local \"猫\"" dictionary-commands))
-    (should (equal dictionary-default-dictionary "*")))))
+    (should (equal zr-org-srs-x-dictionaries '("*" similar))))))
 
 (ert-deftest zr-org-srs-x-test-nil-dictionary-disables-lookup ()
   (zr-org-srs-x-test--require-srs)
@@ -451,7 +463,7 @@
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
-     (setq-local dictionary-default-dictionary nil))
+     (setq-local zr-org-srs-x-dictionaries nil))
    (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
      (should-not (string-match-p "cat; feline\\|ネコ科\\|英和辞典\\|国語辞典" (buffer-string)))
@@ -468,6 +480,7 @@
    (zr-org-srs-x-test--with-dictionary
     (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
     (should (member "define * \"猫\"" dictionary-commands))
+    (should-not (cl-some (lambda (command) (string-prefix-p "match " command)) dictionary-commands))
     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
       (should (string-match-p "^\\*\\*\\* \\[edict\\]\ncat from DICT" (buffer-string)))
       (should (string-match-p "^\\*\\*\\* \\[local\\]\n猫の定義 from DICT" (buffer-string)))
@@ -760,41 +773,300 @@
          (should (= (length (org-srs-query-buffer (org-srs-query-predicate-new))) 1)))
        (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))))))
 
+(ert-deftest zr-org-srs-x-test-dictionary-first-match-fills-back-without-changing-word ()
+  (zr-org-srs-x-test--require-srs)
+  (dolist (database '("dictd-db-eng-zho" "*" "!"))
+    (zr-org-srs-x-test--with-decks
+     (zr-org-srs-x-test--create-model)
+     (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+     (zr-org-srs-x-test--with-dictionary
+      (let ((zr-org-srs-x-dictionaries (list database 'similar)))
+        (setq dictionary-response-function
+              (lambda (command)
+                (cond
+                 ((equal command (format "define %s \"reserved\"" database)) "552 no match\r\n")
+                 ((equal command (format "match %s . \"reserved\"" database))
+                  (concat "152 3 matches\r\n"
+                          "dictd-db-eng-zho \"reserve\"\r\n"
+                          "dictd-db-eng-zho \"reservation\"\r\n"
+                          "other \"reserved word\"\r\n.\r\n250 ok\r\n"))
+                 ((equal command "define dictd-db-eng-zho \"reserve\"")
+                  (concat "150 1 definition\r\n151 \"reserve\" dictd-db-eng-zho \"English-中文\"\r\n"
+                          "reserve\r\n保留；储备\r\n.\r\n250 ok\r\n"))
+                 (t "500 unexpected command\r\n"))))
+        (let* ((window (selected-window))
+               (visible-buffer (window-buffer window))
+               (id (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "reserved"))))
+          (should (eq (selected-window) window))
+          (should (eq (window-buffer window) visible-buffer))
+          (should (equal (reverse (cl-remove-if
+                                   (lambda (command) (string-prefix-p "client " command)) dictionary-commands))
+                         (list (format "define %s \"reserved\"" database)
+                               (format "match %s . \"reserved\"" database)
+                               "define dictd-db-eng-zho \"reserve\"")))
+          (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"lunadeck\" w:\"reserved\"")
+                         (vector id)))
+          (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+            (goto-char (point-min))
+            (re-search-forward "^\\* ")
+            (org-back-to-heading)
+            (should (equal (org-get-heading t) "reserved"))
+            (cl-multiple-value-bind (front back) (org-srs-item-card-regions)
+              (should (string-match-p "^reserved$" (zr-org-srs-x-test--card-subtree-text front)))
+              (should (string-match-p "^\\*\\*\\* \\[dictd-db-eng-zho\\]\nreserve\n保留；储备"
+                                      (zr-org-srs-x-test--card-subtree-text back)))))))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-first-match-miss-does-not-try-other-candidates ()
+  (zr-org-srs-x-test--with-dictionary
+   (setq dictionary-response-function
+         (lambda (command)
+           (if (string-prefix-p "match " command)
+               "152 2 matches\r\nedict \"reserve\"\r\nedict \"reservation\"\r\n.\r\n250 ok\r\n"
+             "552 no match\r\n")))
+   (let ((before (buffer-string)))
+     (should (equal (zr-org-srs-x--dictionary-text "reserved") ""))
+     (should (equal before (buffer-string))))
+   (should (equal (reverse (cl-remove-if
+                           (lambda (command) (string-prefix-p "client " command)) dictionary-commands))
+                  '("define * \"reserved\"" "match * . \"reserved\"" "define edict \"reserve\"")))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-first-match-unescapes-quoted-words ()
+  (zr-org-srs-x-test--with-dictionary
+   (setq dictionary-response-function
+         (lambda (command)
+           (cond
+            ((equal command "define * \"missing\"") "552 no match\r\n")
+            ((equal command "match * . \"missing\"")
+             "152 1 match\r\nedict \"a\\\"b\\\\c\"\r\n.\r\n250 ok\r\n")
+            ((equal command "define edict \"a\\\"b\\\\c\"")
+             "150 1 definition\r\n151 \"word\" edict \"English\"\r\nquoted candidate\r\n.\r\n250 ok\r\n")
+            (t "500 unexpected command\r\n"))))
+   (should (equal (zr-org-srs-x--dictionary-text "missing") "*** [edict]\nquoted candidate"))
+   (should (member "define edict \"a\\\"b\\\\c\"" dictionary-commands))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-matching-errors-clean-connection ()
+  (zr-org-srs-x-test--with-dictionary
+   (let ((zr-org-srs-x-dictionary-timeout 0.1)
+         (before (buffer-list)))
+     (dolist (response '(nil "152 1 match\r\nedict \"reserve\"\r\n.\r\n500 error\r\n"))
+       (setq dictionary-response-function
+             (lambda (command)
+               (if (string-prefix-p "match " command) response "552 no match\r\n")))
+       (should-error (zr-org-srs-x--dictionary-text "reserved"))
+       (accept-process-output nil 0.02)
+       (should-not (cl-set-difference (buffer-list) before))
+       (should-not (cl-some #'process-live-p dictionary-clients))))))
+
 (ert-deftest zr-org-srs-x-test-dictionary-missing-word-and-quoted-word ()
   (zr-org-srs-x-test--with-dictionary
    (setq dictionary-response-function (lambda (_command) "552 no match\r\n"))
    (should (equal (zr-org-srs-x--dictionary-text "a\"b\\c") ""))
    (should (member "define * \"a\\\"b\\\\c\"" dictionary-commands))
-   (should-not (cl-some (lambda (command) (string-prefix-p "match " command))
-                        dictionary-commands))
+   (should (member "match * . \"a\\\"b\\\\c\"" dictionary-commands))
    (accept-process-output nil 0.02)
    (should-not (cl-some #'process-live-p dictionary-clients))
    (let ((before (length dictionary-commands)))
      (should-error (zr-org-srs-x--dictionary-text "word\r\nQUIT"))
-     (let ((dictionary-default-dictionary "bad database"))
+     (let ((zr-org-srs-x-dictionaries '("bad database")))
        (should-error (zr-org-srs-x--dictionary-text "word")))
      (should (= before (length dictionary-commands))))))
 
-(ert-deftest zr-org-srs-x-test-dictionary-keeps-interactive-connection-and-window ()
+(ert-deftest zr-org-srs-x-test-dictionary-group-collects-all-hits-before-stopping ()
+  (dolist (hits '(((dict1 . "Alpha") (dict2 . "Beta"))
+                  ((dict1 . "Alpha"))
+                  ((dict2 . "Beta"))))
+    (zr-org-srs-x-test--with-dictionary
+     (let ((zr-org-srs-x-dictionaries '((dict1 "dict2") dict3 similar))
+           (dictionary-default-dictionary "interactive"))
+       (setq dictionary-response-function
+             (lambda (command)
+               (if-let* ((database (cond ((equal command "define dict1 \"hamlet\"") 'dict1)
+                                        ((equal command "define dict2 \"hamlet\"") 'dict2)))
+                         (text (alist-get database hits)))
+                   (zr-org-srs-x-test--dict-definition database text)
+                 "552 no match\r\n")))
+       (should (equal (zr-org-srs-x--dictionary-text "hamlet")
+                      (mapconcat (lambda (entry) (format "*** [%s]\n%s" (car entry) (cdr entry)))
+                                 hits "\n\n")))
+       (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                      '("define dict1 \"hamlet\"" "define dict2 \"hamlet\"")))
+       (should (equal dictionary-default-dictionary "interactive"))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-group-merges-custom-headings-across-queries ()
   (zr-org-srs-x-test--with-dictionary
-   (let* ((dictionary-connection (dictionary-connection-open dictionary-server dictionary-port))
-          (interactive-connection dictionary-connection)
-          (dictionary-current-server "interactive")
-          (window (selected-window))
-          (visible-buffer (window-buffer window))
-          (before (buffer-list)))
-     (unwind-protect
-         (with-temp-buffer
-           (insert "Keep deck text")
-           (should (string-match-p "cat from DICT" (zr-org-srs-x--dictionary-text "猫")))
-           (should (equal (buffer-string) "Keep deck text"))
-           (should (eq dictionary-connection interactive-connection))
-           (should (eq (dictionary-connection-status interactive-connection) 'up))
-           (should (equal dictionary-current-server "interactive"))
-           (should (eq (selected-window) window))
-           (should (eq (window-buffer window) visible-buffer)))
-       (dictionary-connection-close interactive-connection))
-     (should-not (cl-set-difference (buffer-list) before)))))
+   (let ((zr-org-srs-x-dictionaries '((dict1 dict2)))
+         (zr-org-srs-x-dictionary-name-function (lambda (_name _id) "Combined")))
+     (setq dictionary-response-function
+           (lambda (command)
+             (if (equal command "define dict1 \"hamlet\"")
+                 (concat "150 2 definitions\r\n"
+                         "151 \"hamlet\" dict1 \"First\"\r\nAlpha\r\n.\r\n"
+                         "151 \"hamlet\" dict1 \"First\"\r\nMore alpha\r\n.\r\n250 ok\r\n")
+               (zr-org-srs-x-test--dict-definition "dict2" "Beta"))))
+     (should (equal (zr-org-srs-x--dictionary-text "hamlet")
+                    "*** Combined\nAlpha\n\nMore alpha\n\nBeta")))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-empty-group-falls-back-before-similar ()
+  (zr-org-srs-x-test--with-dictionary
+   (let ((zr-org-srs-x-dictionaries '((dict1 dict2) dict3 similar)))
+     (setq dictionary-response-function
+           (lambda (command)
+             (if (equal command "define dict3 \"reserved\"")
+                 (zr-org-srs-x-test--dict-definition "dict3" "Gamma")
+               "552 no match\r\n")))
+     (should (equal (zr-org-srs-x--dictionary-text "reserved") "*** [dict3]\nGamma"))
+     (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                    '("define dict1 \"reserved\"" "define dict2 \"reserved\"" "define dict3 \"reserved\""))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-similar-retries-groups-in-order ()
+  (dolist (hits '(((dict1 . "Alpha") (dict2 . "Beta"))
+                  ((dict2 . "Beta"))
+                  ((dict3 . "Gamma"))
+                  nil))
+    (zr-org-srs-x-test--with-dictionary
+     (let ((zr-org-srs-x-dictionaries '((dict1 dict2) "dict3" similar)))
+       (setq dictionary-response-function
+             (lambda (command)
+               (cond
+                ((string-match "\\`match \\(dict[123]\\) \\. \"reserved\"\\'" command)
+                 (let ((database (match-string 1 command)))
+                   (format "152 2 matches\r\n%s \"reserve\"\r\n%s \"reservation\"\r\n.\r\n250 ok\r\n"
+                           database database)))
+                ((string-match "\\`define \\(dict[123]\\) \"reserve\"\\'" command)
+                 (let ((database (intern (match-string 1 command))))
+                   (if-let* ((text (alist-get database hits)))
+                       (zr-org-srs-x-test--dict-definition database text)
+                     "552 no match\r\n")))
+                (t "552 no match\r\n"))))
+       (should (equal (zr-org-srs-x--dictionary-text "reserved")
+                      (mapconcat (lambda (entry) (format "*** [%s]\n%s" (car entry) (cdr entry)))
+                                 hits "\n\n")))
+       (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                      (append '("define dict1 \"reserved\"" "define dict2 \"reserved\"" "define dict3 \"reserved\""
+                                "match dict1 . \"reserved\"" "define dict1 \"reserve\""
+                                "match dict2 . \"reserved\"" "define dict2 \"reserve\"")
+                              (unless (or (assq 'dict1 hits) (assq 'dict2 hits))
+                                '("match dict3 . \"reserved\"" "define dict3 \"reserve\"")))))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-similar-is-optional-and-nil-disables-lookup ()
+  (zr-org-srs-x-test--with-dictionary
+   (setq dictionary-response-function (lambda (_command) "552 no match\r\n"))
+   (let ((zr-org-srs-x-dictionaries '((dict1 dict2) dict3)))
+     (should (equal (zr-org-srs-x--dictionary-text "reserved") "")))
+   (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                  '("define dict1 \"reserved\"" "define dict2 \"reserved\"" "define dict3 \"reserved\"")))
+   (let ((before (length dictionary-clients)))
+     (let ((zr-org-srs-x-dictionaries nil))
+       (should (equal (zr-org-srs-x--dictionary-text "reserved") "")))
+     (should (equal (zr-org-srs-x--dictionary-text " \t") ""))
+     (should (= before (length dictionary-clients))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-invalid-stages-fail-before-connect ()
+  (zr-org-srs-x-test--with-dictionary
+   (dolist (zr-org-srs-x-dictionaries '(dict1 "dict1" (dict1 . dict2) (nil)
+                                      ((dict1 . dict2)) ((dict1 (dict2)))
+                                      (similar) (dict1 similar dict2) (dict1 similar similar)
+                                      ((dict1 similar)) (dict1 123) ("") ("bad database")
+                                      ("dict1\r\nQUIT") ("dict\\1") ("dict\"1")))
+     (should-error (zr-org-srs-x--dictionary-text "reserved")))
+   (should-not dictionary-commands)
+   (should-not dictionary-clients)))
+
+(ert-deftest zr-org-srs-x-test-dictionary-keeps-interactive-connection-and-window ()
+  (dolist (dictionary-use-single-buffer '(nil t))
+    (zr-org-srs-x-test--with-dictionary
+     (let ((dictionary-connection nil)
+           (dictionary-current-server nil)
+           (dictionary-display-definition-function nil)
+           (before (buffer-list)))
+       (save-window-excursion
+         (unwind-protect
+             (progn
+               (dictionary-search "interactive" "*")
+               (let* ((interactive-buffer (current-buffer))
+                      (interactive-connection dictionary-connection)
+                      (text (buffer-string))
+                      (position (point))
+                      (history (copy-tree dictionary-data-stack))
+                      (connection-buffer (dictionary-connection-buffer dictionary-connection))
+                      (connection-text (with-current-buffer connection-buffer (buffer-string)))
+                      (read-point (dictionary-connection-read-point dictionary-connection))
+                      (window (selected-window))
+                      (before-capture (buffer-list)))
+                 (should (derived-mode-p 'dictionary-mode))
+                 (with-temp-buffer
+                   (insert "Keep deck text")
+                   (should (string-match-p "cat from DICT" (zr-org-srs-x--dictionary-text "猫")))
+                   (should (equal (buffer-string) "Keep deck text")))
+                 (should (eq (current-buffer) interactive-buffer))
+                 (should (equal (buffer-string) text))
+                 (should (= (point) position))
+                 (should buffer-read-only)
+                 (should (equal dictionary-data-stack history))
+                 (should (equal dictionary-default-dictionary "*"))
+                 (should (eq dictionary-connection interactive-connection))
+                 (should (eq (dictionary-connection-status interactive-connection) 'up))
+                 (should (equal dictionary-current-server dictionary-server))
+                 (should (equal (with-current-buffer connection-buffer (buffer-string)) connection-text))
+                 (should (= (dictionary-connection-read-point dictionary-connection) read-point))
+                 (should (eq (selected-window) window))
+                 (should (eq (window-buffer window) interactive-buffer))
+                 (should-not (cl-set-difference (buffer-list) before-capture))
+                 ;; A subsequent interactive lookup must still use its original connection.
+                 (dictionary-search "after capture" "*")
+                 (should (eq dictionary-connection interactive-connection))
+                 (should (string-match-p "after capture" (buffer-string)))))
+           (dolist (buffer (cl-set-difference (buffer-list) before))
+             (when (buffer-live-p buffer) (kill-buffer buffer)))
+           (dictionary-connection-close dictionary-connection)))
+       (should-not (cl-set-difference (buffer-list) before))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-capture-during-interactive-lookup-keeps-replies-separate ()
+  (dolist (dictionary-use-single-buffer '(nil t))
+    (zr-org-srs-x-test--with-dictionary
+     (let ((dictionary-connection nil)
+           (dictionary-current-server nil)
+           (dictionary-display-definition-function nil)
+           (zr-org-srs-x-dictionaries '((dict1 dict2) dict3 similar))
+           (capture-result nil)
+           (before (buffer-list)))
+       (setq dictionary-response-function
+             (lambda (command)
+               (cond
+                ((equal command "define * \"pending\"")
+                 ;; An HTTP capture may run while dictionary.el is waiting for its reply.
+                 (let* ((connection dictionary-connection)
+                        (window (selected-window))
+                        (visible-buffer (window-buffer window))
+                        (text (with-current-buffer visible-buffer (buffer-string))))
+                   (with-temp-buffer
+                     (setq capture-result (zr-org-srs-x--dictionary-text "reserved")))
+                   (should (eq dictionary-connection connection))
+                   (should (eq (dictionary-connection-status connection) 'up))
+                   (should (eq (selected-window) window))
+                   (should (eq (window-buffer window) visible-buffer))
+                   (should (equal (with-current-buffer visible-buffer (buffer-string)) text)))
+                 (zr-org-srs-x-test--dict-definition "interactive" "Interactive definition"))
+                ((equal command "match dict1 . \"reserved\"")
+                 "152 1 match\r\ndict1 \"reserve\"\r\n.\r\n250 ok\r\n")
+                ((equal command "define dict1 \"reserve\"")
+                 (zr-org-srs-x-test--dict-definition "dict1" "Capture definition"))
+                (t "552 no match\r\n"))))
+       (save-window-excursion
+         (unwind-protect
+             (progn
+               (dictionary-search "pending" "*")
+               (should (equal capture-result "*** [dict1]\nCapture definition"))
+               (should (string-match-p "Interactive definition" (buffer-string)))
+               (should-not (string-match-p "Capture definition" (buffer-string)))
+               (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                              '("define * \"pending\""
+                                "define dict1 \"reserved\"" "define dict2 \"reserved\"" "define dict3 \"reserved\""
+                                "match dict1 . \"reserved\"" "define dict1 \"reserve\"" "match dict2 . \"reserved\""))))
+           (dolist (buffer (cl-set-difference (buffer-list) before))
+             (when (buffer-live-p buffer) (kill-buffer buffer)))
+           (dictionary-connection-close dictionary-connection)))
+       (should-not (cl-set-difference (buffer-list) before))))))
 
 (ert-deftest zr-org-srs-x-test-dictionary-connect-failure-cleans-buffer ()
   (let* ((server (make-network-process :name "zr-org-srs-x-test-closed-dict"
@@ -802,7 +1074,7 @@
          (dictionary-server "127.0.0.1")
          (dictionary-port (process-contact server :service))
          (dictionary-use-http-proxy nil)
-         (dictionary-default-dictionary "*")
+         (zr-org-srs-x-dictionaries '("*" similar))
          (before-buffers (buffer-list))
          (before-processes (process-list)))
     (delete-process server)

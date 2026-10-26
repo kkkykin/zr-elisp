@@ -61,10 +61,9 @@ HTML 转成 Org 文本和链接，脚本、样式不参与正文。
 ## dictionary.el 查词
 
 LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
-不解析、不保存。制卡时用 Emacs 自带的 `dictionary.el` 查询单词，将返回的
+不解析、不保存。制卡时用 Emacs 自带的 `dictionary.el` 查询单词，将命中阶段的
 全部释义追加到背面。每个词典默认使用 `*** [数据库 id]` 子标题，
 id 为 `unknown` 时使用完整词典名；多个词典分别分段，同一显示名称的多条释义放在同一子标题下。
-没有命中时仍保存单词、翻译和其他内容。
 
 ```org
 ** Back
@@ -88,50 +87,66 @@ hamlet
       (lambda (name id) (format "%s [%s]" name id)))
 ```
 
+用 `zr-org-srs-x-dictionaries` 配置查词顺序，独立于交互查词使用的
+`dictionary-default-dictionary`：
+
+```elisp
+(setq zr-org-srs-x-dictionaries '((dict1 dict2) dict3 similar))
+```
+
+先查询 `dict1` 和 `dict2`，合并两者返回的全部释义；只要其中一个有结果，
+就结束查词。两者都未命中才查询 `dict3`。所有精确查询都未命中，才执行最后的
+`similar`：按原顺序重试这些词典组，使用 DICT 默认匹配策略 `.` 获取每个词典的
+第一个候选词，再查询候选词在其所属词典中的释义。同组的结果合并，整组未命中
+才继续下一组；不尝试第二个候选词。例如 `reserved` 匹配到 `reserve` 时，
+背面填入 `reserve` 的释义，卡片标题和原有词语仍保留 `reserved`。
+
+数据库 id 可写成 symbol 或字符串；外层始终是阶段列表，同组用内层列表表示。
+默认配置为 `'("*" similar)`；`"*"` 查询全部数据库，`"!"` 使用第一个命中的
+数据库。省略最后的 `similar` 就只做精确查询，整个变量设为 `nil` 则跳过查词。
+所有阶段都未命中时，仍保存单词、翻译和其他内容。
+
 服务地址和端口使用现有的 `dictionary-server`、`dictionary-port` 配置，例如：
 
 ```elisp
 (use-package dictionary
   :custom
   (dictionary-server "localhost")
-  (dictionary-port 2628)
-  (dictionary-default-dictionary "*"))
+  (dictionary-port 2628))
 ```
 
 如果 `dictionary-server` 未设置，制卡使用 `localhost`。
-需要有可用的 DICT 服务；查询使用独立连接，不打开 Dictionary 窗口。
+需要有可用的 DICT 服务；查询使用独立连接，不打开 Dictionary 窗口，
+也不改动已有 Dictionary 缓冲区及其连接，不受 `dictionary-use-single-buffer` 影响。
 
 按文件选择词典，直接在目标 Org 文件的**第一行**设置标准文件局部变量：
 
 ```org
-# -*- dictionary-default-dictionary: "gcide"; -*-
+# -*- zr-org-srs-x-dictionaries: ((dictd-db-eng-zho gcide) wordnet similar); -*-
 #+title: 英語
 ```
-
-数据库名必须写成带双引号的字符串，例如 `"dictd-db-eng-zho"`；不加引号会被
-Emacs 读成 symbol，无法用于查词。`"*"` 查询全部数据库，`"!"` 使用第一个命中的
-数据库，`nil` 跳过查词。
 
 也可以在 deck 目录或其父目录的 `.dir-locals.el` 中配置，适用于该目录下的
 Org 文件和子目录中的 deck，包括之后创建的文件：
 
 ```elisp
-((org-mode . ((dictionary-default-dictionary . "dictd-db-eng-zho"))))
+((org-mode . ((zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))))
 ```
 
 文件局部变量优先于目录局部变量；两者都未设置时使用全局
-`dictionary-default-dictionary`。Emacs 对文件和目录局部变量的信任规则照常
+`zr-org-srs-x-dictionaries`。Emacs 对文件和目录局部变量的信任规则照常
 生效；可以提前允许所需的具体值，避免首次制卡请求等待信任确认：
 
 ```elisp
 (add-to-list 'safe-local-variable-values
-             '(dictionary-default-dictionary . "dictd-db-eng-zho"))
+             '(zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))
 ```
 
 修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
 `M-x normal-mode`，或关闭后重新打开文件，使设置生效。
 配置只影响之后创建的卡片。查询超时或服务错误会让 `addNote` 返回错误，
-不保存新卡片；默认超时为 10 秒，可通过 `zr-org-srs-x-dictionary-timeout` 修改。
+不保存新卡片；全部阶段共用一个超时，默认为 10 秒，可通过
+`zr-org-srs-x-dictionary-timeout` 修改。
 
 ## 音频与截图
 

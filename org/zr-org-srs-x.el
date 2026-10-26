@@ -8,7 +8,7 @@
 ;; Run `zr-org-srs-x-start' to receive LunaTranslator's AnkiConnect v6
 ;; requests.  Each deck is an Org file in `zr-org-srs-x-directory'.
 ;; Definitions come from Emacs's dictionary.el, using the deck buffer's
-;; `dictionary-default-dictionary'.  LunaTranslator dictionaries are ignored.
+;; `zr-org-srs-x-dictionaries'.  LunaTranslator dictionaries are ignored.
 ;; Cards use Org Front/Back subheadings and the installed Org-srs API.
 ;; Original fields and Anki HTML/CSS/JavaScript templates are discarded.
 ;; Loading this library does not start the server or load Org-srs.
@@ -31,6 +31,7 @@
 (declare-function dictionary-reply "dictionary" (reply))
 (declare-function dictionary-read-answer "dictionary" ())
 (declare-function dictionary-decode-charset "dictionary" (text dictionary))
+(declare-function dictionary-encode-charset "dictionary" (text dictionary))
 (declare-function dictionary-check-initial-reply "dictionary" ())
 (declare-function dictionary-send-command "dictionary" (string))
 (declare-function dictionary-connection-create-data "dictionary-connection" (buffer process point))
@@ -41,7 +42,6 @@
 
 (defvar dictionary-server)
 (defvar dictionary-port)
-(defvar dictionary-default-dictionary)
 (defvar dictionary-connection)
 (defvar dictionary-current-server)
 (defvar dictionary-identification)
@@ -70,6 +70,20 @@ The Anki deck A::B corresponds to A/B.org in this directory."
 (defcustom zr-org-srs-x-dictionary-timeout 10
   "Maximum seconds spent looking up a card's word through dictionary.el."
   :type 'number)
+
+(defcustom zr-org-srs-x-dictionaries '("*" similar)
+  "Ordered dictionary search stages for capture.
+Each stage is a dictionary ID (string or symbol), or a nonempty list of IDs.
+Query every dictionary in a group and combine its definitions.  Continue to
+the next stage only when the entire group has no definitions.
+An optional final `similar' stage retries the preceding groups in order
+using the first matching word from each dictionary.  Nil disables lookup.
+For example, ((dict1 dict2) dict3 similar) tries dict1 and dict2 together,
+then dict3, then matching words in those same groups."
+  :type '(repeat (choice (const :tag "Similar words" similar)
+                         (string :tag "Dictionary ID (string)")
+                         (symbol :tag "Dictionary ID (symbol)")
+                         (repeat :tag "Dictionary group" (choice string symbol)))))
 
 (defun zr-org-srs-x-format-dictionary-name (name id)
   "Format dictionary NAME and ID as a card heading.
@@ -294,60 +308,139 @@ up the buffer even when connecting fails or times out."
     (unless (dictionary-check-reply reply 250)
       (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))))
 
+(defun zr-org-srs-x--dictionary-escape-word (word)
+  "Quote WORD for a DICT command, rejecting line breaks."
+  (zr-org-srs-x--string word)
+  (when (string-match-p "[\r\n]" word)
+    (error "Dictionary word must be on one line"))
+  (replace-regexp-in-string
+   "[\"\\\\]" (lambda (match) (concat "\\" match)) word t t))
+
+(defun zr-org-srs-x--dictionary-id (id)
+  "Validate dictionary ID and return it as a string."
+  (let ((name (cond ((stringp id) id)
+                    ((and id (symbolp id) (not (eq id 'similar))) (symbol-name id)))))
+    (unless (and name (string-match-p "\\`[^ \t\r\n\"\\\\]+\\'" name))
+      (error "Invalid dictionary ID: %S" id))
+    name))
+
+(defun zr-org-srs-x--dictionary-stages ()
+  "Validate `zr-org-srs-x-dictionaries' and normalize its ID groups."
+  (unless (proper-list-p zr-org-srs-x-dictionaries)
+    (error "Expected a list of dictionary search stages"))
+  (when (or (eq (car zr-org-srs-x-dictionaries) 'similar)
+            (memq 'similar (butlast zr-org-srs-x-dictionaries)))
+    (error "Similar must be the final stage after at least one dictionary group"))
+  (mapcar
+   (lambda (stage)
+     (if (eq stage 'similar)
+         stage
+       (let ((group (if (listp stage) stage (list stage))))
+         (unless (and (consp group) (proper-list-p group))
+           (error "Expected a nonempty dictionary group: %S" stage))
+         (mapcar #'zr-org-srs-x--dictionary-id group))))
+   zr-org-srs-x-dictionaries))
+
+(defun zr-org-srs-x--dictionary-definitions (_reply)
+  "Read a successful DICT response as (NAME DEFINITION...) groups."
+  (let ((reply (dictionary-read-reply-and-split)) definitions)
+    (while (dictionary-check-reply reply 151)
+      (let* ((parts (dictionary-reply-list reply))
+             (database (nth 2 parts))
+             (description (dictionary-decode-charset (nth 3 parts) database))
+             (name (zr-org-srs-x--string
+                    (funcall zr-org-srs-x-dictionary-name-function description database)))
+             (text (string-trim
+                    (dictionary-decode-charset (dictionary-read-answer) database))))
+        (when (or (string-blank-p name) (string-match-p "[\r\n]" name))
+          (error "Dictionary name must be nonempty and on one line"))
+        (if-let* ((entry (assoc name definitions)))
+            (push text (cdr entry))
+          (push (list name text) definitions)))
+      (setq reply (dictionary-read-reply-and-split)))
+    (unless (dictionary-check-reply reply 250)
+      (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
+    (mapcar (lambda (entry) (cons (car entry) (nreverse (cdr entry))))
+            (nreverse definitions))))
+
+(defun zr-org-srs-x--dictionary-first-match (word database)
+  "Return the first (DATABASE . WORD) matching escaped WORD, or nil.
+Use the server's default matching strategy and consume its entire response."
+  (dictionary-send-command
+   (concat "match " database " . \"" (dictionary-encode-charset word database) "\""))
+  (let ((reply (dictionary-read-reply-and-split)))
+    (cond
+     ((dictionary-check-reply reply 552) nil)
+     ((dictionary-check-reply reply 152)
+      (let* ((line (car (split-string (dictionary-read-answer) "\n" t)))
+             (reply (dictionary-read-reply-and-split)))
+        (unless (dictionary-check-reply reply 250)
+          (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
+        (when line
+          (unless (string-match "\\`\\([^ \t]+\\)[ \t]+\\(.+\\)\\'" line)
+            (error "Invalid dictionary match: %s" line))
+          (let ((database (match-string 1 line)) (word (match-string 2 line)))
+            (zr-org-srs-x--dictionary-id database)
+            (when (string-prefix-p "\"" word)
+              (unless (and (> (length word) 1) (string-suffix-p "\"" word))
+                (error "Invalid dictionary match: %s" line))
+              (setq word (replace-regexp-in-string
+                          (concat (regexp-quote "\\") "\\(.\\)") "\\1" (substring word 1 -1))))
+            (cons database (dictionary-decode-charset word database))))))
+     (t (error "Unexpected dictionary reply: %s" (dictionary-reply reply))))))
+
+(defun zr-org-srs-x--dictionary-query-group (word databases &optional similar)
+  "Combine definitions for escaped WORD in DATABASES.
+When SIMILAR is non-nil, use the first matching word from each database."
+  (let (definitions)
+    (dolist (database databases)
+      (let ((entries
+             (if similar
+                 (when-let* ((match (zr-org-srs-x--dictionary-first-match word database)))
+                   (dictionary-do-search
+                    (zr-org-srs-x--dictionary-escape-word (cdr match)) (car match)
+                    #'zr-org-srs-x--dictionary-definitions t))
+               (dictionary-do-search word database #'zr-org-srs-x--dictionary-definitions t))))
+        (dolist (entry entries)
+          (if-let* ((previous (assoc (car entry) definitions)))
+              (setcdr previous (append (cdr previous) (cdr entry)))
+            (push entry definitions)))))
+    (nreverse definitions)))
+
 (defun zr-org-srs-x--dictionary-text (word)
   "Look up WORD with dictionary.el in the current deck's configuration.
-Return definitions grouped under level-three dictionary headings.
+Try `zr-org-srs-x-dictionaries' stages and return the first group's results
+under level-three dictionary headings.  The optional final similar stage
+retries those groups with the server's default matching strategy.
 Format names with `zr-org-srs-x-dictionary-name-function'.
 Mark generated headings so card escaping preserves them.  Use a separate
 connection so capture does not consume replies belonging to an interactive
 Dictionary buffer."
   (require 'dictionary)
-  (if (or (null dictionary-default-dictionary) (string-blank-p word))
+  (if (or (null zr-org-srs-x-dictionaries) (string-blank-p word))
       ""
-    (unless (and (stringp dictionary-default-dictionary)
-                 (string-match-p "\\`[^ \t\r\n\"\\\\]+\\'" dictionary-default-dictionary))
-      (error "Invalid dictionary-default-dictionary: %S; expected nil or a DICT database name string"
-             dictionary-default-dictionary))
-    (when (string-match-p "[\r\n]" word)
-      (error "Dictionary word must be on one line"))
-    (let ((dictionary-connection nil)
+    (let ((stages (zr-org-srs-x--dictionary-stages))
+          (dictionary-connection nil)
           (dictionary-current-server nil)
           ;; Automatic server selection normally asks before falling back to
           ;; dict.org.  HTTP capture uses localhost without that prompt.
           (dictionary-server (or dictionary-server "localhost"))
-          (word (replace-regexp-in-string
-                 "[\"\\\\]" (lambda (match) (concat "\\" match)) word t t)))
+          (word (zr-org-srs-x--dictionary-escape-word word)))
       (unwind-protect
           (with-timeout (zr-org-srs-x-dictionary-timeout
                          (error "Dictionary lookup timed out"))
             (zr-org-srs-x--dictionary-connect)
-            (or (dictionary-do-search
-                 word dictionary-default-dictionary
-                 (lambda (_reply)
-                   (let ((reply (dictionary-read-reply-and-split)) definitions)
-                     (while (dictionary-check-reply reply 151)
-                       (let* ((parts (dictionary-reply-list reply))
-                              (database (nth 2 parts))
-                              (description (dictionary-decode-charset (nth 3 parts) database))
-                              (name (zr-org-srs-x--string
-                                     (funcall zr-org-srs-x-dictionary-name-function description database)))
-                              (text (string-trim
-                                     (dictionary-decode-charset (dictionary-read-answer) database))))
-                         (when (or (string-blank-p name) (string-match-p "[\r\n]" name))
-                           (error "Dictionary name must be nonempty and on one line"))
-                         (if-let* ((entry (assoc name definitions)))
-                             (push text (cdr entry))
-                           (push (list name text) definitions)))
-                       (setq reply (dictionary-read-reply-and-split)))
-                     (unless (dictionary-check-reply reply 250)
-                       (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
-                     (mapconcat
-                      (lambda (entry)
-                        (concat (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
-                                (car entry) "\n"
-                                (string-join (nreverse (cdr entry)) "\n\n")))
-                      (nreverse definitions) "\n\n")))
-                 t)
+            (or (catch 'definitions
+                  (dolist (similar (if (memq 'similar stages) '(nil t) '(nil)))
+                    (dolist (group (remq 'similar stages))
+                      (when-let* ((definitions (zr-org-srs-x--dictionary-query-group word group similar)))
+                        (throw 'definitions
+                               (mapconcat
+                                (lambda (entry)
+                                  (concat (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
+                                          (car entry) "\n"
+                                          (string-join (cdr entry) "\n\n")))
+                                definitions "\n\n"))))))
                 ""))
         (dictionary-connection-close dictionary-connection)))))
 
