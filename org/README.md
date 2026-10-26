@@ -84,16 +84,28 @@ LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
 #+title: 英語
 ```
 
-值是 DICT 服务的数据库名；`"*"` 查询全部数据库，`"!"` 使用第一个命中的
-数据库，`nil` 跳过查词。未设置文件局部变量时使用全局
-`dictionary-default-dictionary`。也可以用 `.dir-locals.el` 配置。
-Emacs 对文件局部变量的信任规则照常生效；可以提前允许所需的具体值：
+数据库名必须写成带双引号的字符串，例如 `"dictd-db-eng-zho"`；不加引号会被
+Emacs 读成 symbol，无法用于查词。`"*"` 查询全部数据库，`"!"` 使用第一个命中的
+数据库，`nil` 跳过查词。
+
+也可以在 deck 目录或其父目录的 `.dir-locals.el` 中配置，适用于该目录下的
+Org 文件和子目录中的 deck，包括之后创建的文件：
 
 ```elisp
-(add-to-list 'safe-local-variable-values '(dictionary-default-dictionary . "gcide"))
+((org-mode . ((dictionary-default-dictionary . "dictd-db-eng-zho"))))
 ```
 
-修改第一行后执行 `M-x normal-mode`，或重新打开文件，使设置生效。
+文件局部变量优先于目录局部变量；两者都未设置时使用全局
+`dictionary-default-dictionary`。Emacs 对文件和目录局部变量的信任规则照常
+生效；可以提前允许所需的具体值，避免首次制卡请求等待信任确认：
+
+```elisp
+(add-to-list 'safe-local-variable-values
+             '(dictionary-default-dictionary . "dictd-db-eng-zho"))
+```
+
+修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
+`M-x normal-mode`，或关闭后重新打开文件，使设置生效。
 配置只影响之后创建的卡片。查询超时或服务错误会让 `addNote` 返回错误，
 不保存新卡片；默认超时为 10 秒，可通过 `zr-org-srs-x-dictionary-timeout` 修改。
 

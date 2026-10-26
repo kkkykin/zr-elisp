@@ -151,20 +151,91 @@
    (dolist (name '("../escape" ".." "a::..::b" "a::::b" "a\\b" "a\nb"))
      (should-error (zr-org-srs-x--deck-file name)))))
 
-(ert-deftest zr-org-srs-x-test-real-card-and-dictionary-default-by-file ()
+(ert-deftest zr-org-srs-x-test-file-locals-survive-org-mode-selection ()
+  (zr-org-srs-x-test--with-decks
+   (make-directory zr-org-srs-x-directory t)
+   (let ((file (zr-org-srs-x--deck-file "英語"))
+         (safe-local-variable-values
+          (cons '(dictionary-default-dictionary . "dictd-db-eng-zho")
+                safe-local-variable-values)))
+     (with-temp-file file
+       (insert "# -*- mode: text; dictionary-default-dictionary: \"dictd-db-eng-zho\"; -*-\n"
+               "#+title: 英語\n"))
+     (with-current-buffer (zr-org-srs-x--buffer file)
+       (should (derived-mode-p 'org-mode))
+       (should (local-variable-p 'dictionary-default-dictionary))
+       (should (equal dictionary-default-dictionary "dictd-db-eng-zho"))
+       ;; Reusing a visited deck must keep its current buffer-local settings.
+       (setq-local dictionary-default-dictionary nil)
+       (should (eq (zr-org-srs-x--buffer file) (current-buffer)))
+       (should-not dictionary-default-dictionary)))))
+
+(ert-deftest zr-org-srs-x-test-directory-locals-and-file-override ()
+  (zr-org-srs-x-test--with-decks
+   (make-directory zr-org-srs-x-directory t)
+   (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
+     (insert "((org-mode . ((dictionary-default-dictionary . \"dictd-db-eng-zho\"))))\n"))
+   (let ((safe-local-variable-values
+          (append '((dictionary-default-dictionary . "dictd-db-eng-zho")
+                    (dictionary-default-dictionary . "gcide")
+                    (dictionary-default-dictionary . nil))
+                  safe-local-variable-values)))
+     ;; Include a new deck and a deck whose automatic mode is not Org.
+     (dolist (deck '("new" "existing" "fallback" "override" "disabled"))
+       (let ((file (zr-org-srs-x--deck-file (concat "英語::" deck)))
+             (auto-mode-alist (unless (equal deck "fallback") auto-mode-alist)))
+         (unless (equal deck "new")
+           (make-directory (file-name-directory file) t)
+           (with-temp-file file
+             (insert
+              (pcase deck
+                ("override" "# -*- dictionary-default-dictionary: \"gcide\"; -*-\n")
+                ("disabled" "# -*- dictionary-default-dictionary: nil; -*-\n")
+                (_ ""))
+              "#+title: 英語\n")))
+         (with-current-buffer (zr-org-srs-x--buffer file (equal deck "new"))
+           (should (derived-mode-p 'org-mode))
+           (should (local-variable-p 'dictionary-default-dictionary))
+           (should (equal dictionary-default-dictionary
+                          (pcase deck
+                            ("override" "gcide")
+                            ("disabled" nil)
+                            (_ "dictd-db-eng-zho"))))))))
+   (should-not dictionary-default-dictionary)))
+
+(ert-deftest zr-org-srs-x-test-file-local-dictionary-requires-string ()
+  (zr-org-srs-x-test--with-decks
+   (make-directory zr-org-srs-x-directory t)
+   (let ((file (zr-org-srs-x--deck-file "英語"))
+         (safe-local-variable-values
+          (cons '(dictionary-default-dictionary . dictd-db-eng-zho)
+                safe-local-variable-values)))
+     (with-temp-file file
+       (insert "# -*- dictionary-default-dictionary: dictd-db-eng-zho; -*-\n"))
+     (with-current-buffer (zr-org-srs-x--buffer file)
+       (should (eq dictionary-default-dictionary 'dictd-db-eng-zho))
+       (let ((err (should-error (zr-org-srs-x--dictionary-text "hello"))))
+         (should (string-match-p "dictd-db-eng-zho.*DICT database name string"
+                                 (error-message-string err))))))))
+
+(ert-deftest zr-org-srs-x-test-real-card-and-dictionary-default-by-file-and-directory ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
+   (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
+     (insert "((org-mode . ((dictionary-default-dictionary . \"edict\"))))\n"))
    (zr-org-srs-x-test--call "createDeck" "deck" "英語")
    (zr-org-srs-x-test--call "createDeck" "deck" "日本語")
-   (dolist (deck '("英語" "日本語"))
-     ;; Exercise standard Org file-local settings when the file is reopened.
+   (zr-org-srs-x-test--call "createDeck" "deck" "英語::directory")
+   (dolist (deck '("英語" "日本語" "英語::directory"))
+     ;; Reopen to apply trusted file and directory settings during capture.
      (let ((file (zr-org-srs-x--deck-file deck)))
        (with-current-buffer (zr-org-srs-x--buffer file)
-         (goto-char (point-min))
-         (insert (format "# -*- dictionary-default-dictionary: %S; -*-\n"
-                         (if (equal deck "英語") "edict" "local")))
-         (zr-org-srs-x--save)
+         (unless (equal deck "英語::directory")
+           (goto-char (point-min))
+           (insert (format "# -*- dictionary-default-dictionary: %S; -*-\n"
+                           (if (equal deck "英語") "edict" "local")))
+           (zr-org-srs-x--save))
          (kill-buffer (current-buffer)))))
    (zr-org-srs-x-test--with-dictionary
     (setq dictionary-response-function
@@ -172,7 +243,7 @@
             (if (string-prefix-p "define edict " command)
                 "150 1 definition\r\n151 \"猫\" edict \"English\"\r\ncat from DICT\r\n.\r\n250 ok\r\n"
               "150 1 definition\r\n151 \"猫\" local \"日本語\"\r\n猫の定義 from DICT\r\n.\r\n250 ok\r\n")))
-    (dolist (deck '("英語" "日本語"))
+    (dolist (deck '("英語" "日本語" "英語::directory"))
      (let* ((note (zr-org-srs-x-test--note deck))
             (safe-local-variable-values
              (append '((dictionary-default-dictionary . "edict")
@@ -204,7 +275,7 @@
              (should (string-match-p "備考 & メモ" back-text))
              (should (string-match-p "extra" back-text))
              (should-not (string-match-p "SECRET_SCRIPT\\|cat; feline\\|ネコ科" (buffer-string)))
-             (if (equal deck "英語")
+             (if (not (equal deck "日本語"))
                  (progn (should (string-match-p "cat from DICT" back-text))
                         (should-not (string-match-p "猫の定義" back-text)))
                (should (string-match-p "猫の定義 from DICT" back-text))
@@ -212,7 +283,7 @@
          (should (< (file-attribute-size
                      (file-attributes (expand-file-name ".zr-org-srs-x-notes.json"
                                                         zr-org-srs-x-directory)))
-                    1024)))))
+                    1536)))))
     (should (member "define edict \"猫\"" dictionary-commands))
     (should (member "define local \"猫\"" dictionary-commands))
     (should (equal dictionary-default-dictionary "*")))))

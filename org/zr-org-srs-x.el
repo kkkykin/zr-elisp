@@ -295,7 +295,8 @@ does not consume replies belonging to an interactive Dictionary buffer."
       ""
     (unless (and (stringp dictionary-default-dictionary)
                  (string-match-p "\\`[^ \t\r\n\"\\\\]+\\'" dictionary-default-dictionary))
-      (error "Invalid dictionary-default-dictionary"))
+      (error "Invalid dictionary-default-dictionary: %S; expected nil or a DICT database name string"
+             dictionary-default-dictionary))
     (when (string-match-p "[\r\n]" word)
       (error "Dictionary word must be on one line"))
     (let ((dictionary-connection nil)
