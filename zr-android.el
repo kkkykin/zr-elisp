@@ -96,18 +96,23 @@
       (frame-toggle-on-screen-keyboard nil nil))
     (vconcat (kbd key))))
 
+(defun zr-android--meta-prefix (_event)
+  "Translate the toolbar Meta event to the current `meta-prefix-char'."
+  (frame-toggle-on-screen-keyboard nil nil)
+  (vector meta-prefix-char))
+
 (defun zr-android--toolbar ()
   "Install this module's toolbar entries once per modifier bar rebuild."
   (when (and modifier-bar-mode secondary-tool-bar-map)
     (let ((prefix-entries '((zr-quit "C-g" "C-g" "symbols/cross_16")
-                            (zr-meta "Meta" "ESC" "meta")
                             (zr-cx "C-x" "C-x" "symbols/plus_16")
                             (zr-cc "C-c" "C-c" "symbols/menu_16")
                             (zr-help "Help" "C-h" "symbols/heart_16")
                             (zr-cu "C-u" "C-u" "symbols/star_16")))
-          (command-entries '((zr-keyboard "Keyboard" zr-android-toggle-keyboard "conceal")
-                             (zr-repeat "Repeat" repeat "symbols/dot_small_16")
+          (command-entries '((zr-repeat "Repeat" repeat "symbols/dot_small_16")
+                             (zr-keyboard "Keyboard" zr-android-toggle-keyboard "conceal")
                              (zr-read-only "Read only" read-only-mode "reveal"))))
+      (define-key input-decode-map [tool-bar meta] #'zr-android--meta-prefix)
       (dolist (entry prefix-entries)
         (define-key input-decode-map (vector 'tool-bar (car entry))
                     (zr-android--prefix (nth 2 entry))))
@@ -132,11 +137,14 @@
   "Save the current modifier bar state before extending it."
   (when zr-android--saved-toolbar
     ;; Keep native decoder changes, but remove our translations from the snapshot.
-    (dolist (key '(zr-quit zr-meta zr-cx zr-cc zr-help zr-cu))
+    (dolist (key '(meta zr-quit zr-cx zr-cc zr-help zr-cu))
       (let* ((event (vector 'tool-bar key))
              (binding (lookup-key (cadr zr-android--saved-toolbar) event)))
-        (define-key input-decode-map event
-                    (unless (numberp binding) binding)))))
+        ;; The native bar resets Meta on enable; only undo our binding.
+        (when (or (not (eq key 'meta))
+                  (eq (lookup-key input-decode-map event) #'zr-android--meta-prefix))
+          (define-key input-decode-map event
+                      (unless (numberp binding) binding))))))
   (setq zr-android--saved-toolbar (list secondary-tool-bar-map input-decode-map))
   (setq secondary-tool-bar-map (and secondary-tool-bar-map
                                     (copy-keymap secondary-tool-bar-map))
