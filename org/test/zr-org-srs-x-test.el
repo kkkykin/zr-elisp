@@ -5,6 +5,7 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'url-util)
+(require 'dictionary)
 (require 'zr-test-helpers)
 (require 'zr-org-srs-x)
 
@@ -22,7 +23,7 @@
   (declare (indent 0) (debug t))
   `(zr-test-with-temp-directory
     (let ((zr-org-srs-x-directory (expand-file-name "srs"))
-          (zr-org-srs-x-dictionaries nil)
+          (dictionary-default-dictionary nil)
           (zr-org-srs-x-media-path-function #'identity)
           (zr-org-srs-x-render-function #'zr-org-srs-x-render-luna-note)
           (zr-org-srs-x--server nil)
@@ -31,6 +32,52 @@
       (unwind-protect
           (progn ,@body)
         (zr-org-srs-x-stop)))))
+
+(defmacro zr-org-srs-x-test--with-dictionary (&rest body)
+  "Run BODY against a local DICT server, using the real dictionary.el client."
+  (declare (indent 0) (debug t))
+  `(let* ((dictionary-commands nil)
+          (dictionary-clients nil)
+          (dictionary-greeting "220 test DICT server\r\n")
+          (dictionary-response-function
+           (lambda (_command)
+             (concat "150 2 definitions retrieved\r\n"
+                     "151 \"猫\" edict \"英和辞典\"\r\ncat from DICT\r\n.\r\n"
+                     "151 \"猫\" local \"国語辞典\"\r\n猫の定義 from DICT\r\n.\r\n"
+                     "250 ok\r\n")))
+          (dictionary-server "127.0.0.1")
+          (dictionary-use-http-proxy nil)
+          (dictionary-default-dictionary "*")
+          (zr-org-srs-x-dictionary-timeout 1)
+          (server
+           (make-network-process
+            :name "zr-org-srs-x-test-dict" :server t :host "127.0.0.1"
+            :service t :family 'ipv4 :coding 'binary :noquery t
+            :log (lambda (_server client _message)
+                   (push client dictionary-clients)
+                   (set-process-query-on-exit-flag client nil)
+                   (when dictionary-greeting
+                     (process-send-string client dictionary-greeting)))
+            :filter
+            (lambda (client chunk)
+              (let ((input (concat (or (process-get client 'input) "") chunk)))
+                (while (string-match "\r\n" input)
+                  (let ((command (substring input 0 (match-beginning 0))))
+                    (setq input (substring input (match-end 0)))
+                    (push (decode-coding-string command 'utf-8) dictionary-commands)
+                    (when-let* ((response
+                                 (if (string-prefix-p "client " command)
+                                     "250 ok\r\n"
+                                   (funcall dictionary-response-function
+                                            (decode-coding-string command 'utf-8)))))
+                      (process-send-string client (encode-coding-string response 'utf-8)))))
+                (process-put client 'input input)))))
+          (dictionary-port (process-contact server :service)))
+     (unwind-protect
+         (progn ,@body)
+       (delete-process server)
+       (dolist (client dictionary-clients)
+         (when (process-live-p client) (delete-process client))))))
 
 (defun zr-org-srs-x-test--call (action &rest pairs)
   "Invoke ACTION with parameter PAIRS, returning its successful result."
@@ -104,15 +151,33 @@
    (dolist (name '("../escape" ".." "a::..::b" "a::::b" "a\\b" "a\nb"))
      (should-error (zr-org-srs-x--deck-file name)))))
 
-(ert-deftest zr-org-srs-x-test-real-card-and-dictionary-selection-by-file ()
+(ert-deftest zr-org-srs-x-test-real-card-and-dictionary-default-by-file ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "英語")
    (zr-org-srs-x-test--call "createDeck" "deck" "日本語")
-   (setq zr-org-srs-x-dictionaries '(("英語.org" "edict") ("日本語.org" "国語辞典")))
    (dolist (deck '("英語" "日本語"))
+     ;; Exercise standard Org file-local settings when the file is reopened.
+     (let ((file (zr-org-srs-x--deck-file deck)))
+       (with-current-buffer (zr-org-srs-x--buffer file)
+         (goto-char (point-min))
+         (insert (format "# -*- dictionary-default-dictionary: %S; -*-\n"
+                         (if (equal deck "英語") "edict" "local")))
+         (zr-org-srs-x--save)
+         (kill-buffer (current-buffer)))))
+   (zr-org-srs-x-test--with-dictionary
+    (setq dictionary-response-function
+          (lambda (command)
+            (if (string-prefix-p "define edict " command)
+                "150 1 definition\r\n151 \"猫\" edict \"English\"\r\ncat from DICT\r\n.\r\n250 ok\r\n"
+              "150 1 definition\r\n151 \"猫\" local \"日本語\"\r\n猫の定義 from DICT\r\n.\r\n250 ok\r\n")))
+    (dolist (deck '("英語" "日本語"))
      (let* ((note (zr-org-srs-x-test--note deck))
+            (safe-local-variable-values
+             (append '((dictionary-default-dictionary . "edict")
+                       (dictionary-default-dictionary . "local"))
+                     safe-local-variable-values))
             (id (zr-org-srs-x-test--call "addNote" "note" note))
             (file (zr-org-srs-x--deck-file deck)))
        (should (integerp id))
@@ -134,30 +199,31 @@
                  (back-text (buffer-substring-no-properties (car back) (cdr back))))
              (should (string-match-p "猫.*\n" front-text))
              (should (string-match-p "二行目" front-text))
+             (should-not (string-match-p "備考 & メモ\\|from DICT" front-text))
              (should (string-match-p "ねこ" back-text))
              (should (string-match-p "備考 & メモ" back-text))
              (should (string-match-p "extra" back-text))
-             (should-not (string-match-p "SECRET_SCRIPT" back-text))
+             (should-not (string-match-p "SECRET_SCRIPT\\|cat; feline\\|ネコ科" (buffer-string)))
              (if (equal deck "英語")
-                 (progn (should (string-match-p "cat; feline" back-text))
-                        (should-not (string-match-p "ネコ科" (buffer-string))))
-               (should (string-match-p "ネコ科の動物" back-text))
-               (should-not (string-match-p "cat; feline" (buffer-string))))))
+                 (progn (should (string-match-p "cat from DICT" back-text))
+                        (should-not (string-match-p "猫の定義" back-text)))
+               (should (string-match-p "猫の定義 from DICT" back-text))
+               (should-not (string-match-p "cat from DICT" back-text)))))
          (should (< (file-attribute-size
                      (file-attributes (expand-file-name ".zr-org-srs-x-notes.json"
                                                         zr-org-srs-x-directory)))
-                    1024)))))))
+                    1024)))))
+    (should (member "define edict \"猫\"" dictionary-commands))
+    (should (member "define local \"猫\"" dictionary-commands))
+    (should (equal dictionary-default-dictionary "*")))))
 
-(ert-deftest zr-org-srs-x-test-file-keyword-overrides-and-empty-selection ()
+(ert-deftest zr-org-srs-x-test-nil-dictionary-disables-lookup ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
-   (setq zr-org-srs-x-dictionaries '(("lunadeck.org" "edict")))
    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
-     (goto-char (point-min))
-     (insert "#+SRS_X_DICTIONARIES: []\n")
-     (zr-org-srs-x--save))
+     (setq-local dictionary-default-dictionary nil))
    (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
      (should-not (string-match-p "cat; feline\\|ネコ科\\|英和辞典\\|国語辞典" (buffer-string)))
@@ -166,15 +232,18 @@
      (org-back-to-heading)
      (should-not (string-match-p "^:ANKI_" (buffer-string))))))
 
-(ert-deftest zr-org-srs-x-test-unconfigured-file-keeps-multiple-dictionaries ()
+(ert-deftest zr-org-srs-x-test-unconfigured-file-uses-default-and-all-definitions ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
-   (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
-   (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
-     (should (string-match-p "cat; feline" (buffer-string)))
-     (should (string-match-p "ネコ科の動物" (buffer-string))))))
+   (zr-org-srs-x-test--with-dictionary
+    (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
+    (should (member "define * \"猫\"" dictionary-commands))
+    (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+      (should (string-match-p "英和辞典.*\ncat from DICT" (buffer-string)))
+      (should (string-match-p "国語辞典.*\n猫の定義 from DICT" (buffer-string)))
+      (should-not (string-match-p "cat; feline\\|ネコ科" (buffer-string)))))))
 
 (ert-deftest zr-org-srs-x-test-media-import-with-client-path-mapping ()
   (zr-org-srs-x-test--require-srs)
@@ -266,7 +335,7 @@
      (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
      (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") [])))))
 
-(ert-deftest zr-org-srs-x-test-large-dictionary-html-is-rendered-and-discarded ()
+(ert-deftest zr-org-srs-x-test-large-and-malformed-luna-dictionaries-are-discarded ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
@@ -283,14 +352,16 @@
                        "<script>" (make-string 100000 ?b) "</script></body></html>"))
               content)
      (puthash "dictionaryContent" (zr-org-srs-x--json content) fields)
+     ;; Neither source field should need to contain valid dictionary JSON.
+     (puthash "dictionaryInfo" "{malformed Luna dictionary metadata" fields)
      (let ((id (zr-org-srs-x-test--call "addNote" "note" note))
            (file (zr-org-srs-x--deck-file "lunadeck")))
        (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"lunadeck\" w:\"official\"")
                       (vector id)))
        (with-current-buffer (zr-org-srs-x--buffer file)
-         (should (string-match-p "Large-page definition" (buffer-string)))
-         (should (string-match-p "ネコ科の動物" (buffer-string)))
-         (should-not (string-match-p "^:ANKI_\\|dictionaryContent\\|<style>\\|<script>" (buffer-string)))
+         (should (string-match-p "備考 & メモ" (buffer-string)))
+         (should-not (string-match-p "^:ANKI_\\|dictionaryContent\\|<style>\\|<script>\\|Large-page definition\\|ネコ科"
+                                     (buffer-string)))
          (should (< (buffer-size) 8192))
          (should (= (length (org-srs-query-buffer (org-srs-query-predicate-new))) 1)))
        (let ((index (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))
@@ -299,11 +370,139 @@
            (insert-file-contents index)
            (should-not (string-match-p "dictionaryContent\\|Large-page definition\\|SECRET_SCRIPT" (buffer-string)))))))))
 
-(ert-deftest zr-org-srs-x-test-percent-decoding-preserves-unicode-and-newlines ()
-  (should
-   (equal (zr-org-srs-x--decode-dictionary
-           (concat (apply #'concat (make-list 20000 "%E7%8c%AB")) "%0A+%25%zz"))
-          (concat (make-string 20000 ?猫) "\n+%%zz"))))
+(ert-deftest zr-org-srs-x-test-dictionary-missing-word-and-quoted-word ()
+  (zr-org-srs-x-test--with-dictionary
+   (setq dictionary-response-function (lambda (_command) "552 no match\r\n"))
+   (should (equal (zr-org-srs-x--dictionary-text "a\"b\\c") ""))
+   (should (member "define * \"a\\\"b\\\\c\"" dictionary-commands))
+   (should-not (cl-some (lambda (command) (string-prefix-p "match " command))
+                        dictionary-commands))
+   (accept-process-output nil 0.02)
+   (should-not (cl-some #'process-live-p dictionary-clients))
+   (let ((before (length dictionary-commands)))
+     (should-error (zr-org-srs-x--dictionary-text "word\r\nQUIT"))
+     (let ((dictionary-default-dictionary "bad database"))
+       (should-error (zr-org-srs-x--dictionary-text "word")))
+     (should (= before (length dictionary-commands))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-keeps-interactive-connection-and-window ()
+  (zr-org-srs-x-test--with-dictionary
+   (let* ((dictionary-connection (dictionary-connection-open dictionary-server dictionary-port))
+          (interactive-connection dictionary-connection)
+          (dictionary-current-server "interactive")
+          (window (selected-window))
+          (visible-buffer (window-buffer window))
+          (before (buffer-list)))
+     (unwind-protect
+         (with-temp-buffer
+           (insert "Keep deck text")
+           (should (string-match-p "cat from DICT" (zr-org-srs-x--dictionary-text "猫")))
+           (should (equal (buffer-string) "Keep deck text"))
+           (should (eq dictionary-connection interactive-connection))
+           (should (eq (dictionary-connection-status interactive-connection) 'up))
+           (should (equal dictionary-current-server "interactive"))
+           (should (eq (selected-window) window))
+           (should (eq (window-buffer window) visible-buffer)))
+       (dictionary-connection-close interactive-connection))
+     (should-not (cl-set-difference (buffer-list) before)))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-connect-failure-cleans-buffer ()
+  (let* ((server (make-network-process :name "zr-org-srs-x-test-closed-dict"
+                                       :server t :host "127.0.0.1" :service t :noquery t))
+         (dictionary-server "127.0.0.1")
+         (dictionary-port (process-contact server :service))
+         (dictionary-use-http-proxy nil)
+         (dictionary-default-dictionary "*")
+         (before-buffers (buffer-list))
+         (before-processes (process-list)))
+    (delete-process server)
+    (should-error (zr-org-srs-x--dictionary-text "official"))
+    (should-not (cl-set-difference (buffer-list) before-buffers))
+    (should-not (cl-set-difference (process-list) before-processes))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-greeting-timeout-cleans-connection ()
+  (zr-org-srs-x-test--with-dictionary
+   (setq dictionary-greeting nil)
+   (let ((zr-org-srs-x-dictionary-timeout 0.1)
+         (before (buffer-list)))
+     (should-error (zr-org-srs-x--dictionary-text "official"))
+     (accept-process-output nil 0.02)
+     (should-not (cl-set-difference (buffer-list) before))
+     (should-not (cl-some #'process-live-p dictionary-clients)))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-uses-http-proxy-settings ()
+  (zr-org-srs-x-test--with-dictionary
+   (let ((dictionary-use-http-proxy t)
+         (dictionary-proxy-server dictionary-server)
+         (dictionary-proxy-port dictionary-port)
+         (dictionary-server "dict.example")
+         (dictionary-port 2628)
+         (definitions dictionary-response-function))
+     (setq dictionary-greeting nil
+           dictionary-response-function
+           (lambda (command)
+             (cond
+              ((string-prefix-p "CONNECT " command)
+               "HTTP/1.1 200 Connection established\r\nProxy-Agent: test\r\n\r\n220 test DICT server\r\n")
+              ((string-empty-p command) nil)
+              (t (funcall definitions command)))))
+     (should (string-match-p "猫の定義 from DICT" (zr-org-srs-x--dictionary-text "猫")))
+     (should (member "CONNECT dict.example:2628 HTTP/1.1" dictionary-commands))
+     (should (member "define * \"猫\"" dictionary-commands)))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-timeout-and-protocol-error-do-not-save-card ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (zr-org-srs-x-test--with-dictionary
+    (let* ((file (zr-org-srs-x--deck-file "lunadeck"))
+           (buffer (zr-org-srs-x--buffer file))
+           (before (with-current-buffer buffer (buffer-string)))
+           (zr-org-srs-x-dictionary-timeout 0.1))
+      (dolist (response '(nil "150 1 definition\r\n151 \"猫\" edict \"English\"\r\n"
+                         "150 1 definition\r\n151 \"猫\" edict \"English\"\r\ndefinition\r\n.\r\n500 error\r\n"))
+        (setq dictionary-response-function (lambda (_command) response))
+        (let ((result (zr-org-srs-x-request
+                       (zr-org-srs-x--object "action" "addNote" "params"
+                                             (zr-org-srs-x--object "note" (zr-org-srs-x-test--note "lunadeck"))))))
+          (should-not (gethash "result" result))
+          (should (string-match-p "Dictionary lookup timed out\\|Unexpected dictionary reply"
+                                  (gethash "error" result))))
+        (should (equal before (with-current-buffer buffer (buffer-string))))
+        (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
+        (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json")) 0))
+        (accept-process-output nil 0.02)
+        (should-not (cl-some #'process-live-p dictionary-clients)))))))
+
+(ert-deftest zr-org-srs-x-test-capture-during-lookup-preserves-index-and-duplicates ()
+  (zr-org-srs-x-test--require-srs)
+  (dolist (same-word '(nil t))
+    (zr-org-srs-x-test--with-decks
+     (zr-org-srs-x-test--create-model)
+     (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+     (let ((first-lookup t)
+           (note (zr-org-srs-x-test--note "lunadeck" "猫")))
+       (puthash "options" (zr-org-srs-x--object "allowDuplicate" :false) note)
+       (cl-letf (((symbol-function 'zr-org-srs-x--dictionary-text)
+                  (lambda (_word)
+                    ;; A DICT wait can run another HTTP request's process filter.
+                    (when first-lookup
+                      (setq first-lookup nil)
+                      (zr-org-srs-x-test--call "addNote" "note"
+                                               (zr-org-srs-x-test--note "lunadeck"
+                                                                        (if same-word "猫" "犬"))))
+                    "")))
+         (let ((response (zr-org-srs-x-request
+                          (zr-org-srs-x--object "action" "addNote" "params"
+                                                (zr-org-srs-x--object "note" note)))))
+           (if same-word
+               (should (equal (gethash "error" response) "cannot create note because it is a duplicate"))
+             (should (integerp (gethash "result" response))))))
+       (should (= (length (zr-org-srs-x-test--call "findNotes" "query" ""))
+                  (if same-word 1 2)))
+       (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
+                  (if same-word 1 2)))))))
 
 (ert-deftest zr-org-srs-x-test-first-field-duplicates-and-word-search-use-separate-hashes ()
   (zr-org-srs-x-test--require-srs)
@@ -410,9 +609,6 @@
        (should-not (gethash "result" response))
        (should (stringp (gethash "error" response)))))
    (should-not (file-exists-p zr-org-srs-x-directory))))
-
-(provide 'zr-org-srs-x-test)
-;;; zr-org-srs-x-test.el ends here
 
 (provide 'zr-org-srs-x-test)
 ;;; zr-org-srs-x-test.el ends here

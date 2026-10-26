@@ -47,41 +47,55 @@
 以及 `Front` / `Back` 子标题；不添加 `ANKI_*` 属性。
 通过 `org-srs-item-new` 创建实际的 `card back` 复习条目和日志。
 
-原始字段和词典 HTML 在渲染后丢弃，不写入 Org 或其他文件。
+原始字段不写入 Org 或其他文件，LunaTranslator 词典 HTML 直接丢弃。
 接口所需的数字笔记 ID、模型名、去重及单词查询摘要，保存在
 `.zr-org-srs-x-notes.json` 中，通过 Org `ID` 关联卡片；此文件应随 deck 一起保留。
 复习只依赖 Org 文件，摘要索引用于 AnkiConnect 的查找、删除和去重。
 
-默认正面包含单词、例句、单词音频、例句音频和截图；背面包含读音、备注、
-选中的词典释义和额外字段。HTML 转成 Org 文本和链接，脚本、样式不参与正文。
+默认正面包含单词、例句、单词音频、例句音频和截图；背面包含读音、翻译/备注
+（`remarks`）、dictionary.el 的释义和额外字段。
+HTML 转成 Org 文本和链接，脚本、样式不参与正文。
 Anki 模型只保存字段定义、模板名和编号，写入 `.zr-org-srs-x.json`。
 模板 HTML 和 CSS 请求会被验证后丢弃，卡片使用 Org-srs 的显示方式。
 
-## 按文件选择词典
+## dictionary.el 查词
 
-`zr-org-srs-x-dictionaries` 的键是相对于保存目录的 Org 文件名，也支持绝对路径。
-值是要保留的词典 ID 或显示名称列表：
+LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
+不解析、不保存。制卡时用 Emacs 自带的 `dictionary.el` 查询单词，将返回的
+全部释义追加到背面，保留词典名称。没有命中时仍保存单词、翻译和其他内容。
+
+服务地址和端口使用现有的 `dictionary-server`、`dictionary-port` 配置，例如：
 
 ```elisp
-(setq zr-org-srs-x-dictionaries
-      '(("英語.org" "edict")
-        ("日本語/ゲーム.org" "国語辞典" "jmdict")
-        ("无释义.org")))
+(use-package dictionary
+  :custom
+  (dictionary-server "localhost")
+  (dictionary-port 2628)
+  (dictionary-default-dictionary "*"))
 ```
 
-没有配置的文件保留全部词典；配置为空列表的文件不保留词典。
-词典显示名称可以直接使用 LunaTranslator 中的名称；词典 ID 来自请求的
-`dictionaryInfo` 字段。
+如果 `dictionary-server` 未设置，制卡使用 `localhost`。
+需要有可用的 DICT 服务；查询使用独立连接，不打开 Dictionary 窗口。
 
-也可以在目标 Org 文件中写入 JSON 数组，覆盖上述配置：
+按文件选择词典，直接在目标 Org 文件的**第一行**设置标准文件局部变量：
 
 ```org
-#+SRS_X_DICTIONARIES: ["国語辞典", "jmdict"]
+# -*- dictionary-default-dictionary: "gcide"; -*-
+#+title: 英語
 ```
 
-写 `#+SRS_X_DICTIONARIES: []` 表示不保留任何词典。
-过滤作用于渲染前的词典数据，只有选中的释义写入背面正文。
-配置修改对之后创建的卡片生效。
+值是 DICT 服务的数据库名；`"*"` 查询全部数据库，`"!"` 使用第一个命中的
+数据库，`nil` 跳过查词。未设置文件局部变量时使用全局
+`dictionary-default-dictionary`。也可以用 `.dir-locals.el` 配置。
+Emacs 对文件局部变量的信任规则照常生效；可以提前允许所需的具体值：
+
+```elisp
+(add-to-list 'safe-local-variable-values '(dictionary-default-dictionary . "gcide"))
+```
+
+修改第一行后执行 `M-x normal-mode`，或重新打开文件，使设置生效。
+配置只影响之后创建的卡片。查询超时或服务错误会让 `addNote` 返回错误，
+不保存新卡片；默认超时为 10 秒，可通过 `zr-org-srs-x-dictionary-timeout` 修改。
 
 ## 音频与截图
 
@@ -109,8 +123,9 @@ Anki 模型只保存字段定义、模板名和编号，写入 `.zr-org-srs-x.js
 执行 `M-x zr-org-srs-x-review` 复习保存目录中的卡片。
 在单个 deck 文件中也可以直接运行 `M-x org-srs-review-start`。
 
-`zr-org-srs-x-render-function` 可以设为接收字段 hash table、返回
-`(FRONT . BACK)` 字符串对的函数。它在词典过滤和附件导入之后运行，
+`zr-org-srs-x-render-function` 可以设为接收 `(fields definitions)`、返回
+`(FRONT . BACK)` 字符串对的函数。`fields` 是移除 Luna 词典字段后的 hash table，
+`definitions` 是 dictionary.el 的 Org 释义文本。它在查词和附件导入之后运行，
 返回值使用 Org 格式。服务会转义可能被解释成额外标题、关键字或抽屉的正文行。
 
 ## 接口与验证

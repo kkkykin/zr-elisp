@@ -7,8 +7,8 @@
 
 ;; Run `zr-org-srs-x-start' to receive LunaTranslator's AnkiConnect v6
 ;; requests.  Each deck is an Org file in `zr-org-srs-x-directory'.
-;; Dictionary selection can be configured per file with
-;; `zr-org-srs-x-dictionaries' or #+SRS_X_DICTIONARIES: ["dictionary-id"].
+;; Definitions come from Emacs's dictionary.el, using the deck buffer's
+;; `dictionary-default-dictionary'.  LunaTranslator dictionaries are ignored.
 ;; Cards use Org Front/Back subheadings and the installed Org-srs API.
 ;; Original fields and Anki HTML/CSS/JavaScript templates are discarded.
 ;; Loading this library does not start the server or load Org-srs.
@@ -23,6 +23,31 @@
 
 (declare-function org-srs-item-new "org-srs-item" (type &rest args))
 (declare-function org-srs-review-start "org-srs-review" (&optional source))
+(declare-function dictionary-do-search "dictionary" (word dictionary function &optional nomatching))
+(declare-function dictionary-read-reply "dictionary" ())
+(declare-function dictionary-read-reply-and-split "dictionary" ())
+(declare-function dictionary-check-reply "dictionary" (reply code))
+(declare-function dictionary-reply-list "dictionary" (reply))
+(declare-function dictionary-reply "dictionary" (reply))
+(declare-function dictionary-read-answer "dictionary" ())
+(declare-function dictionary-decode-charset "dictionary" (text dictionary))
+(declare-function dictionary-check-initial-reply "dictionary" ())
+(declare-function dictionary-send-command "dictionary" (string))
+(declare-function dictionary-connection-create-data "dictionary-connection" (buffer process point))
+(declare-function dictionary-connection-buffer "dictionary-connection" (connection))
+(declare-function dictionary-connection-process "dictionary-connection" (connection))
+(declare-function dictionary-connection-set-process "dictionary-connection" (connection process))
+(declare-function dictionary-connection-close "dictionary-connection" (connection))
+
+(defvar dictionary-server)
+(defvar dictionary-port)
+(defvar dictionary-default-dictionary)
+(defvar dictionary-connection)
+(defvar dictionary-current-server)
+(defvar dictionary-identification)
+(defvar dictionary-use-http-proxy)
+(defvar dictionary-proxy-server)
+(defvar dictionary-proxy-port)
 
 (defgroup zr-org-srs-x nil
   "Capture AnkiConnect notes as Org-srs cards."
@@ -44,15 +69,9 @@ The Anki deck A::B corresponds to A/B.org in this directory."
   "AnkiConnect HTTP port.  Restart the server after changing this."
   :type 'integer)
 
-(defcustom zr-org-srs-x-dictionaries nil
-  "Dictionary selections keyed by deck Org file names.
-Keys are relative to `zr-org-srs-x-directory', or absolute paths.
-Values list dictionary IDs or display names to keep.  An absent entry
-keeps all dictionaries; an entry with an empty list keeps none.
-A file's #+SRS_X_DICTIONARIES keyword, containing a JSON array of
-strings, overrides this setting.  Selection happens before saving the
-note's Org content.  Original Anki fields are not saved."
-  :type '(alist :key-type file :value-type (repeat string)))
+(defcustom zr-org-srs-x-dictionary-timeout 10
+  "Maximum seconds spent looking up a card's word through dictionary.el."
+  :type 'number)
 
 (defcustom zr-org-srs-x-media-path-function #'identity
   "Function translating a client's media path to an Emacs-readable path.
@@ -61,8 +80,9 @@ Emacs reads the same files through a WSL mount."
   :type 'function)
 
 (defcustom zr-org-srs-x-render-function #'zr-org-srs-x-render-luna-note
-  "Function converting a field hash table to a (FRONT . BACK) string pair.
-Dictionary selection and attachment import run before this function.
+  "Function converting FIELDS and DEFINITIONS to (FRONT . BACK) strings.
+FIELDS is a hash table; DEFINITIONS is dictionary.el's text in Org format.
+Dictionary lookup and attachment import run before this function.
 The default handles LunaTranslator fields and falls back to the first
 field on the front and remaining fields on the back for other models."
   :type 'function)
@@ -191,42 +211,6 @@ field on the front and remaining fields on the back for other models."
       (when (file-exists-p temporary)
         (delete-file temporary)))))
 
-(defun zr-org-srs-x--selection (file)
-  "Return (CONFIGURED . DICTIONARIES) for FILE."
-  (with-current-buffer (zr-org-srs-x--buffer file)
-    (save-restriction
-      (widen)
-      (if-let* ((keyword (cadr (assoc "SRS_X_DICTIONARIES"
-                                      (org-collect-keywords '("SRS_X_DICTIONARIES"))))))
-          (cons t (append (zr-org-srs-x--strings (zr-org-srs-x--parse keyword)) nil))
-        (let ((entry (cl-find file zr-org-srs-x-dictionaries
-                              :test #'equal
-                              :key (lambda (it) (expand-file-name (car it)
-                                                                  zr-org-srs-x-directory)))))
-          (cons (and entry t) (cdr entry)))))))
-
-(defun zr-org-srs-x--select-dictionaries (fields file)
-  "Filter LunaTranslator dictionary FIELDS according to FILE's selection."
-  (when-let* ((raw-info (gethash "dictionaryInfo" fields))
-              (raw-content (gethash "dictionaryContent" fields)))
-    (let* ((info (zr-org-srs-x--parse raw-info))
-           (content (zr-org-srs-x--parse raw-content))
-           (selection (zr-org-srs-x--selection file))
-           (kept (make-hash-table :test #'equal))
-           (entries nil))
-      (unless (and (vectorp info) (hash-table-p content))
-        (error "Invalid LunaTranslator dictionary data"))
-      (cl-loop for entry across info
-               for id = (zr-org-srs-x--get entry "dict")
-               for name = (zr-org-srs-x--get entry "name")
-               when (or (not (car selection))
-                        (member id (cdr selection)) (member name (cdr selection)))
-               do (push entry entries)
-               and do (when-let* ((html (gethash id content)))
-                        (puthash id html kept)))
-      (puthash "dictionaryInfo" (zr-org-srs-x--json (vconcat (nreverse entries))) fields)
-      (puthash "dictionaryContent" (zr-org-srs-x--json kept) fields))))
-
 (defun zr-org-srs-x--dom-text (node)
   "Convert HTML DOM NODE to Org text without running scripts."
   (if (stringp node)
@@ -272,34 +256,82 @@ field on the front and remaining fields on the back for other models."
         "\n[ \t]*\n\\(?:[ \t]*\n\\)+" "\n\n"
         (zr-org-srs-x--dom-text (libxml-parse-html-region (point-min) (point-max))))))))
 
-(defun zr-org-srs-x--decode-dictionary (string)
-  "Decode percent-encoded UTF-8 STRING in one pass."
-  (decode-coding-string
-   (replace-regexp-in-string
-    "%[[:xdigit:]][[:xdigit:]]"
-    (lambda (match) (unibyte-string (string-to-number (substring match 1) 16)))
-    (encode-coding-string string 'utf-8) t t)
-   'utf-8))
+(defun zr-org-srs-x--dictionary-connect ()
+  "Open the capture connection using dictionary.el's server and proxy settings.
+Allocate the connection before opening the stream, so its caller can clean
+up the buffer even when connecting fails or times out."
+  (setq dictionary-current-server dictionary-server
+        dictionary-connection
+        (dictionary-connection-create-data
+         (generate-new-buffer " *zr-org-srs-x-dictionary*") nil 1))
+  (let ((coding-system-for-read 'raw-text)
+        (coding-system-for-write 'raw-text))
+    (dictionary-connection-set-process
+     dictionary-connection
+     (open-network-stream
+      "zr-org-srs-x-dictionary" (dictionary-connection-buffer dictionary-connection)
+      (if dictionary-use-http-proxy dictionary-proxy-server dictionary-server)
+      (if dictionary-use-http-proxy dictionary-proxy-port dictionary-port))))
+  (set-process-query-on-exit-flag (dictionary-connection-process dictionary-connection) nil)
+  (when dictionary-use-http-proxy
+    (dictionary-send-command (format "CONNECT %s:%d HTTP/1.1" dictionary-server dictionary-port))
+    (dictionary-send-command "")
+    (let ((reply (dictionary-read-reply-and-split)))
+      (unless (equal (nth 1 (dictionary-reply-list reply)) "200")
+        (error "Bad reply from dictionary proxy: %s" (dictionary-reply reply))))
+    (while (not (equal (dictionary-read-reply) ""))))
+  (dictionary-check-initial-reply)
+  (dictionary-send-command (concat "client " dictionary-identification))
+  (let ((reply (dictionary-read-reply-and-split)))
+    (unless (dictionary-check-reply reply 250)
+      (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))))
 
-(defun zr-org-srs-x--dictionary-text (fields)
-  "Render the selected, percent-encoded LunaTranslator dictionaries in FIELDS."
-  (when-let* ((info (gethash "dictionaryInfo" fields))
-              (content (gethash "dictionaryContent" fields)))
-    (let ((content (zr-org-srs-x--parse content)))
-      (mapconcat
-       (lambda (entry)
-         (let* ((id (zr-org-srs-x--get entry "dict"))
-                (name (or (zr-org-srs-x--get entry "name") id))
-                (html (gethash id content "")))
-           (concat "*" name "*\n"
-                   (zr-org-srs-x--html
-                    (zr-org-srs-x--decode-dictionary html)))))
-       (zr-org-srs-x--parse info) "\n\n"))))
+(defun zr-org-srs-x--dictionary-text (word)
+  "Look up WORD with dictionary.el in the current deck's configuration.
+Return all definitions as Org text.  Use a separate connection so capture
+does not consume replies belonging to an interactive Dictionary buffer."
+  (require 'dictionary)
+  (if (or (null dictionary-default-dictionary) (string-blank-p word))
+      ""
+    (unless (and (stringp dictionary-default-dictionary)
+                 (string-match-p "\\`[^ \t\r\n\"\\\\]+\\'" dictionary-default-dictionary))
+      (error "Invalid dictionary-default-dictionary"))
+    (when (string-match-p "[\r\n]" word)
+      (error "Dictionary word must be on one line"))
+    (let ((dictionary-connection nil)
+          (dictionary-current-server nil)
+          ;; Automatic server selection normally asks before falling back to
+          ;; dict.org.  HTTP capture uses localhost without that prompt.
+          (dictionary-server (or dictionary-server "localhost"))
+          (word (replace-regexp-in-string
+                 "[\"\\\\]" (lambda (match) (concat "\\" match)) word t t)))
+      (unwind-protect
+          (with-timeout (zr-org-srs-x-dictionary-timeout
+                         (error "Dictionary lookup timed out"))
+            (zr-org-srs-x--dictionary-connect)
+            (or (dictionary-do-search
+                 word dictionary-default-dictionary
+                 (lambda (_reply)
+                   (let ((reply (dictionary-read-reply-and-split)) definitions)
+                     (while (dictionary-check-reply reply 151)
+                       (let* ((parts (dictionary-reply-list reply))
+                              (database (nth 2 parts))
+                              (description (dictionary-decode-charset (nth 3 parts) database))
+                              (text (string-trim
+                                     (dictionary-decode-charset (dictionary-read-answer) database))))
+                         (push (concat "*" description " [" database "]*\n" text) definitions))
+                       (setq reply (dictionary-read-reply-and-split)))
+                     (unless (dictionary-check-reply reply 250)
+                       (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
+                     (string-join (nreverse definitions) "\n\n")))
+                 t)
+                ""))
+        (dictionary-connection-close dictionary-connection)))))
 
-(defun zr-org-srs-x-render-luna-note (fields)
+(defun zr-org-srs-x-render-luna-note (fields definitions)
   "Return Org (FRONT . BACK) strings for a note's FIELDS hash table.
 LunaTranslator's word, example, screenshot and audio form the front.
-Reading, remarks, selected dictionaries and extra fields form the back."
+Reading, remarks, dictionary.el DEFINITIONS and extra fields form the back."
   (let* ((front-names (if (gethash "word" fields)
                           '("word" "example_sentence" "audio_for_word"
                             "audio_for_example_sentence" "screenshot")
@@ -313,9 +345,8 @@ Reading, remarks, selected dictionaries and extra fields form the back."
                (unless (or (member name ignored) (string-empty-p value))
                  (push (concat "*" name "*\n" (zr-org-srs-x--html value)) back)))
              fields)
-    (when-let* ((dictionaries (zr-org-srs-x--dictionary-text fields))
-                ((not (string-empty-p dictionaries))))
-      (push dictionaries back))
+    (unless (string-empty-p definitions)
+      (push definitions back))
     (cons (string-join (nreverse front) "\n\n")
           (string-join (nreverse back) "\n\n"))))
 
@@ -388,6 +419,19 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
   (replace-regexp-in-string
    "^\\([ \t]*\\)\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:[ \t]*$\\)" "\\1,\\2" text))
 
+(defun zr-org-srs-x--check-duplicate (model-name field-hash options)
+  "Reject duplicates of MODEL-NAME and FIELD-HASH unless OPTIONS allow them."
+  (let (duplicate)
+    ;; Scan even when duplicates are allowed, to keep IDs unique after restart.
+    (zr-org-srs-x--notes
+     (lambda (_id _file entry)
+       (when (and (equal (gethash "modelName" entry) model-name)
+                  (equal (gethash "fieldHash" entry) field-hash))
+         (setq duplicate t))
+       nil))
+    (when (and duplicate (not (eq (zr-org-srs-x--get options "allowDuplicate") t)))
+      (error "cannot create note because it is a duplicate"))))
+
 (defun zr-org-srs-x--add-note (note)
   "Import one Anki NOTE and return its integer ID."
   (require 'org-srs)
@@ -400,8 +444,7 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
          (fields (make-hash-table :test #'equal))
          (names (gethash "inOrderFields" model))
          (tags (zr-org-srs-x--strings (gethash "tags" note [])))
-         (options (gethash "options" note (zr-org-srs-x--object)))
-         (duplicate nil))
+         (options (gethash "options" note (zr-org-srs-x--object))))
     (unless (hash-table-p input)
       (error "Expected note fields"))
     (maphash (lambda (name value)
@@ -414,19 +457,17 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
     (let ((field-hash (secure-hash 'sha256 (gethash (aref names 0) fields)))
           (word-hash (when-let* ((word (gethash "word" fields)))
                        (secure-hash 'sha256 word))))
-      ;; Scan even when duplicates are allowed, so IDs remain unique after restart.
-      (zr-org-srs-x--notes
-       (lambda (_id _file entry)
-         (when (and (equal (gethash "modelName" entry) model-name)
-                    (equal (gethash "fieldHash" entry) field-hash))
-           (setq duplicate t))
-         nil))
-      (when (and duplicate (not (eq (zr-org-srs-x--get options "allowDuplicate") t)))
-        (error "cannot create note because it is a duplicate"))
+      (zr-org-srs-x--check-duplicate model-name field-hash options)
       (zr-org-srs-x--buffer file)
-      (zr-org-srs-x--select-dictionaries fields file)
+      ;; The client's dictionary pages are deliberately neither parsed nor saved.
+      (remhash "dictionaryInfo" fields)
+      (remhash "dictionaryContent" fields)
       (zr-org-srs-x--import-media note fields file)
-      (let* ((sides (funcall zr-org-srs-x-render-function fields))
+      (let* ((definitions (with-current-buffer (zr-org-srs-x--buffer file)
+                            (zr-org-srs-x--dictionary-text
+                             (zr-org-srs-x--html (gethash "word" fields
+                                                          (gethash (aref names 0) fields))))))
+             (sides (funcall zr-org-srs-x-render-function fields definitions))
              (id (zr-org-srs-x--new-id))
              (org-id (org-id-new))
              (entry (zr-org-srs-x--object "noteId" id "modelName" model-name
@@ -435,6 +476,10 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
                      "[\n\r\t]+" " " (zr-org-srs-x--html (gethash (aref names 0) fields)))))
         (unless (and (consp sides) (stringp (car sides)) (stringp (cdr sides)))
           (error "Renderer must return (FRONT . BACK) strings"))
+        ;; Dictionary waits can dispatch another capture request.  Refresh the
+        ;; index and duplicate check before committing this card.
+        (setq zr-org-srs-x--note-index (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
+        (zr-org-srs-x--check-duplicate model-name field-hash options)
         (with-current-buffer (zr-org-srs-x--buffer file)
           (save-excursion
             (save-restriction
