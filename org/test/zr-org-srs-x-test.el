@@ -25,7 +25,7 @@
     (let ((zr-org-srs-x-directory (expand-file-name "srs"))
           (dictionary-default-dictionary nil)
           (zr-org-srs-x-media-path-function #'identity)
-          (zr-org-srs-x-render-function #'zr-org-srs-x-render-luna-note)
+          (zr-org-srs-x-model-alist (default-value 'zr-org-srs-x-model-alist))
           (zr-org-srs-x--server nil)
           (zr-org-srs-x--clients nil)
           (zr-org-srs-x--last-id 0))
@@ -113,6 +113,153 @@
              (zr-org-srs-x--json
               (zr-org-srs-x--object "edict" (url-hexify-string "<div>cat; feline</div>")
                                     "local" (url-hexify-string "<p>ネコ科の動物</p><script>SECRET_SCRIPT</script>"))))))
+
+(ert-deftest zr-org-srs-x-test-model-templates-and-fallback ()
+  (let* ((fields '(("word" . "猫") ("example_sentence" . "A $dictionary \\1 example")
+                   ("remarks" . "remark")))
+         (variables '((dictionary . "definition $audio") (picture . "image")
+                      (audio . "sound") (video . "")))
+         (zr-org-srs-x-model-alist
+          '((modelofluna . ((name . "$.word") (front . "$.example_sentence")
+                           (back . "$.remarks\n\n$dictionary\n$picture $audio$video $.missing $$10")))
+            ("other" . ((name . "Other $.word") (front . "$.remarks") (back . "")))
+            (t . zr-org-srs-x-render-default-note))))
+    (should (equal (zr-org-srs-x--render "modelofluna" fields variables)
+                   '((name . "猫") (front . "A $dictionary \\1 example")
+                     (back . "remark\n\ndefinition $audio\nimage sound  $10"))))
+    (should (equal (zr-org-srs-x--render "other" fields variables)
+                   '((name . "Other 猫") (front . "remark") (back . ""))))
+    (let ((fallback (zr-org-srs-x--render "unconfigured" fields variables)))
+      (should (equal (alist-get 'name fallback) "猫"))
+      (should (equal (alist-get 'front fallback) "猫"))
+      (should (string-match-p "definition \\$audio" (alist-get 'back fallback))))))
+
+(ert-deftest zr-org-srs-x-test-model-and-part-render-functions ()
+  (let* ((fields '(("word" . "猫")))
+         (variables '((dictionary . "definition")))
+         (zr-org-srs-x-model-alist
+          `((whole . ,(lambda (input values)
+                        (should (eq input fields))
+                        (should (eq values variables))
+                        '((name . "Function") (front . "$.word") (back . "$dictionary"))))
+            (part . ((name . "$.word") (front . "text")
+                     (back . ,(lambda (input values)
+                                (concat (cdr (assoc "word" input)) " "
+                                        (alist-get 'dictionary values) " $audio"))))))))
+    (should (equal (zr-org-srs-x--render "whole" fields variables)
+                   '((name . "Function") (front . "$.word") (back . "$dictionary"))))
+    (should (equal (zr-org-srs-x--render "part" fields variables)
+                   '((name . "猫") (front . "text") (back . "猫 definition $audio"))))))
+
+(ert-deftest zr-org-srs-x-test-model-template-dictionary-and-media-card ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (let ((zr-org-srs-x-model-alist
+          '((modelofluna . ((name . "$.word\n$.rubytextHtml")
+                           (front . "$.example_sentence")
+                           (back . "$.remarks\n\n$dictionary\n\n$picture\n\n$audio\n\n$video")))))
+         (note (zr-org-srs-x-test--note "lunadeck")))
+     (dolist (kind '("picture" "audio" "video"))
+       (puthash kind
+                (vector (zr-org-srs-x--object "filename" (concat kind ".dat") "data" "YWJj"
+                                             "fields" ["screenshot"]))
+                note))
+     (zr-org-srs-x-test--with-dictionary
+      (zr-org-srs-x-test--call "addNote" "note" note)
+      (should (member "define * \"猫\"" dictionary-commands)))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+       (goto-char (point-min))
+       (re-search-forward "^\\* ")
+       (org-back-to-heading)
+       (should (equal (org-get-heading t t t t) "猫 ねこ"))
+       (cl-multiple-value-bind (front back) (org-srs-item-card-regions)
+         (let ((front-text (buffer-substring-no-properties (car front) (cdr front)))
+               (back-text (buffer-substring-no-properties (car back) (cdr back))))
+           (should (string-match-p "二行目" front-text))
+           (should-not (string-match-p "file:\\|from DICT\\|備考" front-text))
+           (should (string-match-p "備考 & メモ" back-text))
+           (should (string-match-p "cat from DICT" back-text))
+           (should (string-match-p "猫の定義 from DICT" back-text))
+           (dolist (kind '("picture" "audio" "video"))
+             (should (= (cl-count-if
+                         (lambda (line) (string-match-p (concat kind "\\.dat") line))
+                         (split-string back-text "\n"))
+                        1)))))))))
+
+(ert-deftest zr-org-srs-x-test-model-alist-file-and-directory-local ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (let* ((directory-renderers
+           '((modelofluna . ((name . "Directory $.word") (front . "$.remarks") (back . "")))))
+          (file-renderers
+           '((modelofluna . ((name . "File $.word") (front . "$.example_sentence") (back . "")))))
+          (safe-local-variable-values
+           (append (list (cons 'zr-org-srs-x-model-alist directory-renderers)
+                         (cons 'zr-org-srs-x-model-alist file-renderers))
+                   safe-local-variable-values)))
+     (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
+       (prin1 `((org-mode . ((zr-org-srs-x-model-alist . ,directory-renderers)))) (current-buffer)))
+     (with-temp-file (zr-org-srs-x--deck-file "override")
+       (insert (format "# -*- zr-org-srs-x-model-alist: %S; -*-\n" file-renderers)))
+     (zr-org-srs-x-test--call "createDeck" "deck" "directory")
+     ;; Capture runs outside either deck buffer.
+     (with-temp-buffer
+       (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "directory"))
+       (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "override")))
+     (dolist (deck '("directory" "override"))
+       (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file deck))
+         (goto-char (point-min))
+         (re-search-forward "^\\* ")
+         (org-back-to-heading)
+         (should (equal (org-get-heading t t t t)
+                        (if (equal deck "directory") "Directory 猫" "File 猫")))))
+     (should (equal zr-org-srs-x-model-alist (default-value 'zr-org-srs-x-model-alist))))))
+
+(ert-deftest zr-org-srs-x-test-model-render-function-runs-in-deck ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (let ((zr-org-srs-x-model-alist
+          `((modelofluna . ,(lambda (fields variables)
+                             (should (equal buffer-file-name (zr-org-srs-x--deck-file "lunadeck")))
+                             (should (derived-mode-p 'org-mode))
+                             (should (equal (caar fields) "word"))
+                             (should (equal (cdr (assoc "remarks" fields)) "備考 & メモ"))
+                             (should-not (assoc "dictionaryContent" fields))
+                             (should (equal (alist-get 'audio variables) ""))
+                             '((name . "Function") (front . "front") (back . "back")))))))
+     (should (integerp (zr-org-srs-x-test--call "addNote" "note"
+                                              (zr-org-srs-x-test--note "lunadeck")))))))
+
+(ert-deftest zr-org-srs-x-test-invalid-model-renderer-does-not-save-card ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (dolist (renderer '(((front . "front") (back . "back"))
+                       ((name . " ") (front . "front") (back . "back"))
+                       ((name . "$.word") (front . "$unknown") (back . "back"))
+                       ((name . "$.word") (front . 42) (back . "back"))
+                       (lambda (_fields _variables) [invalid])
+                       (lambda (_fields _variables)
+                         '((name . "name") (front . 42) (back . "back")))))
+     (let* ((zr-org-srs-x-model-alist (list (cons 'modelofluna renderer)))
+            (response (zr-org-srs-x-request
+                       (zr-org-srs-x--object "action" "addNote" "params"
+                                             (zr-org-srs-x--object "note" (zr-org-srs-x-test--note "lunadeck"))))))
+       (should (gethash "error" response))
+       (should-not (gethash "result" response))))
+   (let ((zr-org-srs-x-model-alist nil))
+     (should-error (zr-org-srs-x--render "missing" nil nil)
+                   :type 'error))
+   (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))
+   (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+     (should-not (string-match-p "^\\* " (buffer-string)))
+     (should-not (buffer-modified-p)))))
 
 (ert-deftest zr-org-srs-x-test-model-lifecycle-and-persistence ()
   (zr-org-srs-x-test--with-decks
@@ -323,9 +470,13 @@
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
    (let* ((source (expand-file-name "audio.mp3"))
           (bytes (unibyte-string 0 255 128 10))
-          (zr-org-srs-x-media-path-function (lambda (path)
-                                              (should (equal path "C:\\audio.mp3")) source))
           (note (zr-org-srs-x-test--note "lunadeck")))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+       (setq-local zr-org-srs-x-media-path-function
+                   (lambda (path)
+                     (should (equal path "C:\\audio.mp3"))
+                     (should (equal buffer-file-name (zr-org-srs-x--deck-file "lunadeck")))
+                     source)))
      (let ((coding-system-for-write 'no-conversion))
        (write-region bytes nil source nil 'silent))
      (puthash "audio" (vector (zr-org-srs-x--object "filename" "audio.mp3" "path" "C:\\audio.mp3"
@@ -586,6 +737,11 @@
    (let* ((note (zr-org-srs-x--object "deckName" "custom" "modelName" "custom"
                                       "fields" (zr-org-srs-x--object "prompt" "first prompt" "word" "猫")))
           (first (zr-org-srs-x-test--call "addNote" "note" note)))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "custom"))
+       (goto-char (point-min))
+       (re-search-forward "^\\* ")
+       (org-back-to-heading)
+       (should (equal (org-get-heading t t t t) "first prompt")))
      (puthash "word" "犬" (gethash "fields" note))
      (let ((response (zr-org-srs-x-request
                       (zr-org-srs-x--object "action" "addNote" "params"

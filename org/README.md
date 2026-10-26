@@ -135,10 +135,62 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 执行 `M-x zr-org-srs-x-review` 复习保存目录中的卡片。
 在单个 deck 文件中也可以直接运行 `M-x org-srs-review-start`。
 
-`zr-org-srs-x-render-function` 可以设为接收 `(fields definitions)`、返回
-`(FRONT . BACK)` 字符串对的函数。`fields` 是移除 Luna 词典字段后的 hash table，
-`definitions` 是 dictionary.el 的 Org 释义文本。它在查词和附件导入之后运行，
-返回值使用 Org 格式。服务会转义可能被解释成额外标题、关键字或抽屉的正文行。
+用 `zr-org-srs-x-model-alist` 按 Anki 的 `modelName` 配置卡片内容。
+模型名可以是 symbol 或字符串；每项的 cdr 是 `name/front/back` 模板 alist：
+
+```elisp
+(setq zr-org-srs-x-model-alist
+      '((modelofluna
+         . ((name . "$.word")
+            (front . "$.example_sentence\n\n$picture\n\n$audio")
+            (back . "$.remarks\n\n$dictionary")))
+        (t . zr-org-srs-x-render-default-note)))
+```
+
+`name` 是 Org 卡片标题，`front` 和 `back` 是正反面的 Org 文本。三项都必须提供，
+标题不能为空。`t` 项处理未单独配置的模型；默认函数用第一个字段作为标题和
+正面，其余字段及词典释义放到背面。省略 `t` 时，未配置的模型返回错误。
+
+| 占位符 | 内容 |
+| --- | --- |
+| `$.字段名` | 该字段转成 Org 的文本；没有该字段时为空字符串 |
+| `$dictionary` | dictionary.el 返回的全部释义 |
+| `$picture` | 本条笔记导入的全部图片链接 |
+| `$audio` | 本条笔记导入的全部音频链接 |
+| `$video` | 本条笔记导入的全部视频链接 |
+| `$$` | 字面量 `$` |
+
+没有释义或附件时，对应占位符为空字符串。替换只执行一遍，字段里的 `$` 不会
+再次展开。附件链接也会追加到请求指定的字段中，例如 `$.audio_for_word`；
+同时使用该字段和 `$audio` 会显示两次同一个附件。
+查词使用 `word` 字段，没有时使用模型的第一个字段。
+
+模型项的 cdr 也可以是函数。函数接收 `(fields variables)`，返回
+`((name . STRING) (front . STRING) (back . STRING))`，返回的字符串直接使用：
+
+```elisp
+(defun my-srs-card (fields variables)
+  `((name . ,(cdr (assoc "word" fields)))
+    (front . ,(alist-get "example_sentence" fields "" nil #'equal))
+    (back . ,(concat (alist-get "remarks" fields "" nil #'equal) "\n\n"
+                    (alist-get 'dictionary variables) "\n\n"
+                    (alist-get 'audio variables)))))
+
+(setq zr-org-srs-x-model-alist
+      '((modelofluna . my-srs-card)
+        (t . zr-org-srs-x-render-default-note)))
+```
+
+`fields` 是按模型声明顺序排列的 `((字段名字符串 . Org 文本) ...)` alist，已移除
+Luna 词典字段、导入附件并将字段转成 Org。`variables` 是以
+`dictionary/picture/audio/video` 为 symbol key、Org 文本为值的 alist。
+模板 alist 中的单项 cdr 也可以是函数，接收相同参数，
+返回该项的 Org 字符串。
+
+配置读取和渲染函数调用都在目标 deck buffer 中进行，所以这份 alist 也能通过
+file-local 或 `.dir-locals.el` 设置，遵循 Emacs 的局部变量信任规则。
+修改局部配置后执行 `M-x normal-mode`，仅影响之后创建的卡片。
+服务会转义可能被解释成额外标题、关键字或抽屉的正文行。
 
 ## 接口与验证
 

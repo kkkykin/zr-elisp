@@ -79,13 +79,30 @@ For example, customize this when LunaTranslator runs on Windows and
 Emacs reads the same files through a WSL mount."
   :type 'function)
 
-(defcustom zr-org-srs-x-render-function #'zr-org-srs-x-render-luna-note
-  "Function converting FIELDS and DEFINITIONS to (FRONT . BACK) strings.
-FIELDS is a hash table; DEFINITIONS is dictionary.el's text in Org format.
-Dictionary lookup and attachment import run before this function.
-The default handles LunaTranslator fields and falls back to the first
-field on the front and remaining fields on the back for other models."
-  :type 'function)
+(defcustom zr-org-srs-x-model-alist
+  '((modelofluna
+     . ((name . "$.word")
+        (front . "$.word\n\n$.example_sentence\n\n$.audio_for_word\n\n$.audio_for_example_sentence\n\n$.screenshot")
+        (back . "$.rubytextHtml\n\n$.remarks\n\n$.user_custom_1\n\n$dictionary")))
+    (t . zr-org-srs-x-render-default-note))
+  "Renderers selected by an Anki note's modelName.
+Keys are model names as strings or symbols; t supplies the fallback.
+A renderer is an alist of name/front/back templates, or a function.
+Templates substitute $.FIELD with the field's Org text and $dictionary,
+$picture, $audio and $video with definitions and imported media links.
+Missing fields and absent media become empty strings; $$ is a literal $.
+Each template may also be a function of (FIELDS VARIABLES) returning text.
+A model renderer function receives the same arguments and returns an alist
+of name/front/back Org strings, which are used without template expansion.
+FIELDS is an ordered alist from field names to Org strings, following the
+model's field order.  VARIABLES uses the symbols dictionary, picture,
+audio and video as keys.
+Render in the deck buffer after dictionary lookup and attachment import."
+  :type '(alist :key-type (choice string symbol)
+                :value-type
+                (choice function
+                        (alist :key-type (choice (const name) (const front) (const back))
+                               :value-type (choice string function)))))
 
 (defcustom zr-org-srs-x-max-request-size (* 64 1024 1024)
   "Maximum HTTP request body size in bytes."
@@ -329,27 +346,64 @@ does not consume replies belonging to an interactive Dictionary buffer."
                 ""))
         (dictionary-connection-close dictionary-connection)))))
 
-(defun zr-org-srs-x-render-luna-note (fields definitions)
-  "Return Org (FRONT . BACK) strings for a note's FIELDS hash table.
-LunaTranslator's word, example, screenshot and audio form the front.
-Reading, remarks, dictionary.el DEFINITIONS and extra fields form the back."
-  (let* ((front-names (if (gethash "word" fields)
-                          '("word" "example_sentence" "audio_for_word"
-                            "audio_for_example_sentence" "screenshot")
-                        (list (car (hash-table-keys fields)))))
-         (ignored (append front-names '("dictionaryInfo" "dictionaryContent")))
-         (front nil) (back nil))
-    (dolist (name front-names)
-      (when-let* ((value (gethash name fields)) ((not (string-empty-p value))))
-        (push (zr-org-srs-x--html value) front)))
-    (maphash (lambda (name value)
-               (unless (or (member name ignored) (string-empty-p value))
-                 (push (concat "*" name "*\n" (zr-org-srs-x--html value)) back)))
-             fields)
+(defun zr-org-srs-x-render-default-note (fields variables)
+  "Render FIELDS and VARIABLES with the first field as name and front.
+Put remaining fields and dictionary definitions on the back."
+  (let* ((name (cdar fields))
+         (definitions (alist-get 'dictionary variables))
+         (back nil))
+    (dolist (field (cdr fields))
+      (unless (string-empty-p (cdr field))
+        (push (concat "*" (car field) "*\n" (cdr field)) back)))
     (unless (string-empty-p definitions)
       (push definitions back))
-    (cons (string-join (nreverse front) "\n\n")
-          (string-join (nreverse back) "\n\n"))))
+    `((name . ,name) (front . ,name)
+      (back . ,(string-join (nreverse back) "\n\n")))))
+
+(defun zr-org-srs-x--template (template fields variables)
+  "Render TEMPLATE with Org FIELDS and VARIABLES.
+Call function templates directly; expand string templates in one pass."
+  (if (functionp template)
+      (funcall template fields variables)
+    (unless (stringp template)
+      (error "Card template must be a string or function: %S" template))
+    (replace-regexp-in-string
+     "\\$\\(?:\\.[[:alnum:]_-]+\\|[[:alpha:]_][[:alnum:]_-]*\\|\\$\\)"
+     (lambda (token)
+       (cond
+        ((equal token "$$") "$")
+        ((string-prefix-p "$." token) (alist-get (substring token 2) fields "" nil #'equal))
+        (t (if-let* ((entry (assoc-string (substring token 1) variables)))
+               (cdr entry)
+             (error "Unknown card template variable: %s" token)))))
+     template t t)))
+
+(defun zr-org-srs-x--render (model-name fields variables)
+  "Render MODEL-NAME using Org FIELDS and VARIABLES in the current deck.
+Return an alist of name/front/back strings."
+  (let* ((entry (or (assoc-string model-name zr-org-srs-x-model-alist)
+                    (assq t zr-org-srs-x-model-alist)
+                    (error "No card renderer for model: %s" model-name)))
+         (renderer (cdr entry))
+         (parts (if (functionp renderer)
+                    (funcall renderer fields variables)
+                  (mapcar (lambda (key)
+                            (cons key (zr-org-srs-x--template
+                                       (alist-get key renderer) fields variables)))
+                          '(name front back)))))
+    (unless (listp parts)
+      (error "Card renderer must supply a name/front/back alist"))
+    (let ((card
+           (mapcar
+            (lambda (key)
+              (let ((text (alist-get key parts)))
+                (unless (stringp text)
+                  (error "Card renderer must supply an Org string for %s" key))
+                (cons key (string-trim text))))
+            '(name front back))))
+      (when (string-empty-p (alist-get 'name card))
+        (error "Card renderer produced an empty name"))
+      card)))
 
 (defun zr-org-srs-x--media-bytes (media)
   "Read an Anki MEDIA object's path or base64 data as unibyte content."
@@ -366,33 +420,40 @@ Reading, remarks, dictionary.el DEFINITIONS and extra fields form the back."
    (t (error "Media requires path or base64 data"))))
 
 (defun zr-org-srs-x--import-media (note fields file)
-  "Copy NOTE attachments beside FILE and append references to FIELDS."
-  (dolist (kind '("audio" "picture" "video"))
-    (let ((medias (gethash kind note [])))
-      (unless (vectorp medias)
-        (error "Expected a media array"))
-      (cl-loop for media across medias do
-               (let* ((filename (zr-org-srs-x--string (zr-org-srs-x--get media "filename")))
-                      (targets (zr-org-srs-x--strings (zr-org-srs-x--get media "fields")))
-                      (bytes (zr-org-srs-x--media-bytes media))
-                      (directory (concat (file-name-sans-extension file) ".media/"))
-                      (name (concat (substring (secure-hash 'sha256 bytes) 0 16) "-"
-                                    (replace-regexp-in-string
-                                     "[^[:alnum:]_.-]" "_" (file-name-nondirectory filename))))
-                      (destination (expand-file-name name directory))
-                      (relative (file-relative-name destination (file-name-directory file)))
-                      (reference (if (equal kind "picture")
-                                     (format "<img src=\"%s\">" relative)
-                                   (format "[sound:%s]" relative))))
-                 (cl-loop for target across targets do
-                          (unless (gethash target fields)
-                            (error "Unknown media field: %s" target)))
-                 (make-directory directory t)
-                 (unless (file-exists-p destination)
-                   (let ((coding-system-for-write 'no-conversion))
-                     (write-region bytes nil destination nil 'silent)))
-                 (cl-loop for target across targets do
-                          (puthash target (concat (gethash target fields) reference) fields)))))))
+  "Copy NOTE attachments beside FILE and append Org links to FIELDS.
+FIELDS is an ordered alist of Org strings, updated in place.
+Return an alist of audio/picture/video Org links for card templates."
+  (let (variables)
+    (dolist (kind '(audio picture video))
+      (let ((medias (gethash (symbol-name kind) note [])) links)
+        (unless (vectorp medias)
+          (error "Expected a media array"))
+        (cl-loop for media across medias do
+                 (let* ((filename (zr-org-srs-x--string (zr-org-srs-x--get media "filename")))
+                        (targets (mapcar
+                                  (lambda (name)
+                                    (or (assoc name fields)
+                                        (error "Unknown media field: %s" name)))
+                                  (zr-org-srs-x--strings (zr-org-srs-x--get media "fields"))))
+                        (bytes (zr-org-srs-x--media-bytes media))
+                        (directory (concat (file-name-sans-extension file) ".media/"))
+                        (name (concat (substring (secure-hash 'sha256 bytes) 0 16) "-"
+                                      (replace-regexp-in-string
+                                       "[^[:alnum:]_.-]" "_" (file-name-nondirectory filename))))
+                        (destination (expand-file-name name directory))
+                        (relative (file-relative-name destination (file-name-directory file)))
+                        (reference (org-link-make-string
+                                    (concat "file:" relative)
+                                    (unless (eq kind 'picture) (capitalize (symbol-name kind))))))
+                   (make-directory directory t)
+                   (unless (file-exists-p destination)
+                     (let ((coding-system-for-write 'no-conversion))
+                       (write-region bytes nil destination nil 'silent)))
+                   (push reference links)
+                   (dolist (target targets)
+                     (setcdr target (concat (cdr target) reference)))))
+        (push (cons kind (string-join (nreverse links) "\n\n")) variables)))
+    (nreverse variables)))
 
 (defun zr-org-srs-x--notes (function &optional files)
   "Call FUNCTION at each imported note in FILES, returning non-nil results.
@@ -442,7 +503,6 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
          (model (or (gethash model-name zr-org-srs-x--models)
                     (error "Model was not found: %s" model-name)))
          (input (zr-org-srs-x--get note "fields"))
-         (fields (make-hash-table :test #'equal))
          (names (gethash "inOrderFields" model))
          (tags (zr-org-srs-x--strings (gethash "tags" note [])))
          (options (gethash "options" note (zr-org-srs-x--object))))
@@ -452,31 +512,28 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
                (unless (member name (append names nil))
                  (error "Unknown field: %s" name))
                (zr-org-srs-x--string value)) input)
-    (cl-loop for name across names do (puthash name (gethash name input "") fields))
-    (when (string-blank-p (zr-org-srs-x--html (gethash (aref names 0) fields)))
+    (when (string-blank-p (zr-org-srs-x--html (gethash (aref names 0) input "")))
       (error "cannot create note because it is empty"))
-    (let ((field-hash (secure-hash 'sha256 (gethash (aref names 0) fields)))
-          (word-hash (when-let* ((word (gethash "word" fields)))
-                       (secure-hash 'sha256 word))))
+    (let ((field-hash (secure-hash 'sha256 (gethash (aref names 0) input "")))
+          (word-hash (when (cl-find "word" names :test #'equal)
+                       (secure-hash 'sha256 (gethash "word" input "")))))
       (zr-org-srs-x--check-duplicate model-name field-hash options)
-      (zr-org-srs-x--buffer file)
-      ;; The client's dictionary pages are deliberately neither parsed nor saved.
-      (remhash "dictionaryInfo" fields)
-      (remhash "dictionaryContent" fields)
-      (zr-org-srs-x--import-media note fields file)
-      (let* ((definitions (with-current-buffer (zr-org-srs-x--buffer file)
-                            (zr-org-srs-x--dictionary-text
-                             (zr-org-srs-x--html (gethash "word" fields
-                                                          (gethash (aref names 0) fields))))))
-             (sides (funcall zr-org-srs-x-render-function fields definitions))
+      (let* ((card (with-current-buffer (zr-org-srs-x--buffer file)
+                     ;; Discard the client's dictionary pages before HTML conversion.
+                     (let* ((fields (cl-loop for name across names
+                                             unless (member name '("dictionaryInfo" "dictionaryContent"))
+                                             collect (cons name (zr-org-srs-x--html (gethash name input "")))))
+                            (definitions (zr-org-srs-x--dictionary-text
+                                          (alist-get "word" fields (cdar fields) nil #'equal)))
+                            (variables (cons (cons 'dictionary definitions)
+                                             (zr-org-srs-x--import-media note fields file))))
+                       (zr-org-srs-x--render model-name fields variables))))
              (id (zr-org-srs-x--new-id))
              (org-id (org-id-new))
              (entry (zr-org-srs-x--object "noteId" id "modelName" model-name
                                           "fieldHash" field-hash "wordHash" word-hash))
              (title (replace-regexp-in-string
-                     "[\n\r\t]+" " " (zr-org-srs-x--html (gethash (aref names 0) fields)))))
-        (unless (and (consp sides) (stringp (car sides)) (stringp (cdr sides)))
-          (error "Renderer must return (FRONT . BACK) strings"))
+                     "[\n\r\t]+" " " (alist-get 'name card))))
         ;; Dictionary waits can dispatch another capture request.  Refresh the
         ;; index and duplicate check before committing this card.
         (setq zr-org-srs-x--note-index (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
@@ -490,8 +547,8 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
                 (unless (bolp) (insert "\n"))
                 (insert "\n* " title "\n")
                 (let ((position (line-beginning-position 0)))
-                  (insert "** Front\n" (zr-org-srs-x--body (car sides)) "\n\n"
-                          "** Back\n" (zr-org-srs-x--body (cdr sides)) "\n")
+                  (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
+                          "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
                   (goto-char position)
                   (org-entry-put nil "ID" org-id)
                   (org-set-tags
