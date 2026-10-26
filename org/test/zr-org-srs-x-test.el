@@ -28,6 +28,7 @@
           (zr-org-srs-x-model-alist (default-value 'zr-org-srs-x-model-alist))
           (zr-org-srs-x--server nil)
           (zr-org-srs-x--clients nil)
+          (zr-org-srs-x--models (make-hash-table :test #'equal))
           (zr-org-srs-x--last-id 0))
       (unwind-protect
           (progn ,@body)
@@ -200,6 +201,7 @@
            (append (list (cons 'zr-org-srs-x-model-alist directory-renderers)
                          (cons 'zr-org-srs-x-model-alist file-renderers))
                    safe-local-variable-values)))
+     (make-directory zr-org-srs-x-directory t)
      (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
        (prin1 `((org-mode . ((zr-org-srs-x-model-alist . ,directory-renderers)))) (current-buffer)))
      (with-temp-file (zr-org-srs-x--deck-file "override")
@@ -278,11 +280,12 @@
                              "name" "modelofluna" "templates"
                              (zr-org-srs-x--object "LUNACARDTEMPLATE1"
                                                    (zr-org-srs-x--object "Front" "new front" "Back" "new back"))))
-   (let ((model (gethash "modelofluna" (zr-org-srs-x--read-data ".zr-org-srs-x.json"))))
+   (let ((model (gethash "modelofluna" zr-org-srs-x--models)))
      (should (equal (gethash "templateName" model) "LUNACARDTEMPLATE1"))
      (should-not (gethash "css" model))
      (should-not (gethash "cardTemplates" model))
-     (should (= (hash-table-count model) 4)))))
+     (should (= (hash-table-count model) 4)))
+   (should-not (file-exists-p (expand-file-name ".zr-org-srs-x.json" zr-org-srs-x-directory)))))
 
 (ert-deftest zr-org-srs-x-test-deck-files-and-existing-decks ()
   (zr-org-srs-x-test--with-decks
@@ -369,6 +372,7 @@
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
+   (make-directory zr-org-srs-x-directory t)
    (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
      (insert "((org-mode . ((dictionary-default-dictionary . \"edict\"))))\n"))
    (zr-org-srs-x-test--call "createDeck" "deck" "英語")
@@ -403,11 +407,7 @@
          (goto-char (point-min))
          (re-search-forward "^\\* ")
          (org-back-to-heading)
-         (should (org-entry-get nil "ID"))
-         (let ((entry (gethash (org-entry-get nil "ID")
-                               (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))))
-           (should (= (gethash "noteId" entry) id))
-           (should (equal (gethash "modelName" entry) "modelofluna")))
+         (should (equal (org-entry-get nil "ID") (number-to-string id)))
          (should-not (string-match-p "^:ANKI_" (buffer-string)))
          (should (equal (org-get-tags) '("日本語" "game_one")))
          (should (= (length (org-srs-query-buffer (org-srs-query-predicate-new))) 1))
@@ -427,10 +427,8 @@
                         (should-not (string-match-p "猫の定義" back-text)))
                (should (string-match-p "猫の定義 from DICT" back-text))
                (should-not (string-match-p "cat from DICT" back-text)))))
-         (should (< (file-attribute-size
-                     (file-attributes (expand-file-name ".zr-org-srs-x-notes.json"
-                                                        zr-org-srs-x-directory)))
-                    1536)))))
+         (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json"
+                                                    zr-org-srs-x-directory))))))
     (should (member "define edict \"猫\"" dictionary-commands))
     (should (member "define local \"猫\"" dictionary-commands))
     (should (equal dictionary-default-dictionary "*")))))
@@ -517,8 +515,88 @@
        (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") (vector second)))
        (zr-org-srs-x-test--call "deleteNotes" "notes" (vector second))
        (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") []))
-       (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json")) 0)))
+       (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory))))
      (zr-org-srs-x-test--call "addNote" "note" note))))
+
+(ert-deftest zr-org-srs-x-test-restart-and-clock-rollback-keep-ids-unique-across-decks ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (let ((now "2000000000000"))
+     (cl-letf (((symbol-function 'org-id-new) (lambda (&rest _) now)))
+       (zr-org-srs-x-test--create-model)
+       (zr-org-srs-x-test--call "createDeck" "deck" "cats")
+       (zr-org-srs-x-test--call "createDeck" "deck" "dogs")
+       (let ((first (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "cats" "猫"))))
+         ;; A fresh Emacs must recover the maximum ID from the Org files.
+         (setq zr-org-srs-x--last-id nil
+               zr-org-srs-x--models (make-hash-table :test #'equal)
+               now "1999999999999")
+         (zr-org-srs-x-test--create-model)
+         (let ((second (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "dogs" "犬"))))
+           (should (> second first))
+           (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") (vector first second)))
+           (zr-org-srs-x-test--call "deleteNotes" "notes" (vector second))
+           (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") (vector first)))))))))
+
+(ert-deftest zr-org-srs-x-test-word-query-matches-only-complete-heading ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (let ((cat (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "猫"))))
+     ;; All notes' example sentences contain 猫, regardless of their word.
+     (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "犬"))
+     (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "野良猫"))
+     (dolist (filter '("w" "word"))
+       (should (equal (zr-org-srs-x-test--call
+                       "findNotes" "query" (format "deck:\"lunadeck\" %s:\"猫\"" filter))
+                      (vector cat))))
+     (let ((upper (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "CAT"))))
+       (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "cat"))
+       (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"lunadeck\" w:\"CAT\"")
+                      (vector upper)))))))
+
+(ert-deftest zr-org-srs-x-test-heading-keywords-are-preserved-for-duplicates-and-search ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck" "study"))
+   (dolist (title '("TODO study" "[#A] study" "COMMENT study"))
+     (let ((note (zr-org-srs-x-test--note "lunadeck" title)))
+       (puthash "options" (zr-org-srs-x--object "allowDuplicate" :false) note)
+       (let ((id (zr-org-srs-x-test--call "addNote" "note" note))
+             (response (zr-org-srs-x-request
+                        (zr-org-srs-x--object "action" "addNote" "params"
+                                              (zr-org-srs-x--object "note" note)))))
+         (should (equal (gethash "error" response) "cannot create note because it is a duplicate"))
+         (should (equal (zr-org-srs-x-test--call
+                         "findNotes" "query" (format "deck:\"lunadeck\" w:\"%s\"" title))
+                        (vector id))))))))
+
+(ert-deftest zr-org-srs-x-test-noncanonical-org-ids-are-ignored ()
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (let ((invalid-ids '("12345678-abcd-4cde-8f90-123456789abc"
+                        "99999999999999999999-abcd-4cde-8f90-123456789abc"
+                        "2e30" "3.5" "0" "012345678" "-10")))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+       (goto-char (point-max))
+       (dolist (id (cons "12345678" invalid-ids))
+         (insert "\n* Note " id "\n:PROPERTIES:\n:ID: " id "\n:END:\n"))
+       (zr-org-srs-x--save))
+     (setq zr-org-srs-x--last-id nil)
+     (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") [12345678]))
+     (should (= zr-org-srs-x--last-id 12345678))
+     ;; Capture's scan must ignore the same invalid IDs as findNotes.
+     (setq zr-org-srs-x--last-id nil)
+     (zr-org-srs-x--check-duplicate "New card" (zr-org-srs-x--object))
+     (should (= zr-org-srs-x--last-id 12345678))
+     (zr-org-srs-x-test--call "deleteNotes" "notes" [12345678])
+     (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") []))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+       (dolist (id invalid-ids)
+         (should (string-match-p (regexp-quote (concat ":ID: " id "\n")) (buffer-string))))))))
 
 (ert-deftest zr-org-srs-x-test-save-failure-rolls-back-card ()
   (zr-org-srs-x-test--require-srs)
@@ -532,30 +610,17 @@
                         (zr-org-srs-x--object "action" "addNote" "params"
                                               (zr-org-srs-x--object "note" (zr-org-srs-x-test--note "lunadeck"))))))
          (should (equal (gethash "error" response) "disk full"))))
-     (should (equal before (with-current-buffer buffer (buffer-string))))
-     (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json")) 0)))))
+     (should (equal before (with-current-buffer buffer (buffer-string)))))))
 
-(ert-deftest zr-org-srs-x-test-index-save-failure-does-not-save-card ()
+(ert-deftest zr-org-srs-x-test-zero-disk-json-files-created ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
-   (let* ((file (zr-org-srs-x--deck-file "lunadeck"))
-          (buffer (zr-org-srs-x--buffer file))
-          (before (with-current-buffer buffer (buffer-string)))
-          (write-data (symbol-function 'zr-org-srs-x--write-data)))
-     (cl-letf (((symbol-function 'zr-org-srs-x--write-data)
-                (lambda (name data)
-                  (if (equal name ".zr-org-srs-x-notes.json")
-                      (error "index is read-only")
-                    (funcall write-data name data)))))
-       (let ((response (zr-org-srs-x-request
-                        (zr-org-srs-x--object "action" "addNote" "params"
-                                              (zr-org-srs-x--object "note" (zr-org-srs-x-test--note "lunadeck"))))))
-         (should (equal (gethash "error" response) "index is read-only"))))
-     (should (equal before (with-current-buffer buffer (buffer-string))))
-     (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
-     (should (equal (zr-org-srs-x-test--call "findNotes" "query" "") [])))))
+   (let ((id (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))))
+     (should (integerp id))
+     (should (file-exists-p (expand-file-name "lunadeck.org" zr-org-srs-x-directory)))
+     (should-not (directory-files-recursively zr-org-srs-x-directory "\\.json\\'")))))
 
 (ert-deftest zr-org-srs-x-test-large-and-malformed-luna-dictionaries-are-discarded ()
   (zr-org-srs-x-test--require-srs)
@@ -586,11 +651,7 @@
                                      (buffer-string)))
          (should (< (buffer-size) 8192))
          (should (= (length (org-srs-query-buffer (org-srs-query-predicate-new))) 1)))
-       (let ((index (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))
-         (should (< (file-attribute-size (file-attributes index)) 1024))
-         (with-temp-buffer
-           (insert-file-contents index)
-           (should-not (string-match-p "dictionaryContent\\|Large-page definition\\|SECRET_SCRIPT" (buffer-string)))))))))
+       (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))))))
 
 (ert-deftest zr-org-srs-x-test-dictionary-missing-word-and-quoted-word ()
   (zr-org-srs-x-test--with-dictionary
@@ -693,7 +754,7 @@
                                   (gethash "error" result))))
         (should (equal before (with-current-buffer buffer (buffer-string))))
         (should (equal before (with-temp-buffer (insert-file-contents file) (buffer-string))))
-        (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json")) 0))
+        (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))
         (accept-process-output nil 0.02)
         (should-not (cl-some #'process-live-p dictionary-clients)))))))
 
@@ -723,10 +784,9 @@
              (should (integerp (gethash "result" response))))))
        (should (= (length (zr-org-srs-x-test--call "findNotes" "query" ""))
                   (if same-word 1 2)))
-       (should (= (hash-table-count (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
-                  (if same-word 1 2)))))))
+       (should-not (file-exists-p (expand-file-name ".zr-org-srs-x-notes.json" zr-org-srs-x-directory)))))))
 
-(ert-deftest zr-org-srs-x-test-first-field-duplicates-and-word-search-use-separate-hashes ()
+(ert-deftest zr-org-srs-x-test-custom-model-duplicates-and-search-use-heading ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--call
@@ -749,10 +809,14 @@
        (should (equal (gethash "error" response) "cannot create note because it is a duplicate")))
      (puthash "prompt" "second prompt" (gethash "fields" note))
      (let ((second (zr-org-srs-x-test--call "addNote" "note" note)))
-       (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"custom\" w:\"猫\"")
+       (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"custom\" w:\"first prompt\"")
                       (vector first)))
-       (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"custom\" w:\"犬\"")
-                      (vector second)))))))
+       (should (equal (zr-org-srs-x-test--call "findNotes" "query" "deck:\"custom\" w:\"second prompt\"")
+                      (vector second)))
+       (dolist (word '("猫" "犬"))
+         (should (equal (zr-org-srs-x-test--call
+                         "findNotes" "query" (format "deck:\"custom\" w:\"%s\"" word))
+                        [])))))))
 
 (ert-deftest zr-org-srs-x-test-content-cannot-create-extra-org-structure ()
   (zr-org-srs-x-test--require-srs)
@@ -836,6 +900,25 @@
        (should-not (gethash "result" response))
        (should (stringp (gethash "error" response)))))
    (should-not (file-exists-p zr-org-srs-x-directory))))
+
+(ert-deftest zr-org-srs-x-test-numeric-timestamp-id-in-card ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (let* ((note (zr-org-srs-x-test--note "lunadeck" "テスト"))
+          (id (zr-org-srs-x-test--call "addNote" "note" note)))
+     (should (integerp id))
+     (should (> id 1000000000000))
+     (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
+       (goto-char (point-min))
+       (re-search-forward "^\\* ")
+       (org-back-to-heading)
+       (should (equal (org-entry-get nil "ID") (number-to-string id)))
+       (should (equal (org-element-map (org-element-parse-buffer) 'node-property
+                        (lambda (property) (org-element-property :key property)))
+                      '("ID")))
+       (should (string-match-p (format "#\\+NAME: srsitem:%d::card::back" id) (buffer-string)))))))
 
 (provide 'zr-org-srs-x-test)
 ;;; zr-org-srs-x-test.el ends here

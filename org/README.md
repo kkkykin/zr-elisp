@@ -48,14 +48,14 @@
 通过 `org-srs-item-new` 创建实际的 `card back` 复习条目和日志。
 
 原始字段不写入 Org 或其他文件，LunaTranslator 词典 HTML 直接丢弃。
-接口所需的数字笔记 ID、模型名、去重及单词查询摘要，保存在
-`.zr-org-srs-x-notes.json` 中，通过 Org `ID` 关联卡片；此文件应随 deck 一起保留。
-复习只依赖 Org 文件，摘要索引用于 AnkiConnect 的查找、删除和去重。
+全纯 Org 模式存储，**不生成任何外部 JSON 元数据文件**，完全避免 Git 冲突。
+卡片使用 Anki 兼容的 13 位毫秒时间戳作为 Org 的 `:ID:` 属性与 `srsitem:<ID>::card::back` 条目名。
+AnkiConnect 的查找、删除和去重直接在 Org buffer 中按 `:ID:` 与标题进行。
 
 默认正面包含单词、例句、单词音频、例句音频和截图；背面包含读音、翻译/备注
 （`remarks`）、dictionary.el 的释义和额外字段。
 HTML 转成 Org 文本和链接，脚本、样式不参与正文。
-Anki 模型只保存字段定义、模板名和编号，写入 `.zr-org-srs-x.json`。
+客户端创建的 Anki 模型仅在 Emacs 运行时保存在内存中，不落盘。
 模板 HTML 和 CSS 请求会被验证后丢弃，卡片使用 Org-srs 的显示方式。
 
 ## dictionary.el 查词
@@ -200,7 +200,11 @@ file-local 或 `.dir-locals.el` 设置，遵循 Emacs 的局部变量信任规�
 返回 AnkiConnect 的 `result` / `error` 对象。
 
 `findNotes` 支持空查询、`deck:"名称"` 和 LunaTranslator 使用的
-`deck:"名称" w:"单词"`（也接受 `word:`）。重复检查使用同一模型的第一个字段，
+`deck:"名称" w:"单词"`（也接受 `word:`）。单词查询精确匹配一级标题文字，
+不匹配例句、释义或其他正文；自定义标题与单词不同的卡片按标题查找。
+标题匹配忽略 tags，保留 TODO 关键词、优先级和 COMMENT。
+查找只返回规范的正整数 `ID`，UUID 等其他 Org ID 不参与接口查询。
+重复检查比对已有的一级标题文字，
 范围是所有 deck；`allowDuplicate` 为 true 时允许重复。
 模型要求非 cloze 且只有一个卡片模板，其他 AnkiConnect 操作返回错误。
 

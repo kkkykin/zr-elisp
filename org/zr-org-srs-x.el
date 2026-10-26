@@ -55,9 +55,7 @@
   :prefix "zr-org-srs-x-")
 
 (defcustom zr-org-srs-x-directory (expand-file-name "srs" org-directory)
-  "Directory containing deck Org files and capture metadata.
-Models live in .zr-org-srs-x.json; note IDs and hashes in
-.zr-org-srs-x-notes.json.
+  "Directory containing deck Org files and capture media.
 The Anki deck A::B corresponds to A/B.org in this directory."
   :type 'directory)
 
@@ -110,10 +108,20 @@ Render in the deck buffer after dictionary lookup and attachment import."
 
 (defvar zr-org-srs-x--server nil)
 (defvar zr-org-srs-x--clients nil)
-(defvar zr-org-srs-x--last-id 0)
-(defvar zr-org-srs-x--models nil)
-(defvar zr-org-srs-x--models-changed nil)
-(defvar zr-org-srs-x--note-index nil)
+(defvar zr-org-srs-x--models (make-hash-table :test #'equal))
+(defvar zr-org-srs-x--last-id nil)
+
+(defun zr-org-srs-x--new-id ()
+  "Generate a strictly monotonic integer ID compatible with Anki."
+  (let* ((now (let ((org-id-method 'ts)
+                    (org-id-ts-format "%s%3N")
+                    (org-id-prefix nil)
+                    (org-id-include-domain nil))
+                (string-to-number (org-id-new 'none))))
+         (id (if (and zr-org-srs-x--last-id (>= zr-org-srs-x--last-id now))
+                 (1+ zr-org-srs-x--last-id)
+               now)))
+    (setq zr-org-srs-x--last-id id)))
 
 (defun zr-org-srs-x--object (&rest pairs)
   "Return a JSON object from alternating key/value PAIRS."
@@ -177,11 +185,6 @@ Render in the deck buffer after dictionary lookup and attachment import."
   "Return a stable integer deck ID for DECK."
   (string-to-number (substring (secure-hash 'sha1 deck) 0 12) 16))
 
-(defun zr-org-srs-x--new-id ()
-  "Return a monotonically increasing timestamp-based ID."
-  (setq zr-org-srs-x--last-id
-        (max (1+ zr-org-srs-x--last-id) (floor (* 1000 (float-time))))))
-
 (defun zr-org-srs-x--buffer (file &optional create)
   "Visit deck FILE, creating its directory when CREATE is non-nil."
   (unless (or create (file-exists-p file))
@@ -201,32 +204,6 @@ Render in the deck buffer after dictionary lookup and attachment import."
       (save-buffer)))
   (when (buffer-modified-p)
     (error "Deck changed on disk or could not be saved: %s" buffer-file-name)))
-
-(defun zr-org-srs-x--read-data (name)
-  "Read the JSON object in metadata file NAME, or return an empty object."
-  (let ((file (expand-file-name name zr-org-srs-x-directory)))
-    (if (file-exists-p file)
-        (with-temp-buffer
-          (insert-file-contents file)
-          (let ((data (zr-org-srs-x--parse (buffer-string))))
-            (unless (hash-table-p data)
-              (error "Invalid metadata: %s" file))
-            data))
-      (make-hash-table :test #'equal))))
-
-(defun zr-org-srs-x--write-data (name data)
-  "Atomically write DATA to metadata file NAME."
-  (make-directory zr-org-srs-x-directory t)
-  (let* ((file (expand-file-name name zr-org-srs-x-directory))
-         (temporary (make-temp-file (concat file "-")))
-         (coding-system-for-write 'utf-8-unix))
-    (unwind-protect
-        (progn
-          (with-temp-file temporary
-            (insert (zr-org-srs-x--json data) "\n"))
-          (rename-file temporary file t))
-      (when (file-exists-p temporary)
-        (delete-file temporary)))))
 
 (defun zr-org-srs-x--dom-text (node)
   "Convert HTML DOM NODE to Org text without running scripts."
@@ -455,43 +432,35 @@ Return an alist of audio/picture/video Org links for card templates."
         (push (cons kind (string-join (nreverse links) "\n\n")) variables)))
     (nreverse variables)))
 
-(defun zr-org-srs-x--notes (function &optional files)
-  "Call FUNCTION at each imported note in FILES, returning non-nil results.
-FUNCTION receives the numeric note ID, deck file and index entry.
-Default FILES is every deck file.  Preserve buffer point and narrowing."
-  (let ((results nil))
-    (dolist (file (or files (zr-org-srs-x--files)))
+(defun zr-org-srs-x--body (text)
+  "Escape structural Org lines in card TEXT, preserving card subheadings."
+  (replace-regexp-in-string
+   "^\\([ \t]*\\)\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:[ \t]*$\\)" "\\1,\\2" text))
+
+(defun zr-org-srs-x--note-id ()
+  "Return the current entry's canonical positive integer ID, or nil."
+  (when-let* ((id (org-entry-get nil "ID"))
+              ((string-match-p "\\`[1-9][0-9]*\\'" id)))
+    (string-to-number id)))
+
+(defun zr-org-srs-x--check-duplicate (title options)
+  "Reject note when TITLE already exists unless OPTIONS allow duplicates.
+Always scan existing Org headings to keep `zr-org-srs-x--last-id'
+strictly increasing."
+  (let (duplicate)
+    (dolist (file (zr-org-srs-x--files))
       (with-current-buffer (zr-org-srs-x--buffer file)
         (save-excursion
           (save-restriction
             (widen)
             (org-map-entries
              (lambda ()
-               (when-let* ((org-id (org-entry-get nil "ID"))
-                           (entry (gethash org-id zr-org-srs-x--note-index))
-                           (id (gethash "noteId" entry)))
-                 (setq zr-org-srs-x--last-id (max zr-org-srs-x--last-id id))
-                 (when-let* ((value (funcall function id file entry)))
-                   (push value results))))
-             nil 'file)))))
-    (nreverse results)))
-
-(defun zr-org-srs-x--body (text)
-  "Escape structural Org lines in card TEXT, preserving card subheadings."
-  (replace-regexp-in-string
-   "^\\([ \t]*\\)\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:[ \t]*$\\)" "\\1,\\2" text))
-
-(defun zr-org-srs-x--check-duplicate (model-name field-hash options)
-  "Reject duplicates of MODEL-NAME and FIELD-HASH unless OPTIONS allow them."
-  (let (duplicate)
-    ;; Scan even when duplicates are allowed, to keep IDs unique after restart.
-    (zr-org-srs-x--notes
-     (lambda (_id _file entry)
-       (when (and (equal (gethash "modelName" entry) model-name)
-                  (equal (gethash "fieldHash" entry) field-hash))
-         (setq duplicate t))
-       nil))
-    (when (and duplicate (not (eq (zr-org-srs-x--get options "allowDuplicate") t)))
+               (when-let* ((id (zr-org-srs-x--note-id)))
+                 (setq zr-org-srs-x--last-id (max (or zr-org-srs-x--last-id 0) id)))
+               (when (equal (org-get-heading t) title)
+                 (setq duplicate t)))
+             "LEVEL=1" 'file)))))
+    (when (and duplicate (not (and (hash-table-p options) (eq (gethash "allowDuplicate" options) t))))
       (error "cannot create note because it is a duplicate"))))
 
 (defun zr-org-srs-x--add-note (note)
@@ -511,73 +480,58 @@ Default FILES is every deck file.  Preserve buffer point and narrowing."
     (maphash (lambda (name value)
                (unless (member name (append names nil))
                  (error "Unknown field: %s" name))
-               (zr-org-srs-x--string value)) input)
+               (zr-org-srs-x--string value))
+             input)
     (when (string-blank-p (zr-org-srs-x--html (gethash (aref names 0) input "")))
       (error "cannot create note because it is empty"))
-    (let ((field-hash (secure-hash 'sha256 (gethash (aref names 0) input "")))
-          (word-hash (when (cl-find "word" names :test #'equal)
-                       (secure-hash 'sha256 (gethash "word" input "")))))
-      (zr-org-srs-x--check-duplicate model-name field-hash options)
-      (let* ((card (with-current-buffer (zr-org-srs-x--buffer file)
-                     ;; Discard the client's dictionary pages before HTML conversion.
-                     (let* ((fields (cl-loop for name across names
-                                             unless (member name '("dictionaryInfo" "dictionaryContent"))
-                                             collect (cons name (zr-org-srs-x--html (gethash name input "")))))
-                            (definitions (zr-org-srs-x--dictionary-text
-                                          (alist-get "word" fields (cdar fields) nil #'equal)))
-                            (variables (cons (cons 'dictionary definitions)
-                                             (zr-org-srs-x--import-media note fields file))))
-                       (zr-org-srs-x--render model-name fields variables))))
-             (id (zr-org-srs-x--new-id))
-             (org-id (org-id-new))
-             (entry (zr-org-srs-x--object "noteId" id "modelName" model-name
-                                          "fieldHash" field-hash "wordHash" word-hash))
-             (title (replace-regexp-in-string
-                     "[\n\r\t]+" " " (alist-get 'name card))))
-        ;; Dictionary waits can dispatch another capture request.  Refresh the
-        ;; index and duplicate check before committing this card.
-        (setq zr-org-srs-x--note-index (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
-        (zr-org-srs-x--check-duplicate model-name field-hash options)
-        (with-current-buffer (zr-org-srs-x--buffer file)
-          (save-excursion
-            (save-restriction
-              (widen)
-              (atomic-change-group
-                (goto-char (point-max))
-                (unless (bolp) (insert "\n"))
-                (insert "\n* " title "\n")
-                (let ((position (line-beginning-position 0)))
-                  (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
-                          "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
-                  (goto-char position)
-                  (org-entry-put nil "ID" org-id)
-                  (org-set-tags
-                   (delete-dups
-                    (mapcar (lambda (tag) (replace-regexp-in-string
-                                           "[^[:alnum:]_@#%]" "_" tag))
-                            (append tags nil))))
-                  (org-srs-item-new 'card))
-                ;; Persist the index before the deck, so an index write failure
-                ;; cannot leave an untracked saved card.  Traversal ignores index
-                ;; entries whose Org ID is absent from the deck files.
-                (puthash org-id entry zr-org-srs-x--note-index)
-                (condition-case err
-                    (progn
-                      (zr-org-srs-x--write-data ".zr-org-srs-x-notes.json" zr-org-srs-x--note-index)
-                      (zr-org-srs-x--save))
-                  (error
-                   (remhash org-id zr-org-srs-x--note-index)
-                   (ignore-errors
-                     (zr-org-srs-x--write-data ".zr-org-srs-x-notes.json" zr-org-srs-x--note-index))
-                   (signal (car err) (cdr err))))))))
-        id))))
+    (let* ((card (with-current-buffer (zr-org-srs-x--buffer file)
+                   ;; Discard the client's dictionary pages before HTML conversion.
+                   (let* ((fields (cl-loop for name across names
+                                           unless (member name '("dictionaryInfo" "dictionaryContent"))
+                                           collect (cons name (zr-org-srs-x--html (gethash name input "")))))
+                          (definitions (zr-org-srs-x--dictionary-text
+                                        (alist-get "word" fields (cdar fields) nil #'equal)))
+                          (variables (cons (cons 'dictionary definitions)
+                                           (zr-org-srs-x--import-media note fields file))))
+                     (zr-org-srs-x--render model-name fields variables))))
+           (title (replace-regexp-in-string
+                   "[\n\r\t]+" " " (alist-get 'name card)))
+           (id (progn
+                 ;; Dictionary waits may dispatch another capture request.
+                 ;; Refresh existing IDs before allocating this card's ID.
+                 (zr-org-srs-x--check-duplicate title options)
+                 (zr-org-srs-x--new-id)))
+           (id-str (number-to-string id)))
+      (with-current-buffer (zr-org-srs-x--buffer file)
+        (save-excursion
+          (save-restriction
+            (widen)
+            (atomic-change-group
+              (goto-char (point-max))
+              (unless (bolp) (insert "\n"))
+              (insert "\n* " title "\n")
+              (let ((position (line-beginning-position 0)))
+                (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
+                        "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
+                (goto-char position)
+                (org-entry-put nil "ID" id-str)
+                (org-set-tags
+                 (delete-dups
+                  (mapcar (lambda (tag) (replace-regexp-in-string
+                                         "[^[:alnum:]_@#%]" "_" tag))
+                          (append tags nil))))
+                (org-srs-item-new 'card))
+              (zr-org-srs-x--save)))))
+      id)))
 
 (defun zr-org-srs-x--find-notes (query)
-  "Find note IDs for QUERY, supporting deck and word/w filters.
-An empty query returns every imported note.  Other Anki search syntax
+  "Find integer note IDs for QUERY, supporting deck and word/w filters.
+Word filters match the complete heading, excluding tags but preserving
+TODO keywords, priorities and COMMENT.  An empty query returns every
+canonical positive integer note ID.  Other Anki search syntax
 is rejected rather than interpreted as an unfiltered query."
   (zr-org-srs-x--string query)
-  (let (deck word)
+  (let (deck word (results nil))
     (unless (string-empty-p query)
       (unless (string-match
                "\\`deck:\\(?:\"\\([^\"]+\\)\"\\|\\([^ \t]+\\)\\)\\(?: +\\(?:w\\|word\\):\"\\([^\"]*\\)\"\\)?\\'"
@@ -585,39 +539,47 @@ is rejected rather than interpreted as an unfiltered query."
         (error "Unsupported note query: %s" query))
       (setq deck (or (match-string 1 query) (match-string 2 query))
             word (match-string 3 query)))
-    (zr-org-srs-x--notes
-     (lambda (id file entry)
-       (when (and (or (not deck) (equal deck (zr-org-srs-x--deck-name file)))
-                  (or (not word)
-                      (equal (secure-hash 'sha256 word) (gethash "wordHash" entry))))
-         id)))))
+    (dolist (file (if deck (list (zr-org-srs-x--deck-file deck)) (zr-org-srs-x--files)))
+      (when (file-exists-p file)
+        (with-current-buffer (zr-org-srs-x--buffer file)
+          (save-excursion
+            (save-restriction
+              (widen)
+              (org-map-entries
+               (lambda ()
+                 (when-let* ((id (zr-org-srs-x--note-id)))
+                   (setq zr-org-srs-x--last-id (max (or zr-org-srs-x--last-id 0) id))
+                   (when (or (not word)
+                             (equal (org-get-heading t) word))
+                     (push id results))))
+               "LEVEL=1" 'file))))))
+    (nreverse results)))
 
 (defun zr-org-srs-x--delete-notes (ids)
-  "Delete imported note subtrees with integer IDS, keeping their attachments."
+  "Delete note subtrees matching integer IDS."
   (unless (and (vectorp ids) (cl-every #'integerp ids))
     (error "Expected an array of note IDs"))
-  ;; Delete from the bottom so Org's traversal is not invalidated by edits.
-  (let ((locations (zr-org-srs-x--notes
-                    (lambda (id _file _entry) (when (member id (append ids nil))
-                                                (point-marker))))))
+  (let ((id-strings (mapcar #'number-to-string (append ids nil))))
     (dolist (file (zr-org-srs-x--files))
       (with-current-buffer (zr-org-srs-x--buffer file)
         (save-excursion
           (save-restriction
             (widen)
-            (atomic-change-group
-              (dolist (marker (reverse locations))
-                (when (eq (marker-buffer marker) (current-buffer))
-                  (goto-char marker)
-                  (delete-region (point) (save-excursion (org-end-of-subtree t t) (point)))))
-              (when (buffer-modified-p) (zr-org-srs-x--save)))))))
-    (mapc (lambda (marker) (set-marker marker nil)) locations)
-    (when locations
-      (dolist (org-id (hash-table-keys zr-org-srs-x--note-index))
-        (when (member (gethash "noteId" (gethash org-id zr-org-srs-x--note-index))
-                      (append ids nil))
-          (remhash org-id zr-org-srs-x--note-index)))
-      (zr-org-srs-x--write-data ".zr-org-srs-x-notes.json" zr-org-srs-x--note-index)))
+            (let ((markers nil))
+              (org-map-entries
+               (lambda ()
+                 (when-let* ((id (org-entry-get nil "ID"))
+                             ((member id id-strings)))
+                   (push (point-marker) markers)))
+               "LEVEL=1" 'file)
+              (when markers
+                (atomic-change-group
+                  (dolist (marker markers)
+                    (goto-char marker)
+                    (delete-region (point) (save-excursion (org-end-of-subtree t t) (point)))
+                    (set-marker marker nil))
+                  (when (buffer-modified-p)
+                    (zr-org-srs-x--save))))))))))
   nil)
 
 (defun zr-org-srs-x--dispatch (action params)
@@ -670,7 +632,6 @@ is rejected rather than interpreted as an unfiltered query."
                      "templateName" (gethash "Name" (aref templates 0))
                      "id" (zr-org-srs-x--new-id))))
          (puthash name model zr-org-srs-x--models)
-         (setq zr-org-srs-x--models-changed t)
          model)))
     ((or "updateModelStyling" "updateModelTemplates")
      (let* ((update (zr-org-srs-x--get params "model"))
@@ -694,17 +655,12 @@ Only the v6 capture actions documented in org/README.md are supported."
   (condition-case err
       (let* ((action (zr-org-srs-x--string (zr-org-srs-x--get request "action")))
              (version (gethash "version" request 6))
-             (params (gethash "params" request (zr-org-srs-x--object)))
-             (zr-org-srs-x--models (zr-org-srs-x--read-data ".zr-org-srs-x.json"))
-             (zr-org-srs-x--note-index (zr-org-srs-x--read-data ".zr-org-srs-x-notes.json"))
-             (zr-org-srs-x--models-changed nil))
+             (params (gethash "params" request (zr-org-srs-x--object))))
         (unless (eql version 6)
           (error "Only AnkiConnect version 6 is supported"))
         (unless (hash-table-p params)
           (error "Expected a params object"))
         (let ((result (zr-org-srs-x--dispatch action params)))
-          (when zr-org-srs-x--models-changed
-            (zr-org-srs-x--write-data ".zr-org-srs-x.json" zr-org-srs-x--models))
           (zr-org-srs-x--object "result" result "error" nil)))
     (error (zr-org-srs-x--object "result" nil "error" (error-message-string err)))))
 
