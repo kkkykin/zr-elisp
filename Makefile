@@ -1,7 +1,7 @@
 EMACS ?= emacs
-EMACSFLAGS ?= -Q -L . -L erc
-FILE ?= $(wildcard *.el erc/*.el)
-TEST_FILE ?= $(wildcard test/*-test.el erc/test/*-test.el)
+EMACSFLAGS ?= -Q -L . -L erc -L org
+FILE ?= $(wildcard *.el erc/*.el org/*.el)
+TEST_FILE ?= $(wildcard test/*-test.el erc/test/*-test.el org/test/*-test.el)
 
 .PHONY: all clean test check-parens byte-compile
 

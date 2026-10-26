@@ -12,7 +12,7 @@
                         (file-name-directory (or load-file-name buffer-file-name)))))
 
 (defconst zr-module-loading-test--modules
-  '(org-srs-x zr-android zr-bookmark zr-comint zr-data zr-dired zr-elisp zr-eshell zr-eww
+  '(zr-org-srs-x zr-android zr-bookmark zr-comint zr-data zr-dired zr-elisp zr-eshell zr-eww
     zr-network zr-notify zr-org zr-org-babel zr-org-export zr-org-link zr-org-protocol
     zr-org-tangle zr-pcmpl zr-process-menu zr-speedbar zr-termux zr-vc
     zr-viper zr-window zr-windows))
@@ -37,6 +37,7 @@
                  (princ "module-loaded")))
              (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
                                    zr-module-loading-test--root
+                                   "-L" (expand-file-name "org" zr-module-loading-test--root)
                                    "--eval" (prin1-to-string form))))
         (ert-info ((format "%s: %s" module (buffer-string)))
           (should (eq status 0))
@@ -62,6 +63,7 @@
                  (error "Extension left installed"))))
            (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
                                  zr-module-loading-test--root
+                                 "-L" (expand-file-name "org" zr-module-loading-test--root)
                                  "--eval" (prin1-to-string form))))
       (ert-info ((buffer-string))
         (should (eq status 0))))))
