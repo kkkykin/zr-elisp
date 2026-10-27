@@ -326,9 +326,11 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
 
 (defun zr-tramp-rcrc--entry (item)
   "Convert an rclone list or stat ITEM to a metadata plist."
+  ;; `set-visited-file-modtime' interprets integers as flags.
   (list :directory (eq (alist-get 'IsDir item) t)
         :size (max 0 (or (alist-get 'Size item) 0))
-        :mtime (ignore-errors (date-to-time (alist-get 'ModTime item)))))
+        :mtime (ignore-errors
+                 (time-convert (date-to-time (alist-get 'ModTime item)) t))))
 
 (defun zr-tramp-rcrc--stat (file &optional fresh)
   "Return metadata for FILE, or nil if missing; FRESH bypasses the cache."

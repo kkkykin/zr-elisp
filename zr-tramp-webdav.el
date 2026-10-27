@@ -470,7 +470,8 @@ EXCLUSIVE makes HTTP 412 a `file-already-exists' error."
 (defun zr-tramp-webdav--time (text)
   "Parse HTTP or ISO date TEXT, returning nil for an unknown date."
   (unless (string-empty-p (or text ""))
-    (ignore-errors (date-to-time text))))
+    ;; `set-visited-file-modtime' interprets integers as flags.
+    (ignore-errors (time-convert (date-to-time text) t))))
 
 (defun zr-tramp-webdav--href-path (href base)
   "Decode an HTTP HREF relative to BASE, or nil for another origin.
