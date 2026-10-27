@@ -727,6 +727,7 @@ after the post hook, as `erc-insert-line' does."
                              " :" sender " PRIVMSG #c :" body))))
     (puthash 'erc--msg 'PRIVMSG erc--msg-props)
     (puthash 'erc--spkr sender erc--msg-props)
+    (puthash 'erc--pfx #'erc--pfx-skip-spkr-fwd erc--msg-props)
     (puthash 'erc--ts (current-time) erc--msg-props)
     (insert "<" (propertize sender 'erc--speaker sender) "> " body "\n")
     (save-restriction
