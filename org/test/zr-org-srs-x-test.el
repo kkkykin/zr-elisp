@@ -89,24 +89,36 @@
      (point))))
 
 (ert-deftest zr-org-srs-x-test-model-templates-and-fallback ()
-  (let* ((fields '(("word" . "猫") ("example_sentence" . "A $dictionary \\1 example")
+  (let* ((fields '(("word" . "猫") ("example_sentence" . "A %s $dictionary \\1 example")
                    ("remarks" . "remark")))
-         (variables '((dictionary . "definition $audio") (picture . "image")
+         (variables '((dictionary . "definition %s $audio") (picture . "image")
                       (audio . "sound") (video . "")))
          (zr-org-srs-x-model-alist
-          '((modelofluna . ((name . "$.word") (front . "$.example_sentence")
-                           (back . "$.remarks\n\n$dictionary\n$picture $audio$video $.missing $$10")))
-            ("other" . ((name . "Other $.word") (front . "$.remarks") (back . "")))
+          '((modelofluna . ((name . ("%s" .word)) (front . ("%s" .example_sentence))
+                           (back . ("%s\n\n%s\n%s %s%s %s $10 %%10"
+                                    .remarks dictionary picture audio video .missing))))
+            ("other" . ((name . ("Other %s" .word)) (front . ("%s" .remarks)) (back . "")))
             (t . zr-org-srs-x-render-default-note))))
     (should (equal (zr-org-srs-x--render "modelofluna" fields variables)
-                   '((name . "猫") (front . "A $dictionary \\1 example")
-                     (back . "remark\n\ndefinition $audio\nimage sound  $10"))))
+                   '((name . "猫") (front . "A %s $dictionary \\1 example")
+                     (back . "remark\n\ndefinition %s $audio\nimage sound  $10 %10"))))
     (should (equal (zr-org-srs-x--render "other" fields variables)
                    '((name . "Other 猫") (front . "remark") (back . ""))))
     (let ((fallback (zr-org-srs-x--render "unconfigured" fields variables)))
       (should (equal (alist-get 'name fallback) "猫"))
       (should (equal (alist-get 'front fallback) "猫"))
-      (should (string-match-p "definition \\$audio" (alist-get 'back fallback))))))
+      (should (string-match-p "definition %s \\$audio" (alist-get 'back fallback))))))
+
+(ert-deftest zr-org-srs-x-test-literal-text-and-format-references ()
+  (let ((literal "$.word $dictionary $$ 100% %s")
+        (fields '(("word" . "猫") ("dictionary" . "field definition")))
+        (variables '((dictionary . "lookup definition") (video . ""))))
+    (should (equal (zr-org-srs-x--template literal fields variables) literal))
+    (should (equal (zr-org-srs-x--template '("%% %s | %s | %s | %s"
+                                           .word .dictionary dictionary video)
+                                         fields variables)
+                   "% 猫 | field definition | lookup definition | "))
+    (should (equal (zr-org-srs-x--template '("%s" .missing) fields variables) ""))))
 
 (ert-deftest zr-org-srs-x-test-manual-card-default-model-and-dictionary ()
   (zr-org-srs-x-test--require-srs)
@@ -118,7 +130,7 @@
            (zr-org-srs-x-model-alist
             '((modelofluna . ((name . "Wrong") (front . "") (back . "")))
               (t . ((deck . "Words::Manual") (dictionaries . (edict))
-                    (name . "$.word") (front . "$.word") (back . "$dictionary")))))
+                    (name . ("%s" .word)) (front . ("%s" .word)) (back . ("%s" dictionary))))))
            (id (zr-org-srs-x-create-card word)))
       (should (integerp id))
       (should (= (hash-table-count zr-org-srs-x--models) 0))
@@ -165,8 +177,10 @@
     "createModel" "modelName" "other" "inOrderFields" ["word"] "css" ""
     "cardTemplates" (vector (zr-org-srs-x--object "Name" "Card" "Front" "" "Back" "")))
    (let ((zr-org-srs-x-model-alist
-          '((modelofluna . ((deck . "Model") (name . "$.word") (front . "$.word") (back . "")))
-            (t . ((deck . "Fallback") (name . "$.word") (front . "$.word") (back . ""))))))
+          '((modelofluna . ((deck . "Model") (name . ("%s" .word))
+                           (front . ("%s" .word)) (back . "")))
+            (t . ((deck . "Fallback") (name . ("%s" .word))
+                  (front . ("%s" .word)) (back . ""))))))
      (dolist (deck '("Model" "Fallback" "Explicit"))
        (zr-org-srs-x-test--call "createDeck" "deck" deck))
      (let ((note (zr-org-srs-x-test--note "ignored" "model default")))
@@ -190,7 +204,7 @@
    (zr-dictionary-test-with-server
     (let* ((zr-dictionary-dictionaries '(globaldb))
            (renderer '((deck . "Words") (dictionaries . (modeldb))
-                       (name . "$.word") (front . "$.word") (back . "$dictionary")))
+                       (name . ("%s" .word)) (front . ("%s" .word)) (back . ("%s" dictionary))))
            (zr-org-srs-x-model-alist (list (cons t renderer)))
            (safe-local-variable-values
             (cons '(zr-dictionary-dictionaries . (localdb)) safe-local-variable-values)))
@@ -223,7 +237,8 @@
                 (should-not (re-search-forward "\\[\\[dict:" end t)))))))
       (zr-org-srs-x-test--create-model)
       (push '(modelofluna . ((deck . "Anki") (dictionaries . (ankidb))
-                            (name . "$.word") (front . "$.word") (back . "$dictionary")))
+                            (name . ("%s" .word)) (front . ("%s" .word))
+                            (back . ("%s" dictionary))))
             zr-org-srs-x-model-alist)
       (zr-org-srs-x-test--call "createDeck" "deck" "Anki")
       (setq dictionary-commands nil)
@@ -240,12 +255,12 @@
    (let ((zr-dictionary-dictionaries '(invalid similar)))
      (cl-letf (((symbol-function 'zr-dictionary-lookup)
                 (lambda (&rest _) (ert-fail "Unexpected dictionary lookup"))))
-       (dolist (back '("" "$.word" "$$dictionary" "$.dictionary" "$dictionary_name"))
+       (dolist (back '("" "dictionary $dictionary %s" ("%s" .word)
+                      ("%s" .dictionary) ("dictionary") ("%% %s" .word)))
          (let ((zr-org-srs-x-model-alist
-                `((t . ((name . "$.word") (front . "$.word") (back . ,back))))))
-           (if (equal back "$dictionary_name")
-               (should-error (zr-org-srs-x-create-card "invalid template" "Words"))
-             (should (integerp (zr-org-srs-x-create-card (concat "word " back) "Words"))))))))))
+                `((t . ((name . ("%s" .word)) (front . ("%s%s" .word dictionary))
+                        (back . ,back))))))
+           (should (integerp (zr-org-srs-x-create-card (format "word %S" back) "Words")))))))))
 
 (ert-deftest zr-org-srs-x-test-manual-errors-do-not-save-cards ()
   (zr-org-srs-x-test--require-srs)
@@ -275,7 +290,8 @@
           (zr-org-srs-x--protocol-entry nil)
           (zr-org-srs-x-protocol-mode nil)
           (zr-org-srs-x-model-alist
-           '((t . ((deck . "Protocol") (name . "$.word") (front . "$.word") (back . "")))))
+           '((t . ((deck . "Protocol") (name . ("%s" .word))
+                   (front . ("%s" .word)) (back . "")))))
           (word "猫 & dog?%+中文"))
      (unwind-protect
          (progn
@@ -308,7 +324,7 @@
                         (should (eq input fields))
                         (should (eq values variables))
                         '((name . "Function") (front . "$.word") (back . "$dictionary"))))
-            (part . ((name . "$.word") (front . "text")
+            (part . ((name . ("%s" .word)) (front . "text")
                      (back . ,(lambda (input values)
                                 (concat (cdr (assoc "word" input)) " "
                                         (alist-get 'dictionary values) " $audio"))))))))
@@ -323,9 +339,10 @@
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
    (let ((zr-org-srs-x-model-alist
-          '((modelofluna . ((name . "$.word\n$.rubytextHtml")
-                           (front . "$.example_sentence")
-                           (back . "$.remarks\n\n$dictionary\n\n$picture\n\n$audio\n\n$video")))))
+          '((modelofluna . ((name . ("%s\n%s" .word .rubytextHtml))
+                           (front . ("%s" .example_sentence))
+                           (back . ("%s\n\n%s\n\n%s\n\n%s\n\n%s"
+                                    .remarks dictionary picture audio video))))))
          (note (zr-org-srs-x-test--note "lunadeck")))
      (dolist (kind '("picture" "audio" "video"))
        (puthash kind
@@ -359,9 +376,11 @@
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (let* ((directory-renderers
-           '((modelofluna . ((name . "Directory $.word") (front . "$.remarks") (back . "")))))
+           '((modelofluna . ((name . ("Directory %s" .word))
+                            (front . ("%s" .remarks)) (back . "")))))
           (file-renderers
-           '((modelofluna . ((name . "File $.word") (front . "$.example_sentence") (back . "")))))
+           '((modelofluna . ((name . ("File %s" .word))
+                            (front . ("%s" .example_sentence)) (back . "")))))
           (safe-local-variable-values
            (append (list (cons 'zr-org-srs-x-model-alist directory-renderers)
                          (cons 'zr-org-srs-x-model-alist file-renderers))
@@ -409,8 +428,13 @@
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
    (dolist (renderer '(((front . "front") (back . "back"))
                        ((name . " ") (front . "front") (back . "back"))
-                       ((name . "$.word") (front . "$unknown") (back . "back"))
-                       ((name . "$.word") (front . 42) (back . "back"))
+                       ((name . ("%s" .word)) (front . ("%s" unknown)) (back . "back"))
+                       ((name . ("%s" .word)) (front . 42) (back . "back"))
+                       ((name . ("%s" .word)) (front . (42 .word)) (back . "back"))
+                       ((name . ("%s" .word)) (front . ("%s" . .word)) (back . "back"))
+                       ((name . ("%s" .word)) (front . ("%s %s" .word)) (back . "back"))
+                       ((name . ("%s" .word)) (front . ("%s" (error "Must not evaluate")))
+                        (back . "back"))
                        (lambda (_fields _variables) [invalid])
                        (lambda (_fields _variables)
                          '((name . "name") (front . 42) (back . "back")))))

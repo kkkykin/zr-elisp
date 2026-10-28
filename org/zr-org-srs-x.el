@@ -62,9 +62,12 @@ Emacs reads the same files through a WSL mount."
 
 (defcustom zr-org-srs-x-model-alist
   '((modelofluna
-     . ((name . "$.word")
-        (front . "$.word\n\n$.example_sentence\n\n$.audio_for_word\n\n$.audio_for_example_sentence\n\n$.screenshot")
-        (back . "$.rubytextHtml\n\n$.remarks\n\n$.user_custom_1\n\n$dictionary")))
+     . ((name . ("%s" .word))
+        (front . ("%s\n\n%s\n\n%s\n\n%s\n\n%s"
+                  .word .example_sentence .audio_for_word
+                  .audio_for_example_sentence .screenshot))
+        (back . ("%s\n\n%s\n\n%s\n\n%s"
+                 .rubytextHtml .remarks .user_custom_1 dictionary))))
     (t . zr-org-srs-x-render-default-note))
   "Renderers selected by an Anki note's modelName.
 Keys are model names as strings or symbols; t supplies the fallback and
@@ -75,11 +78,14 @@ by an explicit capture destination, and dictionaries, a dictionary stage
 list.  Dictionary configuration uses the target deck's buffer-local
 `zr-dictionary-dictionaries' first, then a non-nil dictionaries entry,
 then the global variable.  Nil or an absent dictionaries entry inherits
-the global configuration.  String back templates trigger lookup only
-when they use $dictionary; function renderers receive dictionary results.
-Templates substitute $.FIELD with the field's Org text and $dictionary,
-$picture, $audio and $video with definitions and imported media links.
-Missing fields and absent media become empty strings; $$ is a literal $.
+the global configuration.  Back format templates trigger lookup only
+when their arguments include dictionary; functions receive dictionary results.
+A template is literal text, a (FORMAT REFERENCE...) list, or a function.
+Format lists call `format' with resolved references: .FIELD selects a field,
+and dictionary, picture, audio and video select definitions and media links.
+References are symbols and are not evaluated.  Missing fields and absent
+media become empty strings.  Use %% for a literal percent in FORMAT;
+literal string templates are used unchanged.
 Each template may also be a function of (FIELDS VARIABLES) returning text.
 A model renderer function receives the same arguments and returns an alist
 of name/front/back Org strings, which are used without template expansion.
@@ -94,6 +100,8 @@ Render in the deck buffer after dictionary lookup and attachment import."
                         (alist :key-type (choice (const name) (const front) (const back)
                                                  (const deck) (const dictionaries))
                                :value-type (choice string function
+                                                   (cons :tag "Format template"
+                                                         string (repeat symbol))
                                                    (repeat :tag "Dictionary stages" sexp))))))
 
 (defcustom zr-org-srs-x-max-request-size (* 64 1024 1024)
@@ -282,26 +290,29 @@ Put remaining fields and dictionary definitions on the back."
     `((name . ,name) (front . ,name)
       (back . ,(string-join (nreverse back) "\n\n")))))
 
-(defconst zr-org-srs-x--template-token-regexp
-  "\\$\\(?:\\.[[:alnum:]_-]+\\|[[:alpha:]_][[:alnum:]_-]*\\|\\$\\)")
-
 (defun zr-org-srs-x--template (template fields variables)
   "Render TEMPLATE with Org FIELDS and VARIABLES.
-Call function templates directly; expand string templates in one pass."
-  (if (functionp template)
-      (funcall template fields variables)
-    (unless (stringp template)
-      (error "Card template must be a string or function: %S" template))
-    (replace-regexp-in-string
-     zr-org-srs-x--template-token-regexp
-     (lambda (token)
-       (cond
-        ((equal token "$$") "$")
-        ((string-prefix-p "$." token) (alist-get (substring token 2) fields "" nil #'equal))
-        (t (if-let* ((entry (assoc-string (substring token 1) variables)))
-               (cdr entry)
-             (error "Unknown card template variable: %s" token)))))
-     template t t)))
+Use string templates literally and call function templates directly.
+For (FORMAT REFERENCE...) lists, resolve .FIELD from FIELDS and bare
+symbols from VARIABLES, then call `format'.  Never evaluate references."
+  (cond
+   ((functionp template) (funcall template fields variables))
+   ((stringp template) template)
+   ((and (consp template) (proper-list-p template) (stringp (car template)))
+    (apply #'format
+           (car template)
+           (mapcar
+            (lambda (reference)
+              (unless (symbolp reference)
+                (error "Expected a field or variable reference: %S" reference))
+              (let ((name (symbol-name reference)))
+                (if (string-prefix-p "." name)
+                    (alist-get (substring name 1) fields "" nil #'equal)
+                  (if-let* ((entry (assq reference variables)))
+                      (cdr entry)
+                    (error "Unknown card template variable: %S" reference)))))
+            (cdr template))))
+   (t (error "Card template must be text, a format list or a function: %S" template))))
 
 (defun zr-org-srs-x--model-renderer (model-name)
   "Return MODEL-NAME's renderer, using the t entry as fallback."
@@ -326,18 +337,13 @@ Call function templates directly; expand string templates in one pass."
 
 (defun zr-org-srs-x--uses-dictionary-p (renderer)
   "Whether RENDERER needs dictionary results for its back.
-Functions receive results; string templates must reference $dictionary.
-Escaped dollars and field placeholders do not request dictionary lookup."
+Functions receive results; format templates must reference dictionary
+as an argument.  Literal text and .dictionary refer to no lookup results."
   (or (functionp renderer)
-      (let ((back (alist-get 'back renderer)) (position 0) found)
-        (if (functionp back)
-            t
-          (when (stringp back)
-            (while (and (not found)
-                        (string-match zr-org-srs-x--template-token-regexp back position))
-              (setq found (equal (match-string 0 back) "$dictionary")
-                    position (match-end 0)))
-            found)))))
+      (let ((back (alist-get 'back renderer)))
+        (or (functionp back)
+            (and (consp back) (proper-list-p back) (stringp (car back))
+                 (memq 'dictionary (cdr back)))))))
 
 (defun zr-org-srs-x--render (model-name fields variables)
   "Render MODEL-NAME using Org FIELDS and VARIABLES in the current deck.

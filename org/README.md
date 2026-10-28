@@ -206,11 +206,12 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
       '((modelofluna
          . ((deck . "Luna")
             (dictionaries . ((edict local) similar))
-            (name . "$.word") (front . "$.word\n\n$.example_sentence")
-            (back . "$.remarks\n\n$dictionary")))
+            (name . ("%s" .word)) (front . ("%s\n\n%s" .word .example_sentence))
+            (back . ("%s\n\n%s" .remarks dictionary))))
         (t . ((deck . "Words::English")
               (dictionaries . ((gcide wordnet) similar))
-              (name . "$.word") (front . "$.word") (back . "$dictionary")))))
+              (name . ("%s" .word)) (front . ("%s" .word))
+              (back . ("%s" dictionary))))))
 
 ;; 程序调用返回卡片的整数 ID；显式 deck 优先于模型配置。
 (zr-org-srs-x-create-card "hamlet")
@@ -271,15 +272,21 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 ```elisp
 (setq zr-org-srs-x-model-alist
       '((modelofluna
-         . ((name . "$.word")
-            (front . "$.example_sentence\n\n$picture\n\n$audio")
-            (back . "$.remarks\n\n$dictionary")))
+         . ((name . ("%s" .word))
+            (front . ("%s\n\n%s\n\n%s" .example_sentence picture audio))
+            (back . ("%s\n\n%s" .remarks dictionary))))
         (t . zr-org-srs-x-render-default-note)))
 ```
 
 `name` 是 Org 卡片标题，`front` 和 `back` 是正反面的 Org 文本。三项都必须提供，
 标题不能为空。`t` 项处理未单独配置的模型；默认函数用第一个字段作为标题和
 正面，其余字段及词典释义放到背面。省略 `t` 时，未配置的模型返回错误。
+
+每个模板可以是字面字符串、`(FORMAT 引用...)` 列表或函数。
+格式列表的第一项是 Emacs `format` 格式字符串，后续项是引用符号；
+`.word` 按字段名 `"word"` 取值，`dictionary` 等普通符号取内置结果。
+引用作为数据解析，配置无需 `let-alist`，也不会执行 Lisp 表达式。
+缺失字段或没有对应附件时，引用值为 `""`。
 
 模板 alist 还支持两个可选项，默认均为 `nil`：
 
@@ -290,23 +297,25 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 
 查词配置优先级为目标 deck 的 local → 模型 alist → global。
 local 包括文件、目录局部变量和 buffer-local 配置；local 的 `nil` 表示禁用查询。
-字符串 Back 模板只有实际引用 `$dictionary` 才查词；省略它即可跳过查询，
-`$$dictionary` 是字面量，也不会触发查询。函数渲染器和函数 Back 模板会接收词典结果。
+Back 格式列表的参数包含 `dictionary` 才查词；省略该参数即可跳过查询。
+字面文本中的 `dictionary` 和字段引用 `.dictionary` 不触发查词。
+函数渲染器和函数 Back 模板会接收词典结果。
 生成的 dict link 保存实际使用的词典列表和策略。
 
-| 占位符 | 内容 |
+| 引用 | 内容 |
 | --- | --- |
-| `$.字段名` | 该字段转成 Org 的文本；没有该字段时为空字符串 |
-| `$dictionary` | dictionary.el 返回的全部释义 |
-| `$picture` | 本条笔记导入的全部图片链接 |
-| `$audio` | 本条笔记导入的全部音频链接 |
-| `$video` | 本条笔记导入的全部视频链接 |
-| `$$` | 字面量 `$` |
+| `.字段名` | 该字段转成 Org 的文本；没有该字段时为空字符串 |
+| `dictionary` | dictionary.el 返回的全部释义 |
+| `picture` | 本条笔记导入的全部图片链接 |
+| `audio` | 本条笔记导入的全部音频链接 |
+| `video` | 本条笔记导入的全部视频链接 |
 
-没有释义或附件时，对应占位符为空字符串。替换只执行一遍，字段里的 `$` 不会
-再次展开。附件链接也会追加到请求指定的字段中，例如 `$.audio_for_word`；
-同时使用该字段和 `$audio` 会显示两次同一个附件。
+格式列表用 `%s` 插入引用值，用 `%%` 输出字面 `%`。普通字符串按原文使用，
+其中的 `%` 和 `$` 不需要转义。字段和释义作为格式参数，其内部的 `%s`、`$`
+或反斜杠不会再次解释。附件链接也会追加到请求指定的字段中，例如 `.audio_for_word`；
+同时使用该字段和 `audio` 会显示两次同一个附件。
 查词使用 `word` 字段，没有时使用模型的第一个字段。
+原有字符串占位符模板需迁移成格式列表，例如 `"$.word"` 改为 `("%s" .word)`。
 
 模型项的 cdr 也可以是函数。函数接收 `(fields variables)`，返回
 `((name . STRING) (front . STRING) (back . STRING))`，返回的字符串直接使用：
