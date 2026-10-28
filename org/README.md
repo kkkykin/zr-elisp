@@ -20,7 +20,8 @@
 
 ```elisp
 (use-package zr-org-srs-x
-  :commands (zr-org-srs-x-start zr-org-srs-x-stop zr-org-srs-x-review)
+  :commands (zr-org-srs-x-start zr-org-srs-x-stop zr-org-srs-x-review
+             zr-org-srs-x-update-dictionaries)
   :custom (zr-org-srs-x-directory "~/org/srs/"))
 ```
 
@@ -144,7 +145,16 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 
 修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
 `M-x normal-mode`，或关闭后重新打开文件，使设置生效。
-配置只影响之后创建的卡片。查询超时或服务错误会让 `addNote` 返回错误，
+新配置会用于之后创建的卡片。要覆盖已有卡片的词典，在 deck buffer 中执行
+`M-x zr-org-srs-x-update-dictionaries`：无选区时更新光标所在卡片，光标可位于
+正面、背面或释义中；有选区时更新与选区相交的所有卡片。
+命令以卡片标题查词，使用当前 buffer 的 `zr-org-srs-x-dictionaries` 和
+`zr-org-srs-x-dictionary-name-function`，替换 `Front` / `Back` 下的三级词典子标题；
+没有词典子标题时追加到 `Back`。其他正文和复习日志保留。
+配置为 `nil` 或全部未命中时移除旧释义；查询或更新失败时撤销整批修改。
+修改留在 buffer 中，确认后用 `C-x C-s` 保存。
+
+查询超时或服务错误会让 `addNote` 返回错误，
 不保存新卡片；全部阶段共用一个超时，默认为 10 秒，可通过
 `zr-org-srs-x-dictionary-timeout` 修改。
 

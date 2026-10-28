@@ -72,7 +72,7 @@ The Anki deck A::B corresponds to A/B.org in this directory."
   :type 'number)
 
 (defcustom zr-org-srs-x-dictionaries '("*" similar)
-  "Ordered dictionary search stages for capture.
+  "Ordered dictionary search stages for capture and dictionary updates.
 Each stage is a dictionary ID (string or symbol), or a nonempty list of IDs.
 Query every dictionary in a group and combine its definitions.  Continue to
 the next stage only when the entire group has no definitions.
@@ -899,6 +899,81 @@ Only the v6 capture actions documented in org/README.md are supported."
   (interactive)
   (require 'org-srs)
   (org-srs-review-start (expand-file-name zr-org-srs-x-directory)))
+
+(defun zr-org-srs-x--update-card-dictionaries ()
+  "Replace dictionary subheadings in the card at point.
+Use the card title and the current buffer's dictionary configuration.
+Level-three subheadings under Front and Back contain the definitions."
+  (save-restriction
+    (org-narrow-to-subtree)
+    (let ((word (org-get-heading t)) back regions)
+      (org-map-entries
+       (lambda ()
+         (when (member (org-get-heading t) '("Front" "Back"))
+           (when (equal (org-get-heading t) "Back")
+             (setq back (point)))
+           (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+             (when (re-search-forward "^\\*\\*\\* " end t)
+               (push (cons (line-beginning-position) end) regions)))))
+       "LEVEL=2")
+      (unless back
+        (user-error "Card has no Back heading"))
+      (let ((definitions (zr-org-srs-x--body (zr-org-srs-x--dictionary-text word))))
+        (if regions
+            ;; Work backwards so earlier region boundaries stay valid.
+            (dolist (region regions)
+              (goto-char (car region))
+              (delete-region (point) (cdr region))
+              (unless (string-empty-p definitions)
+                (insert definitions "\n")))
+          (unless (string-empty-p definitions)
+            (goto-char back)
+            (org-end-of-subtree t t)
+            (unless (bolp) (insert "\n"))
+            (insert "\n" definitions "\n")))))))
+
+;;;###autoload
+(defun zr-org-srs-x-update-dictionaries (&optional beg end)
+  "Overwrite dictionaries in the current card or cards intersecting BEG END.
+Interactively, use the active region when present, otherwise the card at
+point, including when point is in a Front, Back or dictionary subheading.
+Look up each card's title using the current `zr-org-srs-x-dictionaries'.
+Replace its level-three dictionary subheadings; if absent, append to Back.
+Nil configuration or no definitions removes the old dictionaries.
+Preserve other card content and review logs.  Leave the buffer unsaved.
+Roll back all changes if any lookup or update fails."
+  (interactive (when (use-region-p) (list (region-beginning) (region-end))))
+  (unless (derived-mode-p 'org-mode)
+    (user-error "This command requires an Org buffer"))
+  (barf-if-buffer-read-only)
+  (save-excursion
+    (save-restriction
+      (widen)
+      (let ((cards
+             (if (and beg end)
+                 (delq nil
+                       (org-map-entries
+                        (lambda ()
+                          (when (and (< (point) end)
+                                     (> (save-excursion (org-end-of-subtree t t) (point)) beg)
+                                     (zr-org-srs-x--note-id))
+                            (copy-marker (point) t)))
+                        "LEVEL=1"))
+               (unless (org-before-first-heading-p)
+                 (org-back-to-heading t)
+                 (while (org-up-heading-safe))
+                 (when (and (= (org-outline-level) 1) (zr-org-srs-x--note-id))
+                   (list (copy-marker (point) t)))))))
+        (unless cards
+          (user-error "No zr-org-srs-x card found"))
+        (unwind-protect
+            (atomic-change-group
+              (dolist (card cards)
+                (goto-char card)
+                (zr-org-srs-x--update-card-dictionaries)))
+          (dolist (card cards) (set-marker card nil)))
+        (when (called-interactively-p 'interactive)
+          (message "Updated dictionaries in %d card(s)" (length cards)))))))
 
 (provide 'zr-org-srs-x)
 ;;; zr-org-srs-x.el ends here

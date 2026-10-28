@@ -543,6 +543,132 @@
                       (insert-file-contents (zr-org-srs-x--deck-file "lunadeck"))
                       (buffer-string)))))))
 
+(ert-deftest zr-org-srs-x-test-update-dictionaries-current-card ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-test--create-model)
+   (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
+   (zr-org-srs-x-test--with-dictionary
+    (zr-org-srs-x-test--call "addNote" "note" (zr-org-srs-x-test--note "lunadeck"))
+    (let* ((file (zr-org-srs-x--deck-file "lunadeck"))
+           (on-disk (with-temp-buffer (insert-file-contents file) (buffer-string))))
+      (with-current-buffer (zr-org-srs-x--buffer file)
+        (setq-local zr-org-srs-x-dictionaries '((dict1 dict2) similar))
+        (let ((zr-org-srs-x-dictionary-name-function
+               (lambda (name id) (format "%s [%s]" name id)))
+              (before (buffer-substring-no-properties
+                       (point-min) (save-excursion
+                                     (goto-char (point-min))
+                                     (re-search-forward "^\\*\\*\\* ")
+                                     (line-beginning-position)))))
+          (setq dictionary-commands nil
+                dictionary-response-function
+                (lambda (command)
+                  (zr-org-srs-x-test--dict-definition
+                   (if (string-prefix-p "define dict1 " command) "dict1" "dict2")
+                   "New definition\r\n* raw heading\r\n#+begin_src\r\n:END:")))
+          ;; The active point can be inside an old dictionary subtree.
+          (goto-char (point-min))
+          (search-forward "cat from DICT")
+          (call-interactively #'zr-org-srs-x-update-dictionaries)
+          (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                         '("define dict1 \"猫\"" "define dict2 \"猫\"")))
+          (should (string-prefix-p before (buffer-string)))
+          (should-not (string-match-p "from DICT\\|^\\*\\*\\* \\[edict\\]\\|^\\*\\*\\* \\[local\\]"
+                                      (buffer-string)))
+          (should (string-match-p "^\\*\\*\\* Dictionary dict1 \\[dict1\\]" (buffer-string)))
+          (should (string-match-p "^\\*\\*\\* Dictionary dict2 \\[dict2\\]" (buffer-string)))
+          (should (string-match-p "^,\\* raw heading" (buffer-string)))
+          (should (string-match-p "^,#\\+begin_src" (buffer-string)))
+          (should (string-match-p "^,:END:" (buffer-string)))
+          (goto-char (point-min))
+          (re-search-forward "^\\* ")
+          (org-back-to-heading)
+          (should (org-srs-item-exists-p '(card back)))
+          (should (buffer-modified-p)))
+        (should (equal on-disk (with-temp-buffer (insert-file-contents file) (buffer-string)))))))))
+
+(ert-deftest zr-org-srs-x-test-update-dictionaries-region ()
+  (with-temp-buffer
+    (org-mode)
+    (dolist (word '("one" "two" "three" "four"))
+      (insert "* " word "\n:PROPERTIES:\n:ID: "
+              (number-to-string (point)) "\n:END:\n** Front\n" word "\n** Back\nNotes\n")
+      ;; Both replacement and appending can insert at the next card's marker.
+      (unless (equal word "two")
+        (insert "*** [old]\nold definition\n")))
+    (let ((outside (save-excursion
+                     (goto-char (point-min))
+                     (search-forward "* four")
+                     (buffer-substring-no-properties (line-beginning-position) (point-max))))
+          (words nil)
+          (transient-mark-mode t))
+      (goto-char (point-min))
+      (search-forward "old definition")
+      (push-mark (point) t t)
+      (search-forward "* four")
+      (beginning-of-line)
+      (setq mark-active t)
+      (cl-letf (((symbol-function 'zr-org-srs-x--dictionary-text)
+                 (lambda (word)
+                   (push word words)
+                   (concat (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
+                           "[new]\n" word " definition"))))
+        (call-interactively #'zr-org-srs-x-update-dictionaries))
+      (should (equal (nreverse words) '("one" "two" "three")))
+      (should (= (how-many "^\\*\\*\\* \\[new\\]" (point-min) (point-max)) 3))
+      (should (= (how-many "old definition" (point-min) (point-max)) 1))
+      (should (string-suffix-p outside (buffer-string))))))
+
+(ert-deftest zr-org-srs-x-test-update-dictionaries-remove-old-definitions ()
+  (zr-org-srs-x-test--with-dictionary
+   (dolist (configuration '(nil (dict1)))
+     (with-temp-buffer
+       (org-mode)
+       (insert "* word\n:PROPERTIES:\n:ID: 1\n:END:\n"
+               "** Front\nPrompt\n*** [old-front]\nOld front definition\n"
+               "** Back\nNotes\n*** [old-back]\nOld back definition\n")
+       (setq-local zr-org-srs-x-dictionaries configuration)
+       (setq dictionary-commands nil
+             dictionary-response-function (lambda (_command) "552 no match\r\n"))
+       (goto-char (point-min))
+       (zr-org-srs-x-update-dictionaries)
+       (should (equal (buffer-string)
+                      (concat "* word\n:PROPERTIES:\n:ID: 1\n:END:\n"
+                              "** Front\nPrompt\n** Back\nNotes\n")))
+       (should (equal (zr-org-srs-x-test--dict-queries dictionary-commands)
+                      (when configuration '("define dict1 \"word\""))))))))
+
+(ert-deftest zr-org-srs-x-test-update-dictionaries-failure-rolls-back-region ()
+  (zr-org-srs-x-test--with-dictionary
+   (with-temp-buffer
+     (org-mode)
+     (insert "* one\n:PROPERTIES:\n:ID: 1\n:END:\n** Front\nPrompt\n** Back\nNotes\n"
+             "*** [old]\nOld one definition\n"
+             "* two\n:PROPERTIES:\n:ID: 2\n:END:\n** Front\nPrompt\n** Back\nNotes\n"
+             "*** [old]\nOld two definition\n")
+     (let ((before (buffer-string)))
+       (set-buffer-modified-p nil)
+       (setq dictionary-response-function
+             (lambda (command)
+               (if (string-match-p "\"one\"" command)
+                   (zr-org-srs-x-test--dict-definition "dict1" "New one definition")
+                 "500 error\r\n")))
+       (should-error (zr-org-srs-x-update-dictionaries (point-min) (point-max)))
+       (should (equal before (buffer-string)))
+       (should-not (buffer-modified-p))))))
+
+(ert-deftest zr-org-srs-x-test-update-dictionaries-rejects-non-cards ()
+  (with-temp-buffer
+    (should-error (zr-org-srs-x-update-dictionaries) :type 'user-error)
+    (org-mode)
+    (insert "Preamble\n* ordinary\n** Back\nNotes\n")
+    (goto-char (point-min))
+    (should-error (zr-org-srs-x-update-dictionaries) :type 'user-error)
+    (search-forward "Notes")
+    (should-error (zr-org-srs-x-update-dictionaries) :type 'user-error)
+    (should-error (zr-org-srs-x-update-dictionaries (point-min) (point-max)) :type 'user-error)))
+
 (ert-deftest zr-org-srs-x-test-dictionary-names-handle-unknown-and-custom-function ()
   (zr-org-srs-x-test--require-srs)
   (dolist (custom '(nil t))
