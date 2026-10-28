@@ -71,6 +71,38 @@
       (ert-info ((buffer-string))
         (should (eq status 0))))))
 
+(ert-deftest zr-module-loading-test-org-links-load-dictionary-on-use ()
+  (with-temp-buffer
+    (let* ((form
+            '(progn
+               (require 'cl-lib)
+               (require 'zr-org-link)
+               (zr-org-link-mode 1)
+               (with-temp-buffer
+                 (insert "[[https://example.com/][Example]]")
+                 (org-mode)
+                 (goto-char (point-min))
+                 (let (sent)
+                   (cl-letf (((symbol-function 'getenv)
+                              (lambda (&rest _) "ssh-session"))
+                             ((symbol-function 'zr-wezterm-send-json)
+                              (lambda (payload) (setq sent payload))))
+                     (unless (and (zr-org-link-open-at-point)
+                                  (equal (alist-get 'uri sent) "https://example.com/"))
+                       (error "HTTP link did not open through WezTerm")))))
+               (when (or (featurep 'dictionary) (featurep 'zr-dictionary))
+                 (error "Org links loaded dictionary support early"))
+               (unless (and (string-prefix-p "[[dict:word?" (zr-org-link-dict-link "word"))
+                            (featurep 'dictionary)
+                            (featurep 'zr-dictionary))
+                 (error "Dictionary link did not load its support"))))
+           (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
+                                 zr-module-loading-test--root
+                                 "-L" (expand-file-name "org" zr-module-loading-test--root)
+                                 "--eval" (prin1-to-string form))))
+      (ert-info ((buffer-string))
+        (should (eq status 0))))))
+
 (ert-deftest zr-module-loading-test-platform-commands-reject-wrong-system ()
   (let ((system-type 'gnu/linux))
     (should-error (zr-windows-shell) :type 'user-error)

@@ -8,7 +8,8 @@
 
 ;;; Commentary:
 
-;; Enable dictionary links explicitly.  WezTerm opening is an independent helper.
+;; Enable dictionary links explicitly.  Load dictionary support on use.
+;; WezTerm opening is an independent helper.
 
 ;;; Code:
 
@@ -17,11 +18,16 @@
 (require 'org-element)
 (require 'url-util)
 (require 'subr-x)
-(require 'zr-dictionary)
 (autoload 'zr-wezterm-send-json "zr-wezterm")
+(declare-function zr-dictionary-dictionaries-p "zr-dictionary" (value))
+(declare-function zr-dictionary-resolve-dictionaries "zr-dictionary" (dictionaries))
+(declare-function zr-dictionary-search "zr-dictionary" (word &optional dictionaries strategy))
 (declare-function org-html-encode-plain-text "ox-html")
 (declare-function org-latex-plain-text "ox-latex")
 (declare-function org-texinfo-plain-text "ox-texinfo")
+(defvar zr-dictionary-dictionaries)
+(defvar zr-dictionary-strategy)
+(defvar zr-dictionary-word)
 
 (defgroup zr-org-link nil
   "Additional Org links."
@@ -71,6 +77,7 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
 
 (defun zr-org-link--dict-with-proxy (dictionaries proxy)
   "Copy DICTIONARIES, overriding every target's proxy with PROXY."
+  (require 'zr-dictionary)
   (unless (zr-dictionary-dictionaries-p dictionaries)
     (user-error "Invalid dictionary stages: %S" dictionaries))
   (unless (zr-dictionary-dictionaries-p (list (list :dictionary t :proxy proxy)))
@@ -84,6 +91,7 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
 (cl-defun zr-org-link--dict-path (word dictionaries strategy &optional (proxy nil proxy-p))
   "Return a dict path for WORD, DICTIONARIES and STRATEGY.
 Include a separate proxy parameter only when PROXY is explicitly supplied."
+  (require 'zr-dictionary)
   (let* ((resolved (zr-dictionary-resolve-dictionaries
                     (zr-org-link--dict-with-proxy dictionaries (if proxy-p proxy nil))))
          (stages (mapcar
@@ -101,13 +109,16 @@ Include a separate proxy parameter only when PROXY is explicitly supplied."
               (concat "&proxy=" (url-hexify-string (if (stringp proxy) proxy (symbol-name proxy))))))))
 
 (cl-defun zr-org-link-dict-link
-    (word &optional (dictionaries zr-dictionary-dictionaries)
-          (strategy zr-dictionary-strategy) (proxy nil proxy-p))
+    (word &optional (dictionaries nil dictionaries-p)
+          (strategy nil strategy-p) (proxy nil proxy-p))
   "Return a dict link for WORD with DICTIONARIES and matching STRATEGY.
 Encode stages as a Lisp list in the dictionaries query parameter.
 An explicit PROXY adds a separate proxy parameter overriding every target:
 a HOST:PORT string, nil for direct connections, or t for global proxy settings.
 Omitting PROXY leaves proxy configuration out of the generated link."
+  (require 'zr-dictionary)
+  (unless dictionaries-p (setq dictionaries zr-dictionary-dictionaries))
+  (unless strategy-p (setq strategy zr-dictionary-strategy))
   (org-link-make-string (if proxy-p
                            (zr-org-link--dict-path word dictionaries strategy proxy)
                          (zr-org-link--dict-path word dictionaries strategy)) word))
@@ -116,6 +127,7 @@ Omitting PROXY leaves proxy configuration out of the generated link."
   "Parse dict link PATH as (WORD DICTIONARIES STRATEGY).
 Missing query parameters use the current buffer's dictionary configuration.
 A proxy parameter overrides all targets after dictionaries have been parsed."
+  (require 'zr-dictionary)
   (let* ((parts (split-string path "?"))
          (word (decode-coding-string (url-unhex-string (car parts)) 'utf-8))
          (dictionaries zr-dictionary-dictionaries)

@@ -187,7 +187,8 @@ hamlet
 需要有可用的 DICT 服务；查询使用独立连接，不打开 Dictionary 窗口，
 也不改动已有 Dictionary 缓冲区及其连接，不受 `dictionary-use-single-buffer` 影响。
 
-`zr-org-link.el` 位于 `org/`，依赖 `zr-dictionary.el`。执行 `zr-org-link-mode` 启用
+`zr-org-link.el` 位于 `org/`，使用词典链接时才加载 `zr-dictionary.el`；加载库、启用
+链接或通过 WezTerm 打开 HTTP 链接不会加载词典。执行 `zr-org-link-mode` 启用
 dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函数。
 `[[dict:word]]` 使用当前 buffer 的配置，可在链接查询参数里覆盖 `dictionaries` / `strategy` / `proxy`：
 
