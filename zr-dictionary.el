@@ -26,12 +26,17 @@
   "Maximum seconds for one dictionary lookup, including all stages."
   :type 'number)
 
-(defcustom zr-dictionary-dictionaries '((:server t :port t :dictionary t))
+(defcustom zr-dictionary-dictionaries '((:server t :port t :dictionary t :proxy t))
   "Ordered dictionary search stages.
 Each stage is a target plist, or a nonempty group of target plists.
-:server and :port default to t, meaning `dictionary-server' and
-`dictionary-port' independently.  Use a string server and integer port
-to specify an endpoint.  :dictionary is an ID or nonempty list of IDs;
+:server specifies a server only when it is a string; :port specifies a
+port only when it is a number (an integer from 1 to 65535).
+Other values, including nil and t, use `dictionary-server' and
+`dictionary-port' independently.
+:proxy is an HTTP proxy string HOST:PORT (or [IPv6]:PORT), nil for a direct
+connection, or t to use `dictionary-use-http-proxy', `dictionary-proxy-server'
+and `dictionary-proxy-port'.  An omitted :proxy defaults to t.
+:dictionary is an ID or nonempty list of IDs;
 t means querying all dictionaries, then similar words.
 A final similar in a dictionary list enables
 matching for those IDs after all exact stages miss.
@@ -54,7 +59,7 @@ run first; omit similar markers and use explicit IDs to skip matching."
 
 (defun zr-dictionary-format-name (name id source)
   "Format dictionary NAME and ID from SOURCE for display.
-SOURCE contains the resolved :server, :port and :dictionary.
+SOURCE contains the resolved :server, :port, :dictionary and :proxy.
 Include the endpoint when the query spans multiple servers."
   (let ((title (if (string-equal-ignore-case id "unknown") name id)))
     (if zr-dictionary--multiple-servers
@@ -64,7 +69,7 @@ Include the endpoint when the query spans multiple servers."
 (defcustom zr-dictionary-name-function #'zr-dictionary-format-name
   "Function formatting dictionary headings from (NAME ID SOURCE).
 NAME is the decoded full description; ID is the DICT database identifier.
-SOURCE is a plist with the resolved :server, :port and :dictionary.
+SOURCE is a plist with the resolved :server, :port, :dictionary and :proxy.
 Return nonempty, single-line display text.
 Returned definitions with the same heading are merged.  The result buffer
 appends each response as it arrives, keeping previously displayed text."
@@ -101,6 +106,30 @@ appends each response as it arrives, keeping previously displayed text."
     (error "Invalid dictionary port: %S" port))
   (cons server port))
 
+(defun zr-dictionary--endpoint-string (endpoint)
+  "Format ENDPOINT as HOST:PORT, bracketing IPv6 hosts."
+  (let ((server (car endpoint)))
+    (format "%s:%s" (if (string-match-p ":" server) (concat "[" server "]") server)
+            (cdr endpoint))))
+
+(defun zr-dictionary--proxy-endpoint (proxy)
+  "Parse HTTP PROXY in HOST:PORT or [IPv6]:PORT form into an endpoint cons."
+  (unless (string-match "\\`\\(?:\\[\\([^][]+\\)\\]\\|\\([^:]+\\)\\):\\([0-9]+\\)\\'" proxy)
+    (error "Invalid dictionary proxy: %S" proxy))
+  (zr-dictionary--endpoint (or (match-string 1 proxy) (match-string 2 proxy))
+                           (string-to-number (match-string 3 proxy))))
+
+(defun zr-dictionary--proxy (proxy)
+  "Resolve PROXY to an explicit HTTP proxy string or nil for a direct connection."
+  (cond
+   ((stringp proxy) (zr-dictionary--endpoint-string (zr-dictionary--proxy-endpoint proxy)))
+   ((null proxy) nil)
+   ((eq proxy t)
+    (when dictionary-use-http-proxy
+      (zr-dictionary--endpoint-string
+       (zr-dictionary--endpoint dictionary-proxy-server dictionary-proxy-port))))
+   (t (error "Invalid dictionary proxy: %S" proxy))))
+
 (defun zr-dictionary--targets (target)
   "Expand TARGET into resolved single-dictionary target plists."
   (unless (and (consp target) (keywordp (car target))
@@ -109,18 +138,20 @@ appends each response as it arrives, keeping previously displayed text."
   (let ((rest target) seen)
     (while rest
       (let ((key (pop rest)))
-        (unless (and (memq key '(:server :port :dictionary)) (not (memq key seen)))
+        (unless (and (memq key '(:server :port :dictionary :proxy)) (not (memq key seen)))
           (error "Invalid dictionary target key: %S" key))
         (push key seen)
         (pop rest))))
-  (let* ((server (if (plist-member target :server) (plist-get target :server) t))
-         (port (if (plist-member target :port) (plist-get target :port) t))
+  (let* ((server (plist-get target :server))
+         (port (plist-get target :port))
+         (proxy (zr-dictionary--proxy (if (plist-member target :proxy)
+                                        (plist-get target :proxy) t)))
          (dictionaries (plist-get target :dictionary))
          (ids (cond ((eq dictionaries t) '("*" similar))
                     ((listp dictionaries) dictionaries)
                     (t (list dictionaries)))))
-    (when (eq server t) (setq server (or dictionary-server "localhost")))
-    (when (eq port t) (setq port dictionary-port))
+    (unless (stringp server) (setq server (or dictionary-server "localhost")))
+    (unless (numberp port) (setq port dictionary-port))
     (zr-dictionary--endpoint server port)
     (unless (and (consp ids) (proper-list-p ids)
                  (not (eq (car ids) 'similar))
@@ -129,7 +160,8 @@ appends each response as it arrives, keeping previously displayed text."
     (let ((similar (eq (car (last ids)) 'similar)))
       (mapcar (lambda (id)
                 (let ((id (zr-dictionary--id id)))
-                  (list :server server :port port :dictionary (if similar (list id 'similar) id))))
+                  (list :server server :port port :dictionary (if similar (list id 'similar) id)
+                        :proxy proxy)))
               (remq 'similar ids)))))
 
 (defun zr-dictionary--target-id (target)
@@ -140,7 +172,8 @@ appends each response as it arrives, keeping previously displayed text."
 (defun zr-dictionary-resolve-dictionaries (dictionaries)
   "Resolve DICTIONARIES into stage groups of explicit server targets.
 Expand :dictionary lists within their stage.  Preserve a final `similar'.
-Use this representation to save queries independently of server defaults."
+Resolve :proxy to a string or nil.  Use this representation to save queries
+independently of server and proxy defaults."
   (unless (proper-list-p dictionaries)
     (error "Expected a list of dictionary search stages"))
   (when (or (eq (car dictionaries) 'similar)
@@ -161,7 +194,8 @@ Use this representation to save queries independently of server defaults."
   "Whether VALUE is a valid, declarative dictionary stage configuration.
 Validate syntax without connecting or depending on the user's server defaults."
   (condition-case nil
-      (let ((dictionary-server "localhost") (dictionary-port 2628))
+      (let ((dictionary-server "localhost") (dictionary-port 2628)
+            (dictionary-use-http-proxy nil))
         (zr-dictionary-resolve-dictionaries value)
         t)
     (error nil)))
@@ -170,10 +204,10 @@ Validate syntax without connecting or depending on the user's server defaults."
 
 (cl-defstruct (zr-dictionary--query (:constructor zr-dictionary--make-query))
   word strategy plan (group-index 0) pending stage-results clients timer done results error
-  on-result on-done name-function multiple-servers buffer proxy identification timeout)
+  on-result on-done name-function multiple-servers buffer identification timeout)
 
 (cl-defstruct (zr-dictionary--client (:constructor zr-dictionary--make-client))
-  query endpoint process (input "") (state 'greeting) queue job entries lines source name)
+  query endpoint proxy process (input "") (state 'greeting) queue job entries lines source name)
 
 (defun zr-dictionary--merge-entries (chunks)
   "Merge CHUNKS with equal headings without modifying their entries."
@@ -275,7 +309,8 @@ Validate syntax without connecting or depending on the user's server defaults."
 (defun zr-dictionary--source (client database)
   "Return CLIENT's endpoint with the actual response DATABASE."
   (list :server (car (zr-dictionary--client-endpoint client))
-        :port (cdr (zr-dictionary--client-endpoint client)) :dictionary database))
+        :port (cdr (zr-dictionary--client-endpoint client)) :dictionary database
+        :proxy (zr-dictionary--client-proxy client)))
 
 (defun zr-dictionary--heading (client description database &optional matching)
   "Format CLIENT's DESCRIPTION and DATABASE, or a MATCHING result heading."
@@ -384,16 +419,16 @@ Validate syntax without connecting or depending on the user's server defaults."
                                                  (cdr (zr-dictionary--client-endpoint client))
                                                  (error-message-string err)))))))))
 
-(defun zr-dictionary--open-client (query endpoint)
-  "Open QUERY's nonblocking connection to ENDPOINT, honoring proxy settings."
-  (let* ((proxy (zr-dictionary--query-proxy query))
-         (client (zr-dictionary--make-client :query query :endpoint endpoint
+(defun zr-dictionary--open-client (query endpoint proxy)
+  "Open QUERY's nonblocking connection to ENDPOINT through HTTP PROXY or directly."
+  (let* ((proxy-endpoint (when proxy (zr-dictionary--proxy-endpoint proxy)))
+         (client (zr-dictionary--make-client :query query :endpoint endpoint :proxy proxy
                                              :state (if proxy 'http-status 'greeting))))
-    (push (cons endpoint client) (zr-dictionary--query-clients query))
+    (push (cons (cons endpoint proxy) client) (zr-dictionary--query-clients query))
     (setf (zr-dictionary--client-process client)
           (make-network-process
-           :name "zr-dictionary" :host (if proxy (car proxy) (car endpoint))
-           :service (if proxy (cdr proxy) (cdr endpoint)) :nowait t :coding 'binary :noquery t
+           :name "zr-dictionary" :host (car (or proxy-endpoint endpoint))
+           :service (cdr (or proxy-endpoint endpoint)) :nowait t :coding 'binary :noquery t
            :filter (lambda (_process chunk) (zr-dictionary--filter client chunk))
            :sentinel
            (lambda (process _event)
@@ -402,10 +437,8 @@ Validate syntax without connecting or depending on the user's server defaults."
                (pcase (process-status process)
                  ('open
                   (when proxy
-                    (let ((server (car endpoint)))
-                      (when (string-match-p ":" server) (setq server (concat "[" server "]")))
-                      (zr-dictionary--send client (format "CONNECT %s:%s HTTP/1.1\r\n"
-                                                         server (cdr endpoint))))))
+                    (zr-dictionary--send client (format "CONNECT %s HTTP/1.1\r\n"
+                                                       (zr-dictionary--endpoint-string endpoint)))))
                  ((or 'closed 'failed 'exit 'signal)
                   (zr-dictionary--complete
                    query nil (list 'error (format "Dictionary connection to %s:%s closed"
@@ -425,8 +458,9 @@ Validate syntax without connecting or depending on the user's server defaults."
               (dolist (target targets)
                 (unless (zr-dictionary--query-done query)
                   (let* ((endpoint (cons (plist-get target :server) (plist-get target :port)))
-                         (client (or (cdr (assoc endpoint (zr-dictionary--query-clients query)))
-                                     (zr-dictionary--open-client query endpoint))))
+                         (proxy (plist-get target :proxy))
+                         (client (or (cdr (assoc (cons endpoint proxy) (zr-dictionary--query-clients query)))
+                                     (zr-dictionary--open-client query endpoint proxy))))
                     (setf (zr-dictionary--client-queue client)
                           (nconc (zr-dictionary--client-queue client) (list (list index kind target))))
                     (cl-incf index)
@@ -442,8 +476,6 @@ Validate syntax without connecting or depending on the user's server defaults."
          (endpoints (delete-dups (mapcar (lambda (target)
                                          (cons (plist-get target :server) (plist-get target :port)))
                                        (apply #'append groups))))
-         (proxy (when dictionary-use-http-proxy
-                  (zr-dictionary--endpoint dictionary-proxy-server dictionary-proxy-port)))
          (plan
           (append
            (cl-loop for group in groups for index from 0
@@ -463,7 +495,7 @@ Validate syntax without connecting or depending on the user's server defaults."
                plan))
      :on-result on-result :on-done on-done :name-function zr-dictionary-name-function
      :multiple-servers (> (length endpoints) 1) :buffer (current-buffer)
-     :proxy proxy :identification dictionary-identification :timeout zr-dictionary-timeout)))
+     :identification dictionary-identification :timeout zr-dictionary-timeout)))
 
 (defun zr-dictionary--start-query (query)
   "Start prepared QUERY and its overall timeout."

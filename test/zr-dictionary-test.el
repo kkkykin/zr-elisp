@@ -629,23 +629,117 @@
        (should-not (cl-set-difference (buffer-list) before))))))
 
 (ert-deftest zr-dictionary-test-targets-expand-dictionaries-in-one-stage ()
-  (let ((dictionary-server "default.example") (dictionary-port 1234))
+  (let ((dictionary-server "default.example") (dictionary-port 1234)
+        (dictionary-use-http-proxy nil))
     (should (equal
              (zr-dictionary-resolve-dictionaries
               '((:server t :port 4321 :dictionary local)
                 ((:server "other.example" :port t :dictionary (a "b"))
                  (:server t :port t :dictionary c)) similar))
-             '(((:server "default.example" :port 4321 :dictionary "local"))
-               ((:server "other.example" :port 1234 :dictionary "a")
-                (:server "other.example" :port 1234 :dictionary "b")
-                (:server "default.example" :port 1234 :dictionary "c")) similar)))
+             '(((:server "default.example" :port 4321 :dictionary "local" :proxy nil))
+               ((:server "other.example" :port 1234 :dictionary "a" :proxy nil)
+                (:server "other.example" :port 1234 :dictionary "b" :proxy nil)
+                (:server "default.example" :port 1234 :dictionary "c" :proxy nil)) similar)))
     (dolist (target '((:server "" :dictionary a) (:server "bad\nhost" :dictionary a)
-                      (:server nil :dictionary a) (:port 0 :dictionary a)
-                      (:port 65536 :dictionary a) (:port "2628" :dictionary a)
+                      (:port 0 :dictionary a) (:port 65536 :dictionary a)
+                      (:port 1.5 :dictionary a)
                       (:dictionary nil) (:dictionary (a . b)) (:dictionary (a similar b))
                       (:dictionary (a (b))) (:dictionary a :unknown t)
                       (:dictionary a :dictionary b) (:dictionary)))
       (should-error (zr-dictionary-resolve-dictionaries (list target))))))
+
+(ert-deftest zr-dictionary-test-endpoint-defaults ()
+  (let ((dictionary-server "default.example") (dictionary-port 1234)
+        (dictionary-use-http-proxy nil))
+    (dolist (value '(nil t other 4321))
+      (let ((target (caar (zr-dictionary-resolve-dictionaries
+                          (list (list :server value :port (if (numberp value) nil value)
+                                      :dictionary 'a))))))
+        (should (equal (plist-get target :server) "default.example"))
+        (should (= (plist-get target :port) 1234))))
+    (should (equal (zr-dictionary-resolve-dictionaries '((:server nil :port nil :dictionary a)))
+                   (zr-dictionary-resolve-dictionaries '((:server t :port t :dictionary a)))))
+    (let ((target (caar (zr-dictionary-resolve-dictionaries
+                        '((:server "specified.example" :port 4321 :dictionary a))))))
+      (should (equal (plist-get target :server) "specified.example"))
+      (should (= (plist-get target :port) 4321)))
+    (should (= (plist-get (caar (zr-dictionary-resolve-dictionaries
+                                '((:port "4321" :dictionary a)))) :port) 1234)))
+  (let ((dictionary-server nil) (dictionary-port 2628))
+    (should (equal (plist-get (caar (zr-dictionary-resolve-dictionaries
+                                    '((:server nil :dictionary a)))) :server) "localhost"))))
+
+(ert-deftest zr-dictionary-test-resolved-proxies-freeze-defaults ()
+  (let* ((dictionary-server "dict.example") (dictionary-port 2628)
+         (dictionary-use-http-proxy t) (dictionary-proxy-server "proxy.example")
+         (dictionary-proxy-port 8080)
+         (resolved (zr-dictionary-resolve-dictionaries
+                    '(((:dictionary (a b)) (:dictionary c :proxy t)
+                       (:dictionary d :proxy nil)
+                       (:dictionary (e similar) :proxy "[::1]:8888")) similar))))
+    (should (equal (mapcar (lambda (target) (plist-get target :proxy)) (car resolved))
+                   '("proxy.example:8080" "proxy.example:8080" "proxy.example:8080" nil "[::1]:8888")))
+    (setq dictionary-server "changed.example" dictionary-port 4321
+          dictionary-proxy-server "changed.proxy" dictionary-proxy-port 9090)
+    (should (equal (zr-dictionary-resolve-dictionaries resolved) resolved))
+    (setq dictionary-use-http-proxy nil)
+    (should (equal (zr-dictionary-resolve-dictionaries resolved) resolved))))
+
+(ert-deftest zr-dictionary-test-explicit-proxy-keeps-similar-on-its-connection ()
+  (let* ((dictionary-use-http-proxy nil) sources
+         (dictionary-proxy-server nil) (dictionary-proxy-port nil)
+         (zr-dictionary-name-function
+          (lambda (name id source) (push source sources) (zr-dictionary-format-name name id source)))
+         (proxy (zr-dictionary-test-server
+                 (lambda (_client command)
+                   (cond
+                    ((equal command "match original . \"reserved\"")
+                     "152 1 match\r\nactual \"reserve\"\r\n.\r\n250 ok\r\n")
+                    ((equal command "define actual \"reserve\"")
+                     (zr-dictionary-test-definition "actual" "Through proxy"))
+                    (t "552 no match\r\n"))) t))
+         (proxy-address (format "127.0.0.1:%s" (process-contact proxy :service)))
+         (stages (list (list :server "dict.example" :port 2628
+                             :dictionary '(original similar) :proxy proxy-address))))
+    (unwind-protect
+        (progn
+          (should (equal (zr-dictionary-lookup "reserved" stages) '(("[actual]" "Through proxy"))))
+          (should (equal (zr-dictionary-test-queries (process-get proxy 'commands))
+                         '("CONNECT dict.example:2628 HTTP/1.1" "" "define original \"reserved\""
+                           "match original . \"reserved\"" "define actual \"reserve\"")))
+          (should (= (length (process-get proxy 'clients)) 1))
+          (should (equal (plist-get (car sources) :proxy) proxy-address))
+          (should (equal (plist-get (car sources) :dictionary) "actual")))
+      (zr-dictionary-test-stop-server proxy))))
+
+(ert-deftest zr-dictionary-test-same-endpoint-can-use-direct-and-distinct-proxies ()
+  (let* ((dictionary-use-http-proxy t)
+         (dictionary-proxy-server nil) (dictionary-proxy-port nil)
+         (direct (zr-dictionary-test-server
+                  (lambda (_client _command) (zr-dictionary-test-definition "same" "Direct"))))
+         (first (zr-dictionary-test-server
+                 (lambda (_client _command) (zr-dictionary-test-definition "same" "First proxy")) t))
+         (second (zr-dictionary-test-server
+                  (lambda (_client _command) (zr-dictionary-test-definition "same" "Second proxy")) t))
+         (first-address (format "127.0.0.1:%s" (process-contact first :service)))
+         (second-address (format "127.0.0.1:%s" (process-contact second :service)))
+         (stages (list (list (append (zr-dictionary-test-target direct 'same) '(:proxy nil))
+                             (append (zr-dictionary-test-target direct '(same extra))
+                                     (list :proxy first-address))
+                             (append (zr-dictionary-test-target direct 'same)
+                                     (list :proxy second-address))))))
+    (unwind-protect
+        (progn
+          (should (equal (zr-dictionary-lookup "word" stages)
+                         '(("[same]" "Direct" "First proxy" "First proxy" "Second proxy"))))
+          (dolist (server (list direct first second))
+            (should (= (length (process-get server 'clients)) 1)))
+          (should-not (cl-some (lambda (command) (string-prefix-p "CONNECT " command))
+                              (process-get direct 'commands)))
+          (dolist (server (list first second))
+            (should (member (format "CONNECT 127.0.0.1:%s HTTP/1.1" (process-contact direct :service))
+                            (process-get server 'commands)))))
+      (dolist (server (list direct first second)) (zr-dictionary-test-stop-server server)))))
 
 (ert-deftest zr-dictionary-test-async-appends-in-arrival-order ()
   (let* ((dictionary-use-http-proxy nil)
@@ -864,16 +958,26 @@
        (when-let* ((buffer (get-buffer "*zr-dictionary*"))) (kill-buffer buffer))))))
 
 (ert-deftest zr-dictionary-test-safe-local-configuration ()
-  (let ((dictionary-server nil) (dictionary-port "invalid default"))
+  (let ((dictionary-server nil) (dictionary-port "invalid default")
+        (dictionary-use-http-proxy t) (dictionary-proxy-server nil) (dictionary-proxy-port nil))
     (dolist (value '(nil ((:server t :port t :dictionary t))
                      ((:dictionary (a b similar)))
+                     ((:server nil :port nil :dictionary a :proxy nil))
+                     ((:server 123 :port t :dictionary t :proxy t))
+                     ((:dictionary a :proxy "proxy.example:8080"))
+                     ((:dictionary a :proxy "[::1]:8080"))
                      (((:server "first.example" :port 2628 :dictionary a)
                        (:server "second.example" :port t :dictionary (b c))) similar)))
       (should (safe-local-variable-p 'zr-dictionary-dictionaries value)))
     (dolist (value '(t (dict1) ((dict1 dict2) similar)
-                     ((:server 123 :port t :dictionary t))
                      ((:dictionary ((progn (message "must not run")))))
                      ((:port -1 :dictionary a)) ((:dictionary (similar a)))
+                     ((:dictionary a :proxy 123)) ((:dictionary a :proxy ""))
+                     ((:dictionary a :proxy "proxy.example"))
+                     ((:dictionary a :proxy "proxy.example:0"))
+                     ((:dictionary a :proxy "proxy.example:65536"))
+                     ((:dictionary a :proxy "proxy.example:8080\r\nQUIT"))
+                     ((:dictionary a :proxy "bad host:8080"))
                      ((:dictionary (a similar b))) ((:dictionary nil))))
       (should-not (safe-local-variable-p 'zr-dictionary-dictionaries value))))
   (with-temp-buffer

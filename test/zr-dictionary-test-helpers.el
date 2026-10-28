@@ -27,9 +27,10 @@
       (accept-process-output nil 0.01))
     (should (funcall predicate))))
 
-(defun zr-dictionary-test-server (response-function)
+(defun zr-dictionary-test-server (response-function &optional proxy)
   "Create a local DICT fixture using RESPONSE-FUNCTION of (CLIENT COMMAND).
-Store commands and accepted clients on the server process for assertions."
+Store commands and accepted clients on the server process for assertions.
+When PROXY is non-nil, require HTTP CONNECT before the DICT greeting."
   (make-network-process
    :name "zr-dictionary-multi-server" :server t :host "127.0.0.1"
    :service t :family 'ipv4 :coding 'binary :noquery t
@@ -37,7 +38,7 @@ Store commands and accepted clients on the server process for assertions."
           (process-put client 'server server)
           (process-put server 'clients (cons client (process-get server 'clients)))
           (set-process-query-on-exit-flag client nil)
-          (process-send-string client "220 test DICT server\r\n"))
+          (unless proxy (process-send-string client "220 test DICT server\r\n")))
    :filter
    (lambda (client chunk)
      (let ((input (concat (or (process-get client 'input) "") chunk)))
@@ -47,8 +48,13 @@ Store commands and accepted clients on the server process for assertions."
                 (server (process-get client 'server)))
            (setq input (substring input (+ end 2)))
            (process-put server 'commands (cons command (process-get server 'commands)))
-           (when-let* ((response (if (string-prefix-p "client " command)
-                                    "250 ok\r\n" (funcall response-function client command))))
+           (when-let* ((response
+                        (cond
+                         ((and proxy (string-prefix-p "CONNECT " command))
+                          "HTTP/1.1 200 Connection established\r\n\r\n220 test DICT server\r\n")
+                         ((string-empty-p command) nil)
+                         ((string-prefix-p "client " command) "250 ok\r\n")
+                         (t (funcall response-function client command)))))
              (process-send-string client (encode-coding-string response 'utf-8)))))
        (process-put client 'input input)))))
 

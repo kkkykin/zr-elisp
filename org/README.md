@@ -107,7 +107,7 @@ hamlet
 
 可通过 `zr-dictionary-name-function` 自定义标题。
 函数接收 `(name id source)`，其中 `source` 是包含 `:server`、`:port`、
-`:dictionary` 的解析后配置，返回不含开头星号的单行标题。例如始终显示完整名称和 id：
+`:dictionary`、`:proxy` 的解析后配置，返回不含开头星号的单行标题。例如始终显示完整名称和 id：
 
 ```elisp
 (setq zr-dictionary-name-function
@@ -138,29 +138,34 @@ hamlet
 
 ```elisp
 (setq zr-dictionary-dictionaries
-      '(((:server "localhost" :port 2628 :dictionary (edict local))
-         (:server "dict.org" :port 2628 :dictionary (gcide wordnet)))
+      '(((:server "localhost" :port 2628 :dictionary (edict local) :proxy nil)
+         (:server "dict.org" :port 2628 :dictionary (gcide wordnet) :proxy "127.0.0.1:7890"))
         (:server "backup.example" :port 2628 :dictionary "*")
         similar))
 ```
 
 此配置先查询同组的四个字典，全部未命中才查询备用服务器。
-同一服务器和端口在一次查询中共用连接，依次查询字典；不同服务器并发查询。
+同一服务器、端口和代理在一次查询中共用连接，依次查询字典；不同连接并发查询。
 全部精确阶段未命中才进入 `similar`，候选词始终在返回它的服务器上继续查询。
-`:server t` 使用 `dictionary-server`，`:port t` 使用 `dictionary-port`，
-两者独立解析；省略这两个字段时也默认使用 `t`。跨服务器查询的默认标题带地址和端口，
+`:server` 只有字符串才指定服务器，`:port` 只有数字才指定端口（1–65535 的整数）；
+其他值（包括 `nil`、`t`）或省略字段时，分别使用 `dictionary-server`、`dictionary-port`。
+`:proxy` 字符串以 `host:port`（IPv6 为 `[地址]:port`）指定 HTTP 代理；
+`nil` 表示直连，`t` 或省略字段时沿用 `dictionary-use-http-proxy`、
+`dictionary-proxy-server` 和 `dictionary-proxy-port`。
+跨服务器查询的默认标题带地址和端口，
 例如 `[gcide@dict.org:2628]`，区分同名数据库。
-结果 buffer 和历史保存展开后的地址、端口和字典配置。
+结果 buffer 和历史保存展开后的地址、端口、字典和代理配置。
 生成的 dict link 默认只保存词典 id、阶段和策略，follow 时使用当时的默认服务器。
-需要链接保留跨服务器配置时，设置：
+需要链接保留服务器配置时，设置：
 
 ```elisp
 (setq zr-org-link-dict-include-server t)
 ```
 
 启用后生成的链接携带解析后的地址和端口，之后修改默认服务器不会改变这些链接的目标。
+代理默认不写入链接，启用保存服务器配置时也是如此。
 
-默认配置为 `'((:server t :port t :dictionary t))`。
+默认配置为 `'((:server t :port t :dictionary t :proxy t))`。
 `:dictionary t` 等价于 `:dictionary ("*" similar)`：先查全部数据库，
 全部精确阶段未命中后，只为这个目标查询相似词。
 `:dictionary (gcide wordnet similar)` 则为同组的这两个字典启用相似查询。
@@ -184,7 +189,7 @@ hamlet
 
 `zr-org-link.el` 位于 `org/`，依赖 `zr-dictionary.el`。执行 `zr-org-link-mode` 启用
 dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函数。
-`[[dict:word]]` 使用当前 buffer 的配置，可在链接查询参数里覆盖 `dictionaries` / `strategy`：
+`[[dict:word]]` 使用当前 buffer 的配置，可在链接查询参数里覆盖 `dictionaries` / `strategy` / `proxy`：
 
 ```org
 [[dict:reserved?dictionaries=%28%28%3Adictionary%20%28dict1%20dict2%20similar%29%29%29&strategy=prefix][reserved]]
@@ -194,6 +199,23 @@ dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函
 `((:dictionary (dict1 dict2 similar)))`。词语、参数值含空格、中文或 `?&%` 时也用 URL 编码。
 可调用 `(zr-org-link-dict-link "reserved" '((:dictionary (dict1 dict2 similar))) "prefix")`
 生成链接。在查询结果 buffer 中用 `org-store-link` 保存当前查询及其配置。
+独立的 `proxy` URL 参数覆盖所有目标的代理配置，与参数顺序无关：
+
+```org
+[[dict:reserved?proxy=127.0.0.1:7890][reserved]]
+[[dict:reserved?proxy=nil][reserved]]
+```
+
+字符串使用 `host:port`（IPv6 为 `[地址]:port`），`proxy=nil` 直连，
+`proxy=t` 沿用全局代理设置。省略 `proxy` 时使用词典配置中的代理。
+生成链接时默认省略代理；为 `zr-org-link-dict-link` 显式提供第四个参数才会加入：
+
+```elisp
+(zr-org-link-dict-link "reserved" '((:dictionary (dict1 dict2 similar)))
+                       "prefix" "127.0.0.1:7890")
+```
+
+第四个参数显式传入 `nil` 或 `t` 时，分别生成 `proxy=nil` 或 `proxy=t`。
 导出时仍生成翻译 URL，只使用查询词语。
 
 按文件选择词典，直接在目标 Org 文件的**第一行**设置标准文件局部变量：

@@ -69,33 +69,58 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
         (zr-org-link-open-wezterm (org-element-property :raw-link element))
         t))))
 
-(defun zr-org-link--dict-path (word dictionaries strategy)
-  "Return a dict path for WORD, DICTIONARIES and STRATEGY."
-  (let* ((resolved (zr-dictionary-resolve-dictionaries dictionaries))
-         (stages (if zr-org-link-dict-include-server
-                     resolved
-                   (mapcar (lambda (stage)
-                             (if (eq stage 'similar) stage
-                               (mapcar (lambda (target)
-                                         (list :dictionary (plist-get target :dictionary))) stage))) resolved))))
+(defun zr-org-link--dict-with-proxy (dictionaries proxy)
+  "Copy DICTIONARIES, overriding every target's proxy with PROXY."
+  (unless (zr-dictionary-dictionaries-p dictionaries)
+    (user-error "Invalid dictionary stages: %S" dictionaries))
+  (unless (zr-dictionary-dictionaries-p (list (list :dictionary t :proxy proxy)))
+    (user-error "Invalid dictionary proxy: %S" proxy))
+  (let ((override (lambda (target) (plist-put (copy-sequence target) :proxy proxy))))
+    (mapcar (lambda (stage)
+              (cond ((eq stage 'similar) stage)
+                    ((keywordp (car stage)) (funcall override stage))
+                    (t (mapcar override stage)))) dictionaries)))
+
+(cl-defun zr-org-link--dict-path (word dictionaries strategy &optional (proxy nil proxy-p))
+  "Return a dict path for WORD, DICTIONARIES and STRATEGY.
+Include a separate proxy parameter only when PROXY is explicitly supplied."
+  (let* ((resolved (zr-dictionary-resolve-dictionaries
+                    (zr-org-link--dict-with-proxy dictionaries (if proxy-p proxy nil))))
+         (stages (mapcar
+                  (lambda (stage)
+                    (if (eq stage 'similar) stage
+                      (mapcar (lambda (target)
+                                (append (when zr-org-link-dict-include-server
+                                          (list :server (plist-get target :server)
+                                                :port (plist-get target :port)))
+                                        (list :dictionary (plist-get target :dictionary)))) stage))) resolved)))
     (concat "dict:" (url-hexify-string word)
             "?dictionaries=" (url-hexify-string (prin1-to-string stages))
-            "&strategy=" (url-hexify-string strategy))))
+            "&strategy=" (url-hexify-string strategy)
+            (when proxy-p
+              (concat "&proxy=" (url-hexify-string (if (stringp proxy) proxy (symbol-name proxy))))))))
 
 (cl-defun zr-org-link-dict-link
     (word &optional (dictionaries zr-dictionary-dictionaries)
-          (strategy zr-dictionary-strategy))
+          (strategy zr-dictionary-strategy) (proxy nil proxy-p))
   "Return a dict link for WORD with DICTIONARIES and matching STRATEGY.
-Encode stages as a Lisp list in the dictionaries query parameter."
-  (org-link-make-string (zr-org-link--dict-path word dictionaries strategy) word))
+Encode stages as a Lisp list in the dictionaries query parameter.
+An explicit PROXY adds a separate proxy parameter overriding every target:
+a HOST:PORT string, nil for direct connections, or t for global proxy settings.
+Omitting PROXY leaves proxy configuration out of the generated link."
+  (org-link-make-string (if proxy-p
+                           (zr-org-link--dict-path word dictionaries strategy proxy)
+                         (zr-org-link--dict-path word dictionaries strategy)) word))
 
 (defun zr-org-link--dict-query (path)
   "Parse dict link PATH as (WORD DICTIONARIES STRATEGY).
-Missing query parameters use the current buffer's dictionary configuration."
+Missing query parameters use the current buffer's dictionary configuration.
+A proxy parameter overrides all targets after dictionaries have been parsed."
   (let* ((parts (split-string path "?"))
          (word (decode-coding-string (url-unhex-string (car parts)) 'utf-8))
          (dictionaries zr-dictionary-dictionaries)
-         (strategy zr-dictionary-strategy))
+         (strategy zr-dictionary-strategy)
+         proxy proxy-p)
     (unless (<= (length parts) 2)
       (user-error "Invalid dict link: %s" path))
     (dolist (parameter (split-string (or (cadr parts) "") "&" t))
@@ -110,8 +135,9 @@ Missing query parameters use the current buffer's dictionary configuration."
                (user-error "Invalid dictionary stages: %s" value))
              (setq dictionaries (car parsed))))
           ("strategy" (setq strategy value))
+          ("proxy" (setq proxy (pcase value ("nil" nil) ("t" t) (_ value)) proxy-p t))
           (_ (user-error "Unknown dict link parameter: %s" key)))))
-    (list word dictionaries strategy)))
+    (list word (if proxy-p (zr-org-link--dict-with-proxy dictionaries proxy) dictionaries) strategy)))
 
 (defun zr-org-link--follow (path _argument)
   "Look up the word and configuration in dict link PATH."

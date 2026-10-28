@@ -119,11 +119,12 @@
          (dictionary-port 1234)
          (stages '(((:server t :port t :dictionary local)
                     (:server "remote.example" :port t :dictionary (a b))) similar))
-         (resolved (zr-dictionary-resolve-dictionaries stages))
          (path (zr-org-link--dict-path "猫" stages "prefix")))
     (setq dictionary-server "changed.example" dictionary-port 4321)
     (should (equal (zr-org-link--dict-query (substring path 5))
-                   (list "猫" resolved "prefix")))))
+                   '("猫" (((:server "initial.example" :port 1234 :dictionary "local")
+                            (:server "remote.example" :port 1234 :dictionary "a")
+                            (:server "remote.example" :port 1234 :dictionary "b")) similar) "prefix")))))
 
 (ert-deftest zr-org-link-test-generated-links-omit-servers-by-default ()
   (let* ((zr-org-link-dict-include-server nil)
@@ -133,6 +134,92 @@
     (should (equal (zr-org-link--dict-query (substring path 5))
                    '("猫" (((:dictionary "a") (:dictionary "b") (:dictionary "c")) similar) "prefix")))
     (should-not (string-match-p "first.example\\|second.example\\|1234\\|2345" path))))
+
+(ert-deftest zr-org-link-test-generated-links-omit-proxies-by-default ()
+  (let* ((dictionary-use-http-proxy t) (dictionary-proxy-server nil) (dictionary-proxy-port nil)
+         (stages '(((:server "first.example" :port 1234 :dictionary a :proxy "proxy.example:8080")
+                    (:server "second.example" :port 2345 :dictionary b :proxy nil)) similar)))
+    (dolist (zr-org-link-dict-include-server '(nil t))
+      (let* ((link (zr-org-link-dict-link "word" stages "."))
+             (parsed (zr-org-link--dict-query (substring link 7 (string-match "\\]" link)))))
+        (should-not (string-match-p "proxy" link))
+        (dolist (target (car (cadr parsed)))
+          (should-not (plist-member target :proxy)))))
+    (should (equal stages
+                   '(((:server "first.example" :port 1234 :dictionary a :proxy "proxy.example:8080")
+                      (:server "second.example" :port 2345 :dictionary b :proxy nil)) similar)))))
+
+(ert-deftest zr-org-link-test-explicit-proxy-argument-roundtrips ()
+  (let ((zr-org-link-dict-include-server nil)
+        (dictionary-use-http-proxy nil)
+        (word "猫 a?b&c+100%")
+        (stages '((:dictionary (a b similar) :proxy "old.proxy:9090"))))
+    (dolist (proxy '(nil t "127.0.0.1:7890" "[::1]:8080"))
+      (zr-test-with-org-buffer (zr-org-link-dict-link word stages "prefix" proxy)
+        (let* ((path (org-element-property :path (org-element-context)))
+               (parsed (zr-org-link--dict-query path)))
+          (should (string-match-p "&proxy=" path))
+          (should (equal (car parsed) word))
+          (should (equal (caddr parsed) "prefix"))
+          (should (equal (cadr parsed)
+                         (list (list (list :dictionary '("a" similar) :proxy proxy)
+                                     (list :dictionary '("b" similar) :proxy proxy))))))))))
+
+(ert-deftest zr-org-link-test-url-proxy-overrides-all-targets-regardless-of-parameter-order ()
+  (let* ((zr-dictionary-dictionaries
+          '((:server nil :port nil :dictionary local :proxy "old.proxy:9090")
+            ((:server "remote.example" :port 2628 :dictionary (a b similar) :proxy nil)
+             (:dictionary c :proxy t)) similar))
+         (original (copy-tree zr-dictionary-dictionaries))
+         (encoded (url-hexify-string (prin1-to-string original))))
+    (dolist (proxy '(nil t "proxy.example:8080" "[::1]:8888"))
+      (let* ((parameter (concat "proxy=" (url-hexify-string (if (stringp proxy) proxy (symbol-name proxy)))))
+             (expected (list (list :server nil :port nil :dictionary 'local :proxy proxy)
+                             (list (list :server "remote.example" :port 2628 :dictionary '(a b similar) :proxy proxy)
+                                   (list :dictionary 'c :proxy proxy)) 'similar)))
+        (dolist (query (list parameter
+                             (concat parameter "&dictionaries=" encoded)
+                             (concat "dictionaries=" encoded "&" parameter)))
+          (should (equal (cadr (zr-org-link--dict-query (concat "word?" query))) expected)))))
+    (should (equal zr-dictionary-dictionaries original))
+    (should-not (cadr (zr-org-link--dict-query "word?proxy=nil&dictionaries=nil")))
+    (dolist (proxy '("" "proxy.example" "proxy.example:0" "proxy.example:65536" "proxy.example:8080\r\nQUIT"))
+      (should-error (zr-org-link--dict-query (concat "word?proxy=" (url-hexify-string proxy))) :type 'user-error))
+    (should-error (zr-org-link-dict-link "word" original "." 123) :type 'user-error)))
+
+(ert-deftest zr-org-link-test-follow-url-proxy-uses-real-http-connection ()
+  (let* ((dictionary-server "dict.example") (dictionary-port 2628)
+         (dictionary-use-http-proxy t) (dictionary-proxy-server nil) (dictionary-proxy-port nil)
+         (zr-dictionary-dictionaries '((:dictionary same)))
+         (proxy (zr-dictionary-test-server
+                 (lambda (_client _command) (zr-dictionary-test-definition "same" "Through link proxy")) t))
+         (proxy-address (format "127.0.0.1:%s" (process-contact proxy :service))))
+    (save-window-excursion
+      (unwind-protect
+          (let ((buffer (zr-org-link--follow (concat "word?proxy=" (url-hexify-string proxy-address)) nil)))
+            (zr-dictionary-test-wait buffer)
+            (with-current-buffer buffer
+              (should (equal (zr-dictionary--view-entries zr-dictionary--view)
+                             '(("[same]" "Through link proxy"))))
+              (should (equal (plist-get (caar zr-dictionary-dictionaries) :proxy) proxy-address)))
+            (should (member "CONNECT dict.example:2628 HTTP/1.1" (process-get proxy 'commands)))
+            (should (= (length (process-get proxy 'clients)) 1)))
+        (when-let* ((buffer (get-buffer "*zr-dictionary*"))) (kill-buffer buffer))
+        (zr-dictionary-test-stop-server proxy)))))
+
+(ert-deftest zr-org-link-test-follow-url-proxy-nil-bypasses-global-proxy ()
+  (zr-dictionary-test-with-server
+   (let ((dictionary-use-http-proxy t) (dictionary-proxy-server nil) (dictionary-proxy-port nil))
+     (save-window-excursion
+       (unwind-protect
+           (let ((buffer (zr-org-link--follow (concat (url-hexify-string "猫") "?proxy=nil") nil)))
+             (zr-dictionary-test-wait buffer)
+             (with-current-buffer buffer
+               (should (equal (zr-dictionary--view-entries zr-dictionary--view)
+                              '(("[edict]" "cat from DICT") ("[local]" "猫の定義 from DICT")))))
+             (should (member "define * \"猫\"" dictionary-commands))
+             (should-not (cl-some (lambda (command) (string-prefix-p "CONNECT " command)) dictionary-commands)))
+         (when-let* ((buffer (get-buffer "*zr-dictionary*"))) (kill-buffer buffer)))))))
 
 (provide 'zr-org-link-test)
 ;;; zr-org-link-test.el ends here
