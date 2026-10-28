@@ -235,6 +235,23 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 
 ## 手动制卡与 Org protocol
 
+从 `zr-dictionary-search` 的查询结果中制卡，可添加 capture 模板：
+
+```elisp
+(with-eval-after-load 'org-capture
+  (add-to-list 'org-capture-templates
+               (zr-org-srs-x-capture-template "d" "词典制卡")))
+```
+
+在结果 buffer 中执行 `org-capture` 并选择 `d`，默认取光标所在词典的完整释义；
+有 region 时取与选区相交的所有词典，合成一张卡。直接复用已显示的查询结果，
+不重新查词，保留词典标题，并将 `{词语或短语}` 转成 dict link。
+使用 `zr-org-srs-x-model-alist` 的 `t` 项渲染，`word` 是原查询词；
+目标为 `t` 项的 `deck`，未配置时使用 `zr-org-srs-x-default-deck`。
+默认 Back 包含查询 dict link，链接保存原查询的词典阶段和匹配策略。
+可在 capture buffer 中编辑，`C-c C-c` 保存，`C-c C-k` 取消。
+候选词列表和没有释义的位置不能制卡。
+
 `M-x zr-org-srs-x-create-card` 输入一个词或短语即可制卡。选区或光标下的词作为
 输入默认值；在 deck buffer 中使用 `t` 项配置的 deck，未配置时使用当前 deck。
 在其他 buffer 中会提示选择 deck，允许输入新名称；`C-u` 始终提示选择 deck。

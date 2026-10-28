@@ -12,6 +12,8 @@
 ;; Cards use Org Front/Back subheadings and the installed Org-srs API.
 ;; `zr-org-srs-x-create-card' captures a word manually; enable
 ;; `zr-org-srs-x-protocol-mode' for org-protocol://srs-card requests.
+;; Add `zr-org-srs-x-capture-template' to `org-capture-templates' to capture
+;; selected dictionaries from a zr-dictionary result buffer as one card.
 ;; Original fields and Anki HTML/CSS/JavaScript templates are discarded.
 ;; Loading this library does not start the server or load Org-srs.
 
@@ -30,6 +32,8 @@
 (declare-function org-srs-review-start "org-srs-review" (&optional source))
 (declare-function org-protocol-parse-parameters "org-protocol"
                   (info &optional new-style default-order))
+(declare-function org-capture-get "org-capture" (property &optional local))
+(declare-function org-capture-put "org-capture" (&rest elements))
 (defvar org-protocol-protocol-alist)
 (defgroup zr-org-srs-x nil
   "Capture AnkiConnect notes as Org-srs cards."
@@ -71,7 +75,7 @@ Emacs reads the same files through a WSL mount."
     (t . zr-org-srs-x-render-default-note))
   "Renderers selected by an Anki note's modelName.
 Keys are model names as strings or symbols; t supplies the fallback and
-handles manual and Org protocol capture, which have no model name.
+handles manual, dictionary and Org protocol capture, which have no model name.
 A renderer is an alist of name/front/back templates, or a function.
 The template alist can also supply deck, a default deck name overridden
 by an explicit capture destination, and dictionaries, a dictionary stage
@@ -90,7 +94,8 @@ Each template may also be a function of (FIELDS VARIABLES) returning text.
 A model renderer function receives the same arguments and returns an alist
 of name/front/back Org strings, which are used without template expansion.
 FIELDS is an ordered alist from field names to Org strings, following the
-model's field order, or just a word field for manual and protocol capture.
+model's field order.  Manual, dictionary and protocol capture supply only
+a word field.
 VARIABLES uses the symbols dictionary, picture,
 audio and video as keys.
 Render in the deck buffer after dictionary lookup and attachment import."
@@ -176,7 +181,8 @@ Render in the deck buffer after dictionary lookup and attachment import."
 (defun zr-org-srs-x--files ()
   "List deck files in `zr-org-srs-x-directory'."
   (when (file-directory-p zr-org-srs-x-directory)
-    (directory-files-recursively zr-org-srs-x-directory "\\.org\\'")))
+    (cl-remove-if-not #'file-regular-p
+                      (directory-files-recursively zr-org-srs-x-directory "\\.org\\'"))))
 
 (defun zr-org-srs-x--deck-name (file)
   "Return the Anki deck name corresponding to FILE."
@@ -253,13 +259,14 @@ Render in the deck buffer after dictionary lookup and attachment import."
         "\n[ \t]*\n\\(?:[ \t]*\n\\)+" "\n\n"
         (zr-org-srs-x--dom-text (libxml-parse-html-region (point-min) (point-max))))))))
 
-(defun zr-org-srs-x--dictionary-text (word)
+(defun zr-org-srs-x--dictionary-text (word &optional definitions)
   "Render WORD's `zr-dictionary-lookup' results as Org definitions.
+Use supplied DEFINITIONS instead of looking up WORD when non-nil.
 Put a query link before the first dictionary heading and turn brace-marked
 words and phrases into dict links using the current query configuration."
   (let ((zr-dictionary-dictionaries
          (zr-dictionary-resolve-dictionaries zr-dictionary-dictionaries)))
-    (if-let* ((definitions (zr-dictionary-lookup word)))
+    (if-let* ((definitions (or definitions (zr-dictionary-lookup word))))
 	(concat
 	 (zr-org-link-dict-link word)
 	 "\n\n"
@@ -439,8 +446,9 @@ Return an alist of audio/picture/video Org links for card templates."
               ((string-match-p "\\`[1-9][0-9]*\\'" id)))
     (string-to-number id)))
 
-(defun zr-org-srs-x--check-duplicate (title options)
+(defun zr-org-srs-x--check-duplicate (title options &optional exclude-id)
   "Reject note when TITLE already exists unless OPTIONS allow duplicates.
+Ignore the card with EXCLUDE-ID when finalizing its capture.
 Always scan existing Org headings to keep `zr-org-srs-x--last-id'
 strictly increasing."
   (let (duplicate)
@@ -453,11 +461,29 @@ strictly increasing."
              (lambda ()
                (when-let* ((id (zr-org-srs-x--note-id)))
                  (setq zr-org-srs-x--last-id (max (or zr-org-srs-x--last-id 0) id)))
-               (when (equal (org-get-heading t) title)
+               (when (and (equal (org-get-heading t) title)
+                          (not (and exclude-id
+                                    (equal (org-entry-get nil "ID") exclude-id))))
                  (setq duplicate t)))
              "LEVEL=1" 'file)))))
     (when (and duplicate (not (and (hash-table-p options) (eq (gethash "allowDuplicate" options) t))))
       (error "cannot create note because it is a duplicate"))))
+
+(defun zr-org-srs-x--insert-card (card id &optional tags)
+  "Insert rendered CARD with integer ID and TAGS at point as an Org-srs card."
+  (let ((position (point)))
+    (insert "* " (replace-regexp-in-string
+                  "[\n\r\t]+" " " (alist-get 'name card)) "\n"
+            "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
+            "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
+    (goto-char position)
+    (org-entry-put nil "ID" (number-to-string id))
+    (org-set-tags
+     (delete-dups
+      (mapcar (lambda (tag) (replace-regexp-in-string
+                             "[^[:alnum:]_@#%]" "_" tag))
+              (append tags nil))))
+    (org-srs-item-new 'card)))
 
 (defun zr-org-srs-x--create-card (buffer model-name fields &optional note)
   "Create a card in BUFFER from Org FIELDS and return its integer ID.
@@ -484,8 +510,7 @@ supplies attachments, tags and duplicate options."
                  ;; Dictionary waits may dispatch another capture request.
                  ;; Refresh existing IDs before allocating this card's ID.
                  (zr-org-srs-x--check-duplicate title options)
-                 (zr-org-srs-x--new-id)))
-           (id-str (number-to-string id)))
+                 (zr-org-srs-x--new-id))))
       (save-excursion
         (save-restriction
           (widen)
@@ -494,18 +519,8 @@ supplies attachments, tags and duplicate options."
             (when (= (point-min) (point-max))
               (insert "#+title: " (zr-org-srs-x--deck-name file) "\n"))
             (unless (bolp) (insert "\n"))
-            (insert "\n* " title "\n")
-            (let ((position (line-beginning-position 0)))
-              (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
-                      "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
-              (goto-char position)
-              (org-entry-put nil "ID" id-str)
-              (org-set-tags
-               (delete-dups
-                (mapcar (lambda (tag) (replace-regexp-in-string
-                                       "[^[:alnum:]_@#%]" "_" tag))
-                        (append tags nil))))
-              (org-srs-item-new 'card))
+            (insert "\n")
+            (zr-org-srs-x--insert-card card id tags)
             (zr-org-srs-x--save))))
       id)))
 
@@ -791,6 +806,68 @@ Only the v6 capture actions documented in org/README.md are supported."
              (equal (file-name-extension buffer-file-name) "org")
              (file-in-directory-p buffer-file-name zr-org-srs-x-directory))
     (zr-org-srs-x--deck-name buffer-file-name)))
+
+;;;###autoload
+(defun zr-org-srs-x-capture-template (&optional key description)
+  "Return an Org capture template for selected dictionary results.
+KEY defaults to \"d\" and DESCRIPTION to \"Dictionary card\".  Add the result
+to `org-capture-templates'.  Capture the complete dictionary at point, or
+all dictionaries intersecting the active region, as one card.  Use the t
+entry in `zr-org-srs-x-model-alist' and its deck, falling back to
+`zr-org-srs-x-default-deck'.  Reuse displayed definitions without lookup;
+dict links retain the source query's dictionary stages and strategy."
+  (list (or key "d") (or description "Dictionary card") 'entry
+        '(file zr-org-srs-x--capture-file)
+        '(function zr-org-srs-x--capture-prepare)
+        :empty-lines 1 :hook #'zr-org-srs-x--capture-insert
+        :before-finalize #'zr-org-srs-x--capture-check-duplicate))
+
+(defun zr-org-srs-x--capture-file ()
+  "Return the prepared capture file or the t renderer's default deck file."
+  (let ((file (or (org-capture-get :zr-org-srs-x-file)
+                  (zr-org-srs-x--deck-file (zr-org-srs-x--default-deck nil)))))
+    (zr-org-srs-x--buffer file t)
+    file))
+
+(defun zr-org-srs-x--capture-prepare ()
+  "Prepare a card from the source buffer and return a capture placeholder."
+  (let* ((entries (zr-dictionary-selected-entries))
+         (fields (list (cons "word" zr-dictionary-word)))
+         (definitions (zr-org-srs-x--dictionary-text zr-dictionary-word entries))
+         (file (zr-org-srs-x--deck-file (zr-org-srs-x--default-deck nil)))
+         (buffer (zr-org-srs-x--buffer file t))
+         (text
+          (with-current-buffer buffer
+            (require 'org-srs)
+            (let* ((card (zr-org-srs-x--render
+                          nil fields `((dictionary . ,definitions)
+                                       (picture . "") (audio . "") (video . ""))))
+                   (title (replace-regexp-in-string
+                           "[\n\r\t]+" " " (alist-get 'name card)))
+                   (id (progn (zr-org-srs-x--check-duplicate title nil)
+                              (zr-org-srs-x--new-id))))
+              (with-temp-buffer
+                (org-mode)
+                (org-clone-local-variables buffer "\\`org-srs-")
+                (zr-org-srs-x--insert-card card id)
+                (buffer-string))))))
+    (org-capture-put :zr-org-srs-x-file file :zr-org-srs-x-card text)
+    "* %?\n"))
+
+(defun zr-org-srs-x--capture-insert ()
+  "Replace the capture placeholder with the prepared card's literal text."
+  ;; Insert after template expansion so definitions and URL escapes stay literal.
+  (delete-region (point-min) (point-max))
+  (insert (org-capture-get :zr-org-srs-x-card t))
+  (goto-char (point-min)))
+
+(defun zr-org-srs-x--capture-check-duplicate ()
+  "Check the edited capture heading for duplicates before saving."
+  (save-excursion
+    (goto-char (org-capture-get :begin-marker t))
+    (unless (org-at-heading-p) (outline-next-heading))
+    (zr-org-srs-x--check-duplicate
+     (org-get-heading t) nil (org-entry-get nil "ID"))))
 
 ;;;###autoload
 (defun zr-org-srs-x-create-card (word &optional deck)

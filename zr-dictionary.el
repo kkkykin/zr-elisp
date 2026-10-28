@@ -537,19 +537,43 @@ Connections are isolated from native Dictionary buffers and always closed."
   "Insert ENTRIES at point using the current view's native definition styles."
   (let ((start (point)))
     (dolist (entry entries)
-      (insert (propertize (car entry) 'face 'dictionary-word-entry-face) "\n\n")
-      (dolist (text (cdr entry))
-        (if zr-dictionary--matching-p
-            (progn
-              (insert-button text :type 'dictionary-link
-                             'callback #'zr-dictionary--new-search 'data (cons text (car entry)))
-              (insert "\n"))
-          ;; The native renderer expects bytes, while query results are decoded.
-          (let ((dictionary-coding-systems-for-dictionaries nil))
-            (dictionary-display-word-definition (encode-coding-string text 'utf-8)
-                                                zr-dictionary-word "*"))))
-      (when zr-dictionary--matching-p (insert "\n")))
+      (let ((entry-start (point)))
+        (insert (propertize (car entry) 'face 'dictionary-word-entry-face) "\n\n")
+        (dolist (text (cdr entry))
+          (if zr-dictionary--matching-p
+              (progn
+                (insert-button text :type 'dictionary-link
+                               'callback #'zr-dictionary--new-search 'data (cons text (car entry)))
+                (insert "\n"))
+            ;; The native renderer expects bytes, while query results are decoded.
+            (let ((dictionary-coding-systems-for-dictionaries nil))
+              (dictionary-display-word-definition (encode-coding-string text 'utf-8)
+                                                  zr-dictionary-word "*"))))
+        (when zr-dictionary--matching-p (insert "\n"))
+        (add-text-properties entry-start (point) (list 'zr-dictionary-entry entry))
+        (put-text-property (1- (point)) (point) 'rear-nonsticky t)))
     (zr-dictionary--adapt-buttons start)))
+
+(defun zr-dictionary-selected-entries ()
+  "Return complete definitions for dictionaries at point or in the region.
+Select every dictionary section intersecting the active region, preserving
+display order and merging sections with the same name.  Matching-word lists
+are not definitions."
+  (unless (and (derived-mode-p 'dictionary-mode) zr-dictionary-word
+               (not zr-dictionary--matching-p))
+    (user-error "Select definitions in a zr-dictionary result buffer"))
+  (let* ((region (use-region-p))
+         (position (if region (region-beginning) (point)))
+         (end (if region (region-end) (min (1+ position) (point-max))))
+         entries)
+    (while (< position end)
+      (when-let* ((entry (get-text-property position 'zr-dictionary-entry)))
+        (push entry entries))
+      (setq position (next-single-property-change
+                      position 'zr-dictionary-entry nil end)))
+    (unless entries
+      (user-error "No dictionary definitions selected"))
+    (zr-dictionary--merge-entries (list (nreverse entries)))))
 
 (defun zr-dictionary--status ()
   "Update the current view's status without moving point or existing results."

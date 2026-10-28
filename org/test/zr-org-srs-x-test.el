@@ -6,6 +6,7 @@
 (require 'cl-lib)
 (require 'url-util)
 (require 'dictionary)
+(require 'org-capture)
 (require 'zr-test-helpers)
 (require 'zr-org-srs-x)
 (require 'zr-dictionary-test-helpers)
@@ -87,6 +88,121 @@
      (goto-char (car region))
      (org-end-of-subtree t t)
      (point))))
+
+(defmacro zr-org-srs-x-test--with-dictionary-results (&rest body)
+  (declare (indent 0) (debug t))
+  `(with-temp-buffer
+     (dictionary-mode)
+     (zr-dictionary--display
+      (zr-dictionary--make-view
+       :word "cat & 猫" :dictionaries '((:server "source.example" :port 2628 :dictionary (first second)))
+       :strategy "prefix" :name-function #'zr-dictionary-format-name
+       :entries '(("First" "First definition. See {other word}.")
+                  ("Second" "Second definition. 100% %s %t %? %(error \"literal\") %^{literal}"
+                   "Second paragraph.\n* Literal heading\n#+literal: text"))
+       :status 'complete))
+     ,@body))
+
+(ert-deftest zr-org-srs-x-test-dictionary-capture-point-default-and-links ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (save-window-excursion
+     (zr-org-srs-x-test--with-dictionary-results
+      (goto-char (point-min))
+      (search-forward "Second definition")
+      (let ((org-capture-templates (list (zr-org-srs-x-capture-template)))
+            (org-capture-mode-hook nil)
+            (org-capture-after-finalize-hook nil)
+            (org-store-link-plist nil))
+        (cl-letf (((symbol-function 'zr-dictionary-lookup)
+                   (lambda (&rest _) (ert-fail "Capture must reuse displayed definitions"))))
+          (org-capture nil "d")
+          (should org-capture-mode)
+          (should (equal (org-get-heading t) "cat & 猫"))
+          (should (org-srs-item-exists-p '(card back)))
+          (should-not (string-match-p "First definition" (buffer-string)))
+          (should (string-match-p (regexp-quote "100% %s %t %? %(error \"literal\")")
+                                  (buffer-string)))
+          (should (string-match-p "Second paragraph" (buffer-string)))
+          (should (string-match-p "^,\\* Literal heading" (buffer-string)))
+          (should (string-match-p "^,#\\+literal: text" (buffer-string)))
+          (let ((id (zr-org-srs-x--note-id)))
+            (should (integerp id))
+            (save-excursion
+              (re-search-forward "\\[\\[dict:\\([^]\n]+\\)\\]")
+              (pcase-let ((`(,word ,dictionaries ,strategy)
+                           (zr-org-link--dict-query (match-string 1))))
+                (should (equal word "cat & 猫"))
+                (should (equal dictionaries '(((:dictionary "first") (:dictionary "second")))))
+                (should (equal strategy "prefix"))))
+            (org-capture-finalize)
+            (should (equal (zr-org-srs-x--find-notes "deck:Default") (list id)))
+            (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "Default"))
+              (should-not (buffer-modified-p))))))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-capture-region-t-renderer-and-cancel ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (let ((zr-org-srs-x-model-alist
+          '((modelofluna . ((name . "Wrong") (front . "Wrong") (back . "Wrong")))
+            (t . ((deck . "Words::Selected")
+                  (dictionaries . ((:dictionary invalid)))
+                  (name . ("Card %s" .word)) (front . ("Prompt %s" .word))
+                  (back . ("%s" dictionary)))))))
+     (save-window-excursion
+       (zr-org-srs-x-test--with-dictionary-results
+        (goto-char (point-min))
+        (search-forward "First definition")
+        (set-mark (point))
+        (search-forward "Second definition")
+        (let ((transient-mark-mode t) (mark-active t)
+              (org-capture-templates (list (zr-org-srs-x-capture-template "s" "Selected dictionaries")))
+              (org-capture-mode-hook nil)
+              (org-capture-after-finalize-hook nil)
+              (org-store-link-plist nil))
+          (cl-letf (((symbol-function 'zr-dictionary-lookup)
+                     (lambda (&rest _) (ert-fail "Unexpected dictionary lookup"))))
+            (org-capture nil "s")
+            (should (equal (org-get-heading t) "Card cat & 猫"))
+            (should (string-match-p "Prompt cat & 猫" (buffer-string)))
+            (should (string-match-p "^\\*\\*\\* First$" (buffer-string)))
+            (should (string-match-p "^\\*\\*\\* Second$" (buffer-string)))
+            (should (string-match-p "Second paragraph" (buffer-string)))
+            (should (string-match-p "See \\[\\[dict:" (buffer-string)))
+            (should (= (length (org-map-entries (lambda () (point)) "LEVEL=1")) 1))
+            (org-capture-kill)
+            (should-not (zr-org-srs-x--find-notes ""))
+            (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "Words::Selected"))
+              (should (string-blank-p (buffer-string)))))))))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-capture-rejects-non-definitions ()
+  (zr-org-srs-x-test--with-decks
+   (let ((org-capture-templates (list (zr-org-srs-x-capture-template))))
+     (with-temp-buffer
+       (should-error (org-capture nil "d") :type 'user-error))
+     (zr-org-srs-x-test--with-dictionary-results
+      (goto-char (point-min))
+      (should-error (org-capture nil "d") :type 'user-error)
+      (search-forward "First definition")
+      (let ((zr-dictionary--matching-p t))
+        (should-error (org-capture nil "d") :type 'user-error)))
+     (should-not (file-exists-p zr-org-srs-x-directory)))))
+
+(ert-deftest zr-org-srs-x-test-dictionary-capture-edited-duplicate ()
+  (zr-org-srs-x-test--require-srs)
+  (zr-org-srs-x-test--with-decks
+   (zr-org-srs-x-create-card "Existing")
+   (save-window-excursion
+     (zr-org-srs-x-test--with-dictionary-results
+      (goto-char (point-min))
+      (search-forward "First definition")
+      (let ((org-capture-templates (list (zr-org-srs-x-capture-template)))
+            (org-store-link-plist nil))
+        (org-capture nil "d")
+        (org-edit-headline "Existing")
+        (should-error (org-capture-finalize))
+        (org-capture-kill)
+        (should (= (length (zr-org-srs-x--find-notes "")) 1)))))))
 
 (ert-deftest zr-org-srs-x-test-model-templates-and-fallback ()
   (let* ((fields '(("word" . "猫") ("example_sentence" . "A %s $dictionary \\1 example")
