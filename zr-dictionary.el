@@ -169,7 +169,7 @@ Validate syntax without connecting or depending on the user's server defaults."
 (put 'zr-dictionary-dictionaries 'safe-local-variable #'zr-dictionary-dictionaries-p)
 
 (cl-defstruct (zr-dictionary--query (:constructor zr-dictionary--make-query))
-  word strategy plan pending stage-results clients timer done results error
+  word strategy plan (group-index 0) pending stage-results clients timer done results error
   on-result on-done name-function multiple-servers buffer proxy identification timeout)
 
 (cl-defstruct (zr-dictionary--client (:constructor zr-dictionary--make-client))
@@ -417,23 +417,25 @@ Validate syntax without connecting or depending on the user's server defaults."
   (unless (zr-dictionary--query-done query)
     (if-let* ((stage (pop (zr-dictionary--query-plan query))))
         (condition-case err
-            (let ((index 0))
-              (setf (zr-dictionary--query-pending query) (length (cdr stage))
+            (pcase-let ((`(,kind ,group-index ,targets) stage)
+                        (index 0))
+              (setf (zr-dictionary--query-group-index query) group-index
+                    (zr-dictionary--query-pending query) (length targets)
                     (zr-dictionary--query-stage-results query) nil)
-              (dolist (target (cdr stage))
+              (dolist (target targets)
                 (unless (zr-dictionary--query-done query)
                   (let* ((endpoint (cons (plist-get target :server) (plist-get target :port)))
                          (client (or (cdr (assoc endpoint (zr-dictionary--query-clients query)))
                                      (zr-dictionary--open-client query endpoint))))
                     (setf (zr-dictionary--client-queue client)
-                          (nconc (zr-dictionary--client-queue client) (list (list index (car stage) target))))
+                          (nconc (zr-dictionary--client-queue client) (list (list index kind target))))
                     (cl-incf index)
                     (zr-dictionary--client-next client)))))
           (error (zr-dictionary--complete query nil err)))
       (zr-dictionary--complete query nil))))
 
-(defun zr-dictionary--prepare-query (word dictionaries strategy on-result on-done &optional matching)
-  "Validate a query and capture its configuration before starting any processes."
+(defun zr-dictionary--prepare-query (word dictionaries strategy on-result on-done &optional matching group-index)
+  "Validate and prepare a query, optionally restricted to GROUP-INDEX."
   (zr-dictionary--escape-word word)
   (let* ((stages (zr-dictionary-resolve-dictionaries dictionaries))
          (groups (remq 'similar stages))
@@ -441,20 +443,24 @@ Validate syntax without connecting or depending on the user's server defaults."
                                          (cons (plist-get target :server) (plist-get target :port)))
                                        (apply #'append groups))))
          (proxy (when dictionary-use-http-proxy
-                  (zr-dictionary--endpoint dictionary-proxy-server dictionary-proxy-port))))
+                  (zr-dictionary--endpoint dictionary-proxy-server dictionary-proxy-port)))
+         (plan
+          (append
+           (cl-loop for group in groups for index from 0
+                    collect (list (if matching 'match 'define) index group))
+           (unless matching
+             (cl-loop for group in groups for index from 0
+                      for targets = (if (memq 'similar stages) group
+                                      (cl-remove-if-not
+                                       (lambda (target) (consp (plist-get target :dictionary))) group))
+                      when targets collect (list 'similar index targets))))))
     (zr-dictionary--make-query
      :word word :strategy (zr-dictionary--id strategy)
+     :group-index (or group-index 0)
      :plan (unless (string-blank-p word)
-             (append (mapcar (lambda (group) (cons (if matching 'match 'define) group)) groups)
-                     (unless matching
-                       (delq nil
-                             (mapcar
-                              (lambda (group)
-                                (let ((targets
-                                       (if (memq 'similar stages) group
-                                         (cl-remove-if-not
-                                          (lambda (target) (consp (plist-get target :dictionary))) group))))
-                                  (when targets (cons 'similar targets)))) groups)))))
+             (if group-index
+                 (cl-remove-if-not (lambda (stage) (= (cadr stage) group-index)) plan)
+               plan))
      :on-result on-result :on-done on-done :name-function zr-dictionary-name-function
      :multiple-servers (> (length endpoints) 1) :buffer (current-buffer)
      :proxy proxy :identification dictionary-identification :timeout zr-dictionary-timeout)))
@@ -494,11 +500,14 @@ Connections are isolated from native Dictionary buffers and always closed."
 (defvar-local zr-dictionary--view nil)
 
 (cl-defstruct (zr-dictionary--view (:constructor zr-dictionary--make-view))
-  word dictionaries strategy name-function matching entries (status 'pending) error)
+  word dictionaries strategy name-function matching (group-index 0) selected-group
+  entries (status 'pending) error)
 
 (defun zr-dictionary--cancel ()
   "Cancel the result buffer's active request, keeping its received entries."
   (when zr-dictionary--request
+    (setf (zr-dictionary--view-group-index zr-dictionary--view)
+          (zr-dictionary--query-group-index zr-dictionary--request))
     (zr-dictionary--cancel-query zr-dictionary--request)
     (setq zr-dictionary--request nil)
     (when (eq (zr-dictionary--view-status zr-dictionary--view) 'pending)
@@ -575,6 +584,59 @@ are not definitions."
       (user-error "No dictionary definitions selected"))
     (zr-dictionary--merge-entries (list (nreverse entries)))))
 
+(defun zr-dictionary--move-dictionary (backward)
+  "Move to the adjacent dictionary heading, going BACKWARD when non-nil."
+  (unless (and (derived-mode-p 'dictionary-mode) zr-dictionary-word)
+    (user-error "This command requires a zr-dictionary result buffer"))
+  (let ((position (point-min)) previous current next)
+    (while (< position (point-max))
+      (when (get-text-property position 'zr-dictionary-entry)
+        (cond
+         ((<= position (point)) (setq previous current current position))
+         ((not next) (setq next position))))
+      (setq position (next-single-property-change
+                      position 'zr-dictionary-entry nil (point-max))))
+    (let ((target (if backward
+                      (if (get-text-property (point) 'zr-dictionary-entry) previous current)
+                    next)))
+      (unless target
+        (user-error "No %s dictionary" (if backward "previous" "next")))
+      (goto-char target))))
+
+(defun zr-dictionary-next-dictionary ()
+  "Move to the next dictionary in the current result."
+  (interactive)
+  (zr-dictionary--move-dictionary nil))
+
+(defun zr-dictionary-previous-dictionary ()
+  "Move to the previous dictionary in the current result."
+  (interactive)
+  (zr-dictionary--move-dictionary t))
+
+(defun zr-dictionary--change-group (step)
+  "Query the group STEP places away from the current dictionary group."
+  (unless (and (derived-mode-p 'dictionary-mode) zr-dictionary--view)
+    (user-error "This command requires a zr-dictionary result buffer"))
+  (let* ((current (if zr-dictionary--request
+                      (zr-dictionary--query-group-index zr-dictionary--request)
+                    (zr-dictionary--view-group-index zr-dictionary--view)))
+         (index (+ current step))
+         (groups (remq 'similar zr-dictionary-dictionaries)))
+    (unless (and (>= index 0) (< index (length groups)))
+      (user-error "No %s dictionary group" (if (> step 0) "next" "previous")))
+    (zr-dictionary--show zr-dictionary-word zr-dictionary-dictionaries
+                         zr-dictionary-strategy zr-dictionary--matching-p nil index)))
+
+(defun zr-dictionary-next-group ()
+  "Query the same word in the next configured dictionary group."
+  (interactive)
+  (zr-dictionary--change-group 1))
+
+(defun zr-dictionary-previous-group ()
+  "Query the same word in the previous configured dictionary group."
+  (interactive)
+  (zr-dictionary--change-group -1))
+
 (defun zr-dictionary--status ()
   "Update the current view's status without moving point or existing results."
   (setq header-line-format
@@ -636,15 +698,16 @@ are not definitions."
         (zr-dictionary--status)
         (set-buffer-modified-p nil)))))
 
-(defun zr-dictionary--show (word dictionaries strategy &optional matching refresh)
+(defun zr-dictionary--show (word dictionaries strategy &optional matching refresh group-index)
   "Open WORD's buffer immediately and append results as they arrive.
 Use DICTIONARIES and STRATEGY.  MATCHING lists candidates.
-REFRESH skips history."
+REFRESH skips history.  GROUP-INDEX restricts lookup to that configured group."
   (let* ((dictionaries (zr-dictionary-resolve-dictionaries dictionaries))
          (view (zr-dictionary--make-view :word word :dictionaries dictionaries :strategy strategy
-                                         :name-function zr-dictionary-name-function :matching matching))
+                                         :name-function zr-dictionary-name-function :matching matching
+                                         :group-index (or group-index 0) :selected-group group-index))
          ;; Validate before changing buffers or cancelling a previous search.
-         (query (zr-dictionary--prepare-query word dictionaries strategy nil nil matching))
+         (query (zr-dictionary--prepare-query word dictionaries strategy nil nil matching group-index))
          (buffer (if (and (derived-mode-p 'dictionary-mode) zr-dictionary-word)
                      (current-buffer) (get-buffer-create "*zr-dictionary*")))
          (configuration (current-window-configuration))
@@ -661,6 +724,10 @@ REFRESH skips history."
           (dolist (binding zr-dictionary--commands)
             (define-key map (vector 'remap (car binding))
                         (if (eq (car binding) 'dictionary-search) #'zr-dictionary-search (cdr binding))))
+          (define-key map "j" #'zr-dictionary-next-dictionary)
+          (define-key map "k" #'zr-dictionary-previous-dictionary)
+          (define-key map "f" #'zr-dictionary-next-group)
+          (define-key map "b" #'zr-dictionary-previous-group)
           (use-local-map map))))
     (pop-to-buffer buffer)
     (unless refresh (dictionary-store-positions))
@@ -669,9 +736,13 @@ REFRESH skips history."
         (setq dictionary-current-data (list #'zr-dictionary--display view))
       (dictionary-store-state #'zr-dictionary--display (list view)))
     (setf (zr-dictionary--query-on-result query)
-          (lambda (entries) (zr-dictionary--receive buffer view entries))
+          (lambda (entries)
+            (setf (zr-dictionary--view-group-index view) (zr-dictionary--query-group-index query))
+            (zr-dictionary--receive buffer view entries))
           (zr-dictionary--query-on-done query)
-          (lambda (_results err) (zr-dictionary--finish-view buffer view err)))
+          (lambda (_results err)
+            (setf (zr-dictionary--view-group-index view) (zr-dictionary--query-group-index query))
+            (zr-dictionary--finish-view buffer view err)))
     (setq zr-dictionary--request query)
     (zr-dictionary--start-query query)
     buffer))
@@ -679,7 +750,8 @@ REFRESH skips history."
 (defun zr-dictionary--revert (&rest _)
   "Restart the current search without adding a history entry."
   (zr-dictionary--show zr-dictionary-word zr-dictionary-dictionaries
-                       zr-dictionary-strategy zr-dictionary--matching-p t))
+                       zr-dictionary-strategy zr-dictionary--matching-p t
+                       (zr-dictionary--view-selected-group zr-dictionary--view)))
 
 (cl-defun zr-dictionary--match-words
     (&optional word (dictionaries zr-dictionary-dictionaries) (strategy zr-dictionary-strategy))

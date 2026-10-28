@@ -35,6 +35,7 @@
 (declare-function org-capture-get "org-capture" (property &optional local))
 (declare-function org-capture-put "org-capture" (&rest elements))
 (defvar org-protocol-protocol-alist)
+(defvar org-capture-entry)
 (defgroup zr-org-srs-x nil
   "Capture AnkiConnect notes as Org-srs cards."
   :group 'org
@@ -821,6 +822,16 @@ dict links retain the source query's dictionary stages and strategy."
         '(function zr-org-srs-x--capture-prepare)
         :empty-lines 1 :hook #'zr-org-srs-x--capture-insert
         :before-finalize #'zr-org-srs-x--capture-check-duplicate))
+
+;;;###autoload
+(defun zr-org-srs-x-capture-dictionary ()
+  "Capture dictionaries at point or in the region as one Org-srs card."
+  (interactive)
+  (require 'org-capture)
+  (let ((org-capture-entry (zr-org-srs-x-capture-template)))
+    (org-capture)))
+
+(define-key dictionary-mode-map "c" #'zr-org-srs-x-capture-dictionary)
 
 (defun zr-org-srs-x--capture-file ()
   "Return the prepared capture file or the t renderer's default deck file."
