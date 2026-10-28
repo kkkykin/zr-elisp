@@ -263,6 +263,7 @@ Render in the deck buffer after dictionary lookup and attachment import."
 (defun zr-org-srs-x--dictionary-text (word &optional definitions)
   "Render WORD's `zr-dictionary-lookup' results as Org definitions.
 Use supplied DEFINITIONS instead of looking up WORD when non-nil.
+Omit server endpoints from dictionary headings.
 Put a query link before the first dictionary heading and turn brace-marked
 words and phrases into dict links using the current query configuration."
   (let ((zr-dictionary-dictionaries
@@ -275,7 +276,9 @@ words and phrases into dict links using the current query configuration."
 	  (lambda (entry)
             (concat
              (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
-             (car entry) "\n"
+             (replace-regexp-in-string
+              "\\(\\`\\[.*\\)@[^]\n]+:[0-9]+\\]\\'" "\\1]" (car entry) t)
+             "\n"
              (replace-regexp-in-string
               "{\\([^{}]+\\)}"
               (lambda (match)

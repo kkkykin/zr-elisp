@@ -973,6 +973,36 @@
     (should-error (zr-org-srs-x-update-dictionaries) :type 'user-error)
     (should-error (zr-org-srs-x-update-dictionaries (point-min) (point-max)) :type 'user-error)))
 
+(ert-deftest zr-org-srs-x-test-dictionary-headings-omit-multiple-server-endpoints ()
+  (let* ((dictionary-use-http-proxy nil)
+         (zr-dictionary-name-function #'zr-dictionary-format-name)
+         (first (zr-dictionary-test-server
+                 (lambda (_client _command)
+                   (zr-dictionary-test-definition "first" "First definition. See {other word}."))))
+         (second (zr-dictionary-test-server
+                  (lambda (_client _command)
+                    (zr-dictionary-test-definition "second" "Second definition. [keep@host:2628]"))))
+         (zr-dictionary-dictionaries
+          (list (list (zr-dictionary-test-target first 'first)
+                      (zr-dictionary-test-target second 'second)))))
+    (unwind-protect
+        (let ((entries (zr-dictionary-lookup "word")))
+          (should (equal (mapcar #'car entries)
+                         (list (format "[first@127.0.0.1:%s]" (process-contact first :service))
+                               (format "[second@127.0.0.1:%s]" (process-contact second :service)))))
+          ;; Exercise both fresh lookup and reuse of displayed definitions.
+          (dolist (definitions (list nil entries))
+            (let ((text (zr-org-srs-x--dictionary-text "word" definitions)))
+              (should (string-match-p "^\\*\\*\\* \\[first\\]$" text))
+              (should (string-match-p "^\\*\\*\\* \\[second\\]$" text))
+              (should-not (string-match-p "@127\\.0\\.0\\.1:" text))
+              (should (string-match-p "First definition. See \\[\\[dict:" text))
+              (should (string-match-p (regexp-quote "Second definition. [keep@host:2628]") text))))
+          (should (equal (caar entries)
+                         (format "[first@127.0.0.1:%s]" (process-contact first :service)))))
+      (zr-dictionary-test-stop-server first)
+      (zr-dictionary-test-stop-server second))))
+
 (ert-deftest zr-org-srs-x-test-dictionary-names-handle-unknown-and-custom-function ()
   (zr-org-srs-x-test--require-srs)
   (dolist (custom '(nil t))
