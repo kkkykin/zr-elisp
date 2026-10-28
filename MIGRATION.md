@@ -19,7 +19,7 @@
 | init-org | zr-org-tangle | `zr-org-tangle-path`、CUSTOM_ID、`zr-org-tangle-detangle` |
 | init-org | org/zr-org-link | `dict:` 链接依赖 zr-dictionary，可指定 dictionaries/strategy；调用 zr-wezterm 打开链接 |
 | init-org | zr-org-export | Pandoc OPTIONS 与 LaTeX 图片路径修正 |
-| init-org | zr-org-protocol | 显式 Windows 协议注册、Netscape Cookie 导入 |
+| init-org | org/zr-org-protocol | 显式 Windows 协议注册、Netscape Cookie 导入 |
 | init-viper、init-org | zr-viper | Ex 扩展、临时行号、Wdired/Org 编辑保存；使用 Org 功能时才加载相应库 |
 | init-net | zr-eww | 配置驱动的 URL 重写、认证、阅读模式、文本源码显示 |
 | init-misc、init-android | zr-notify、zr-termux | 通知与预约参数适配，Termux API 通知/Toast、状态查询及已有 TRAMP 连接配置 |

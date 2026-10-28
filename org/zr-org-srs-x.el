@@ -10,6 +10,8 @@
 ;; Definitions come from zr-dictionary.el, using the deck buffer's
 ;; `zr-dictionary-dictionaries'.  LunaTranslator dictionaries are ignored.
 ;; Cards use Org Front/Back subheadings and the installed Org-srs API.
+;; `zr-org-srs-x-create-card' captures a word manually; enable
+;; `zr-org-srs-x-protocol-mode' for org-protocol://srs-card requests.
 ;; Original fields and Anki HTML/CSS/JavaScript templates are discarded.
 ;; Loading this library does not start the server or load Org-srs.
 
@@ -20,11 +22,15 @@
 (require 'org)
 (require 'org-id)
 (require 'dom)
+(require 'thingatpt)
 (require 'zr-dictionary)
 (require 'zr-org-link)
 
 (declare-function org-srs-item-new "org-srs-item" (type &rest args))
 (declare-function org-srs-review-start "org-srs-review" (&optional source))
+(declare-function org-protocol-parse-parameters "org-protocol"
+                  (info &optional new-style default-order))
+(defvar org-protocol-protocol-alist)
 (defgroup zr-org-srs-x nil
   "Capture AnkiConnect notes as Org-srs cards."
   :group 'org
@@ -34,6 +40,11 @@
   "Directory containing deck Org files and capture media.
 The Anki deck A::B corresponds to A/B.org in this directory."
   :type 'directory)
+
+(defcustom zr-org-srs-x-default-deck "Default"
+  "Fallback deck when no explicit or model-configured deck is supplied.
+Manual capture also falls back to the current deck before this value."
+  :type 'string)
 
 (defcustom zr-org-srs-x-host "127.0.0.1"
   "Address on which the explicitly started HTTP server listens."
@@ -56,8 +67,16 @@ Emacs reads the same files through a WSL mount."
         (back . "$.rubytextHtml\n\n$.remarks\n\n$.user_custom_1\n\n$dictionary")))
     (t . zr-org-srs-x-render-default-note))
   "Renderers selected by an Anki note's modelName.
-Keys are model names as strings or symbols; t supplies the fallback.
+Keys are model names as strings or symbols; t supplies the fallback and
+handles manual and Org protocol capture, which have no model name.
 A renderer is an alist of name/front/back templates, or a function.
+The template alist can also supply deck, a default deck name overridden
+by an explicit capture destination, and dictionaries, a dictionary stage
+list.  Dictionary configuration uses the target deck's buffer-local
+`zr-dictionary-dictionaries' first, then a non-nil dictionaries entry,
+then the global variable.  Nil or an absent dictionaries entry inherits
+the global configuration.  String back templates trigger lookup only
+when they use $dictionary; function renderers receive dictionary results.
 Templates substitute $.FIELD with the field's Org text and $dictionary,
 $picture, $audio and $video with definitions and imported media links.
 Missing fields and absent media become empty strings; $$ is a literal $.
@@ -65,14 +84,17 @@ Each template may also be a function of (FIELDS VARIABLES) returning text.
 A model renderer function receives the same arguments and returns an alist
 of name/front/back Org strings, which are used without template expansion.
 FIELDS is an ordered alist from field names to Org strings, following the
-model's field order.  VARIABLES uses the symbols dictionary, picture,
+model's field order, or just a word field for manual and protocol capture.
+VARIABLES uses the symbols dictionary, picture,
 audio and video as keys.
 Render in the deck buffer after dictionary lookup and attachment import."
   :type '(alist :key-type (choice string symbol)
                 :value-type
                 (choice function
-                        (alist :key-type (choice (const name) (const front) (const back))
-                               :value-type (choice string function)))))
+                        (alist :key-type (choice (const name) (const front) (const back)
+                                                 (const deck) (const dictionaries))
+                               :value-type (choice string function
+                                                   (repeat :tag "Dictionary stages" sexp))))))
 
 (defcustom zr-org-srs-x-max-request-size (* 64 1024 1024)
   "Maximum HTTP request body size in bytes."
@@ -82,6 +104,7 @@ Render in the deck buffer after dictionary lookup and attachment import."
 (defvar zr-org-srs-x--clients nil)
 (defvar zr-org-srs-x--models (make-hash-table :test #'equal))
 (defvar zr-org-srs-x--last-id nil)
+(defvar zr-org-srs-x--protocol-entry nil)
 
 (defun zr-org-srs-x--new-id ()
   "Generate a strictly monotonic integer ID compatible with Anki."
@@ -259,6 +282,9 @@ Put remaining fields and dictionary definitions on the back."
     `((name . ,name) (front . ,name)
       (back . ,(string-join (nreverse back) "\n\n")))))
 
+(defconst zr-org-srs-x--template-token-regexp
+  "\\$\\(?:\\.[[:alnum:]_-]+\\|[[:alpha:]_][[:alnum:]_-]*\\|\\$\\)")
+
 (defun zr-org-srs-x--template (template fields variables)
   "Render TEMPLATE with Org FIELDS and VARIABLES.
 Call function templates directly; expand string templates in one pass."
@@ -267,7 +293,7 @@ Call function templates directly; expand string templates in one pass."
     (unless (stringp template)
       (error "Card template must be a string or function: %S" template))
     (replace-regexp-in-string
-     "\\$\\(?:\\.[[:alnum:]_-]+\\|[[:alpha:]_][[:alnum:]_-]*\\|\\$\\)"
+     zr-org-srs-x--template-token-regexp
      (lambda (token)
        (cond
         ((equal token "$$") "$")
@@ -277,13 +303,46 @@ Call function templates directly; expand string templates in one pass."
              (error "Unknown card template variable: %s" token)))))
      template t t)))
 
+(defun zr-org-srs-x--model-renderer (model-name)
+  "Return MODEL-NAME's renderer, using the t entry as fallback."
+  (cdr (or (and model-name (assoc-string model-name zr-org-srs-x-model-alist))
+           (assq t zr-org-srs-x-model-alist)
+           (error "No card renderer for model: %s" model-name))))
+
+(defun zr-org-srs-x--default-deck (model-name &optional fallback)
+  "Return MODEL-NAME's configured deck, FALLBACK or the global default."
+  (let ((renderer (zr-org-srs-x--model-renderer model-name)))
+    (or (and (not (functionp renderer)) (alist-get 'deck renderer))
+        fallback zr-org-srs-x-default-deck)))
+
+(defun zr-org-srs-x--dictionaries (renderer)
+  "Choose dictionaries from deck locals, RENDERER or the global variable."
+  (let ((dictionaries (and (not (functionp renderer))
+                           (alist-get 'dictionaries renderer))))
+    (cond
+     ((local-variable-p 'zr-dictionary-dictionaries) zr-dictionary-dictionaries)
+     (dictionaries dictionaries)
+     (t (default-value 'zr-dictionary-dictionaries)))))
+
+(defun zr-org-srs-x--uses-dictionary-p (renderer)
+  "Whether RENDERER needs dictionary results for its back.
+Functions receive results; string templates must reference $dictionary.
+Escaped dollars and field placeholders do not request dictionary lookup."
+  (or (functionp renderer)
+      (let ((back (alist-get 'back renderer)) (position 0) found)
+        (if (functionp back)
+            t
+          (when (stringp back)
+            (while (and (not found)
+                        (string-match zr-org-srs-x--template-token-regexp back position))
+              (setq found (equal (match-string 0 back) "$dictionary")
+                    position (match-end 0)))
+            found)))))
+
 (defun zr-org-srs-x--render (model-name fields variables)
   "Render MODEL-NAME using Org FIELDS and VARIABLES in the current deck.
 Return an alist of name/front/back strings."
-  (let* ((entry (or (assoc-string model-name zr-org-srs-x-model-alist)
-                    (assq t zr-org-srs-x-model-alist)
-                    (error "No card renderer for model: %s" model-name)))
-         (renderer (cdr entry))
+  (let* ((renderer (zr-org-srs-x--model-renderer model-name))
          (parts (if (functionp renderer)
                     (funcall renderer fields variables)
                   (mapcar (lambda (key)
@@ -392,18 +451,67 @@ strictly increasing."
     (when (and duplicate (not (and (hash-table-p options) (eq (gethash "allowDuplicate" options) t))))
       (error "cannot create note because it is a duplicate"))))
 
+(defun zr-org-srs-x--create-card (buffer model-name fields &optional note)
+  "Create a card in BUFFER from Org FIELDS and return its integer ID.
+Render with MODEL-NAME, or the t renderer when nil.  An optional Anki NOTE
+supplies attachments, tags and duplicate options."
+  (require 'org-srs)
+  (with-current-buffer buffer
+    (let* ((file buffer-file-name)
+           (note (or note (zr-org-srs-x--object)))
+           (tags (zr-org-srs-x--strings (gethash "tags" note [])))
+           (options (gethash "options" note (zr-org-srs-x--object)))
+           (renderer (zr-org-srs-x--model-renderer model-name))
+           (zr-dictionary-dictionaries (zr-org-srs-x--dictionaries renderer))
+           (definitions (if (zr-org-srs-x--uses-dictionary-p renderer)
+                            (zr-org-srs-x--dictionary-text
+                             (alist-get "word" fields (cdar fields) nil #'equal))
+                          ""))
+           (variables (cons (cons 'dictionary definitions)
+                            (zr-org-srs-x--import-media note fields file)))
+           (card (zr-org-srs-x--render model-name fields variables))
+           (title (replace-regexp-in-string
+                   "[\n\r\t]+" " " (alist-get 'name card)))
+           (id (progn
+                 ;; Dictionary waits may dispatch another capture request.
+                 ;; Refresh existing IDs before allocating this card's ID.
+                 (zr-org-srs-x--check-duplicate title options)
+                 (zr-org-srs-x--new-id)))
+           (id-str (number-to-string id)))
+      (save-excursion
+        (save-restriction
+          (widen)
+          (atomic-change-group
+            (goto-char (point-max))
+            (when (= (point-min) (point-max))
+              (insert "#+title: " (zr-org-srs-x--deck-name file) "\n"))
+            (unless (bolp) (insert "\n"))
+            (insert "\n* " title "\n")
+            (let ((position (line-beginning-position 0)))
+              (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
+                      "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
+              (goto-char position)
+              (org-entry-put nil "ID" id-str)
+              (org-set-tags
+               (delete-dups
+                (mapcar (lambda (tag) (replace-regexp-in-string
+                                       "[^[:alnum:]_@#%]" "_" tag))
+                        (append tags nil))))
+              (org-srs-item-new 'card))
+            (zr-org-srs-x--save))))
+      id)))
+
 (defun zr-org-srs-x--add-note (note)
   "Import one Anki NOTE and return its integer ID."
   (require 'org-srs)
-  (let* ((deck (zr-org-srs-x--get note "deckName"))
+  (let* ((model-name (zr-org-srs-x--string (zr-org-srs-x--get note "modelName")))
+         (deck (or (zr-org-srs-x--get note "deckName")
+                   (zr-org-srs-x--default-deck model-name)))
          (file (zr-org-srs-x--deck-file deck))
-         (model-name (zr-org-srs-x--string (zr-org-srs-x--get note "modelName")))
          (model (or (gethash model-name zr-org-srs-x--models)
                     (error "Model was not found: %s" model-name)))
          (input (zr-org-srs-x--get note "fields"))
-         (names (gethash "inOrderFields" model))
-         (tags (zr-org-srs-x--strings (gethash "tags" note [])))
-         (options (gethash "options" note (zr-org-srs-x--object))))
+         (names (gethash "inOrderFields" model)))
     (unless (hash-table-p input)
       (error "Expected note fields"))
     (maphash (lambda (name value)
@@ -413,45 +521,13 @@ strictly increasing."
              input)
     (when (string-blank-p (zr-org-srs-x--html (gethash (aref names 0) input "")))
       (error "cannot create note because it is empty"))
-    (let* ((card (with-current-buffer (zr-org-srs-x--buffer file)
-                   ;; Discard the client's dictionary pages before HTML conversion.
-                   (let* ((fields (cl-loop for name across names
-                                           unless (member name '("dictionaryInfo" "dictionaryContent"))
-                                           collect (cons name (zr-org-srs-x--html (gethash name input "")))))
-                          (definitions (zr-org-srs-x--dictionary-text
-                                        (alist-get "word" fields (cdar fields) nil #'equal)))
-                          (variables (cons (cons 'dictionary definitions)
-                                           (zr-org-srs-x--import-media note fields file))))
-                     (zr-org-srs-x--render model-name fields variables))))
-           (title (replace-regexp-in-string
-                   "[\n\r\t]+" " " (alist-get 'name card)))
-           (id (progn
-                 ;; Dictionary waits may dispatch another capture request.
-                 ;; Refresh existing IDs before allocating this card's ID.
-                 (zr-org-srs-x--check-duplicate title options)
-                 (zr-org-srs-x--new-id)))
-           (id-str (number-to-string id)))
-      (with-current-buffer (zr-org-srs-x--buffer file)
-        (save-excursion
-          (save-restriction
-            (widen)
-            (atomic-change-group
-              (goto-char (point-max))
-              (unless (bolp) (insert "\n"))
-              (insert "\n* " title "\n")
-              (let ((position (line-beginning-position 0)))
-                (insert "** Front\n" (zr-org-srs-x--body (alist-get 'front card)) "\n\n"
-                        "** Back\n" (zr-org-srs-x--body (alist-get 'back card)) "\n")
-                (goto-char position)
-                (org-entry-put nil "ID" id-str)
-                (org-set-tags
-                 (delete-dups
-                  (mapcar (lambda (tag) (replace-regexp-in-string
-                                         "[^[:alnum:]_@#%]" "_" tag))
-                          (append tags nil))))
-                (org-srs-item-new 'card))
-              (zr-org-srs-x--save)))))
-      id)))
+    ;; Discard the client's dictionary pages before HTML conversion.
+    (zr-org-srs-x--create-card
+     (zr-org-srs-x--buffer file) model-name
+     (cl-loop for name across names
+              unless (member name '("dictionaryInfo" "dictionaryContent"))
+              collect (cons name (zr-org-srs-x--html (gethash name input ""))))
+     note)))
 
 (defun zr-org-srs-x--find-notes (query)
   "Find integer note IDs for QUERY, supporting deck and word/w filters.
@@ -700,6 +776,80 @@ Only the v6 capture actions documented in org/README.md are supported."
   (interactive)
   (require 'org-srs)
   (org-srs-review-start (expand-file-name zr-org-srs-x-directory)))
+
+(defun zr-org-srs-x--current-deck ()
+  "Return the current buffer's deck name, or nil outside a deck Org file."
+  (when (and buffer-file-name (derived-mode-p 'org-mode)
+             (equal (file-name-extension buffer-file-name) "org")
+             (file-in-directory-p buffer-file-name zr-org-srs-x-directory))
+    (zr-org-srs-x--deck-name buffer-file-name)))
+
+;;;###autoload
+(defun zr-org-srs-x-create-card (word &optional deck)
+  "Create and save a card for WORD in DECK, returning its integer ID.
+Use the t entry in `zr-org-srs-x-model-alist' with a single word field
+and definitions from the deck's dictionary configuration.
+Default DECK to the t entry's deck, the current deck, or
+`zr-org-srs-x-default-deck', in that order.
+Interactively, suggest the region or word at point.  Outside a deck,
+prompt for the deck; with a prefix argument, always prompt for it.
+Create the deck if needed, and display the new card after manual capture."
+  (interactive
+   (let* ((word (read-string
+                 "Card word: " nil nil
+                 (if (use-region-p)
+                     (buffer-substring-no-properties (region-beginning) (region-end))
+                   (thing-at-point 'word t))))
+          (current-deck (zr-org-srs-x--current-deck))
+          (default-deck (zr-org-srs-x--default-deck nil current-deck)))
+     (list word
+           (if (and current-deck (not current-prefix-arg))
+               default-deck
+             (completing-read
+              "Deck: " (mapcar #'zr-org-srs-x--deck-name (zr-org-srs-x--files))
+              nil nil nil nil default-deck)))))
+  (unless (and (stringp word) (not (string-blank-p word))
+               (not (string-match-p "[\r\n]" word)))
+    (user-error "Card word must be nonempty and on one line"))
+  (require 'org-srs)
+  (let* ((deck (or deck (zr-org-srs-x--default-deck nil (zr-org-srs-x--current-deck))))
+         (buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file deck) t))
+         (id (zr-org-srs-x--create-card buffer nil (list (cons "word" (string-trim word))))))
+    (when (called-interactively-p 'interactive)
+      (pop-to-buffer buffer)
+      (goto-char (org-find-property "ID" (number-to-string id)))
+      (org-fold-show-context)
+      (org-fold-show-subtree)
+      (message "Created card %s in %s" id deck))
+    id))
+
+(defun zr-org-srs-x-protocol-create-card (info)
+  "Create a card from Org protocol INFO containing :word and optional :deck.
+Use the t entry's deck or `zr-org-srs-x-default-deck' when :deck is absent.
+Return nil so the request is consumed instead of being treated as a filename."
+  (require 'org-protocol)
+  (let* ((parameters (org-protocol-parse-parameters info t))
+         (deck (or (plist-get parameters :deck) (zr-org-srs-x--default-deck nil)))
+         (id (zr-org-srs-x-create-card (plist-get parameters :word) deck)))
+    (message "Created card %s in %s" id deck))
+  nil)
+
+;;;###autoload
+(define-minor-mode zr-org-srs-x-protocol-mode
+  "Register org-protocol://srs-card?word=WORD&deck=DECK capture."
+  :global t
+  (if zr-org-srs-x-protocol-mode
+      (progn
+        (require 'org-protocol)
+        (unless zr-org-srs-x--protocol-entry
+          (setq zr-org-srs-x--protocol-entry
+                '("zr srs card" :protocol "srs-card"
+                  :function zr-org-srs-x-protocol-create-card :kill-client t))
+          (push zr-org-srs-x--protocol-entry org-protocol-protocol-alist)))
+    (when zr-org-srs-x--protocol-entry
+      (setq org-protocol-protocol-alist
+            (delq zr-org-srs-x--protocol-entry org-protocol-protocol-alist)
+            zr-org-srs-x--protocol-entry nil))))
 
 (defun zr-org-srs-x--update-card-dictionaries ()
   "Replace dictionary subheadings in the card at point.

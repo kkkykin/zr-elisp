@@ -190,6 +190,55 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 原有 `zr-org-srs-x-dictionaries`、`zr-org-srs-x-dictionary-timeout`、
 `zr-org-srs-x-dictionary-name-function` 已移除，配置与文件局部变量需使用上述新名称。
 
+## 手动制卡与 Org protocol
+
+`M-x zr-org-srs-x-create-card` 输入一个词或短语即可制卡。选区或光标下的词作为
+输入默认值；在 deck buffer 中使用 `t` 项配置的 deck，未配置时使用当前 deck。
+在其他 buffer 中会提示选择 deck，允许输入新名称；`C-u` 始终提示选择 deck。
+命令保存卡片并定位到新卡，使用 Org-srs 的 ID 和复习记录。
+默认 Front 是输入的词，Back 是词典释义。
+
+手动与协议制卡没有 model name，使用 `zr-org-srs-x-model-alist` 的 `t` 项，
+只提供 `word` 字段，可以自定义 `name/front/back`，例如：
+
+```elisp
+(setq zr-org-srs-x-model-alist
+      '((modelofluna
+         . ((deck . "Luna")
+            (dictionaries . ((edict local) similar))
+            (name . "$.word") (front . "$.word\n\n$.example_sentence")
+            (back . "$.remarks\n\n$dictionary")))
+        (t . ((deck . "Words::English")
+              (dictionaries . ((gcide wordnet) similar))
+              (name . "$.word") (front . "$.word") (back . "$dictionary")))))
+
+;; 程序调用返回卡片的整数 ID；显式 deck 优先于模型配置。
+(zr-org-srs-x-create-card "hamlet")
+(zr-org-srs-x-create-card "village" "Words::Other")
+```
+
+启用协议入口：
+
+```elisp
+(zr-org-srs-x-protocol-mode 1)
+```
+
+向运行中的 Emacs server 发送 URL：
+
+```sh
+emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
+```
+
+`word` 必填，`deck` 可省略，此时使用 `t` 项的 deck 或
+`zr-org-srs-x-default-deck`（默认 `"Default"`）。参数值使用 URL 编码。
+协议入口自动保存卡片；加载模块时不会注册此入口，关闭 mode 会移除注册。
+两个入口都能创建新 deck，读取目标文件和目录的局部配置，按标题检查重复，
+查询或保存失败时不留下新卡。启用和关闭 HTTP 服务不影响协议入口。
+
+`zr-org-protocol.el` 和其测试已移到 `org/`；Windows 的系统协议注册可用
+`M-x zr-org-protocol-register-windows`。启用制卡协议不需要启用导入 Cookie 的
+`zr-org-protocol-mode`。
+
 ## 音频与截图
 
 附件从请求的本地 `path` 或 base64 `data` 导入，存入 deck 文件旁的
@@ -231,6 +280,19 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 `name` 是 Org 卡片标题，`front` 和 `back` 是正反面的 Org 文本。三项都必须提供，
 标题不能为空。`t` 项处理未单独配置的模型；默认函数用第一个字段作为标题和
 正面，其余字段及词典释义放到背面。省略 `t` 时，未配置的模型返回错误。
+
+模板 alist 还支持两个可选项，默认均为 `nil`：
+
+| 配置项 | 含义 |
+| --- | --- |
+| `deck` | 此模型的默认 deck；添加时显式传入 deck（Anki 的 `deckName` 或协议的 `deck`）优先 |
+| `dictionaries` | 此模型的词典阶段列表，格式与 `zr-dictionary-dictionaries` 相同；`nil` 或省略时使用 global |
+
+查词配置优先级为目标 deck 的 local → 模型 alist → global。
+local 包括文件、目录局部变量和 buffer-local 配置；local 的 `nil` 表示禁用查询。
+字符串 Back 模板只有实际引用 `$dictionary` 才查词；省略它即可跳过查询，
+`$$dictionary` 是字面量，也不会触发查询。函数渲染器和函数 Back 模板会接收词典结果。
+生成的 dict link 保存实际使用的词典列表和策略。
 
 | 占位符 | 内容 |
 | --- | --- |
@@ -290,9 +352,9 @@ file-local 或 `.dir-locals.el` 设置，遵循 Emacs 的局部变量信任规�
 模型要求非 cloze 且只有一个卡片模板，其他 AnkiConnect 操作返回错误。
 
 ```sh
-make test TEST_FILE='test/zr-dictionary-test.el org/test/zr-org-link-test.el org/test/zr-org-srs-x-test.el'
-make check-parens FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el'
-make byte-compile FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el'
+make test TEST_FILE='test/zr-dictionary-test.el org/test/zr-org-link-test.el org/test/zr-org-srs-x-test.el org/test/zr-org-protocol-test.el test/zr-module-loading-test.el'
+make check-parens FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el org/zr-org-protocol.el'
+make byte-compile FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el org/zr-org-protocol.el'
 make clean
 ```
 

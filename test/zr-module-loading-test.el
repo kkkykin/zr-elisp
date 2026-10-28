@@ -50,7 +50,7 @@
                (dolist (module ',(reverse zr-module-loading-test--modules))
                  (require module))
                (dolist (mode '(zr-pcmpl-mode zr-org-link-mode zr-org-export-mode
-                               zr-org-protocol-mode zr-org-tangle-id-mode
+                               zr-org-protocol-mode zr-org-srs-x-protocol-mode zr-org-tangle-id-mode
                                zr-org-babel-bat-mode))
                  (funcall mode 1)
                  (funcall mode 1)
@@ -59,7 +59,10 @@
                (unless (and (not (advice-member-p #'zr-org-tangle--link-id
                                                   'org-babel-tangle--unbracketed-link))
                             (not (assoc "dict" org-link-parameters))
-                            (not (fboundp 'pcomplete/7z)))
+                            (not (fboundp 'pcomplete/7z))
+                            (not (cl-find "srs-card" org-protocol-protocol-alist
+                                          :key (lambda (entry) (plist-get (cdr entry) :protocol))
+                                          :test #'equal)))
                  (error "Extension left installed"))))
            (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
                                  zr-module-loading-test--root
