@@ -70,9 +70,14 @@ HTML 转成 Org 文本和链接，脚本、样式不参与正文。
 `l` 返回上次结果，`g` 重新查询，`q` 关闭窗口。
 `D` 修改词典阶段，`M` 修改匹配策略，`m` 列出首个命中词典阶段中的全部候选词。
 按键、按钮和菜单沿用结果 buffer 的分组查询配置；历史返回恢复当时的配置和释义。
+查询会立即打开 buffer，同组不同服务器并发查询，先返回的结果先显示，
+后返回的结果追加到末尾。追加不会移动光标或切换窗口。
+开始新查询、返回历史或关闭 buffer 会取消尚未结束的旧请求。
 `C-u M-x zr-dictionary-search` 可临时指定词典阶段列表和匹配策略。
 程序调用 `zr-dictionary-lookup` 返回 `((词典显示名 释义...) ...)`，不切换窗口，
-可用可选参数传入词典列表和策略；显式传入 `nil` 词典列表禁用查询。
+等待命中阶段的全部结果，按配置顺序合并；显式传入 `nil` 词典列表禁用查询。
+可用可选参数传入词典列表和策略。网络错误会结束查询；手动查询保留已收到的
+释义并显示错误，制卡查询返回错误，不保存不完整结果。
 
 LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
 不解析、不保存。制卡时通过 `zr-dictionary-lookup` 使用 Emacs 自带的 `dictionary.el`
@@ -99,18 +104,22 @@ hamlet
 ```
 
 可通过 `zr-dictionary-name-function` 自定义标题。
-函数接收完整词典名和数据库 id，返回不含开头星号的单行标题文字。例如始终显示完整名称和 id：
+函数接收 `(name id source)`，其中 `source` 是包含 `:server`、`:port`、
+`:dictionary` 的解析后配置，返回不含开头星号的单行标题。例如始终显示完整名称和 id：
 
 ```elisp
 (setq zr-dictionary-name-function
-      (lambda (name id) (format "%s [%s]" name id)))
+      (lambda (name id _source) (format "%s [%s]" name id)))
 ```
 
 用 `zr-dictionary-dictionaries` 配置制卡与 `zr-dictionary-search` 的查词顺序，独立于原生查词的
 `dictionary-default-dictionary`：
 
 ```elisp
-(setq zr-dictionary-dictionaries '((dict1 dict2) dict3 similar)
+(setq zr-dictionary-dictionaries
+      '((:server t :port t :dictionary (dict1 dict2))
+        (:server t :port t :dictionary dict3)
+        similar)
       zr-dictionary-strategy ".")
 ```
 
@@ -121,9 +130,41 @@ hamlet
 才继续下一组；不尝试第二个候选词。例如 `reserved` 匹配到 `reserve` 时，
 背面填入 `reserve` 的释义，卡片标题和原有词语仍保留 `reserved`。
 
-数据库 id 可写成 symbol 或字符串；外层始终是阶段列表，同组用内层列表表示。
-默认配置为 `'("*" similar)`；`"*"` 查询全部数据库，`"!"` 使用第一个命中的
-数据库。省略最后的 `similar` 就只做精确查询，整个变量设为 `nil` 则跳过查词。
+外层是阶段列表；每个阶段是查询目标 plist，或同组目标的列表。
+只接受 plist 目标，不再支持裸词典 id 或旧的 id 分组格式。
+`:dictionary` 可以是单个 id 或非空 id 列表，id 可写成 symbol 或字符串：
+
+```elisp
+(setq zr-dictionary-dictionaries
+      '(((:server "localhost" :port 2628 :dictionary (edict local))
+         (:server "dict.org" :port 2628 :dictionary (gcide wordnet)))
+        (:server "backup.example" :port 2628 :dictionary "*")
+        similar))
+```
+
+此配置先查询同组的四个字典，全部未命中才查询备用服务器。
+同一服务器和端口在一次查询中共用连接，依次查询字典；不同服务器并发查询。
+全部精确阶段未命中才进入 `similar`，候选词始终在返回它的服务器上继续查询。
+`:server t` 使用 `dictionary-server`，`:port t` 使用 `dictionary-port`，
+两者独立解析；省略这两个字段时也默认使用 `t`。跨服务器查询的默认标题带地址和端口，
+例如 `[gcide@dict.org:2628]`，区分同名数据库。
+结果 buffer 和历史保存展开后的地址、端口和字典配置。
+生成的 dict link 默认只保存词典 id、阶段和策略，follow 时使用当时的默认服务器。
+需要链接保留跨服务器配置时，设置：
+
+```elisp
+(setq zr-org-link-dict-include-server t)
+```
+
+启用后生成的链接携带解析后的地址和端口，之后修改默认服务器不会改变这些链接的目标。
+
+默认配置为 `'((:server t :port t :dictionary t))`。
+`:dictionary t` 等价于 `:dictionary ("*" similar)`：先查全部数据库，
+全部精确阶段未命中后，只为这个目标查询相似词。
+`:dictionary (gcide wordnet similar)` 则为同组的这两个字典启用相似查询。
+外层末尾的 `similar` 为所有之前的阶段启用相似查询。
+`"*"` 查询全部数据库，`"!"` 使用第一个命中的数据库。
+使用显式 id 且不带 `similar` 就只做精确查询，整个变量设为 `nil` 则跳过查词。
 所有阶段都未命中时，仍保存单词、翻译和其他内容。
 
 服务地址和端口使用现有的 `dictionary-server`、`dictionary-port` 配置，例如：
@@ -144,19 +185,19 @@ dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函
 `[[dict:word]]` 使用当前 buffer 的配置，可在链接查询参数里覆盖 `dictionaries` / `strategy`：
 
 ```org
-[[dict:reserved?dictionaries=%28%28dict1%20dict2%29%20similar%29&strategy=prefix][reserved]]
+[[dict:reserved?dictionaries=%28%28%3Adictionary%20%28dict1%20dict2%20similar%29%29%29&strategy=prefix][reserved]]
 ```
 
 `dictionaries` 是经过 URL 编码的 Lisp 阶段列表；上例解码后为
-`((dict1 dict2) similar)`。词语、参数值含空格、中文或 `?&%` 时也用 URL 编码。
-可调用 `(zr-org-link-dict-link "reserved" '((dict1 dict2) similar) "prefix")`
+`((:dictionary (dict1 dict2 similar)))`。词语、参数值含空格、中文或 `?&%` 时也用 URL 编码。
+可调用 `(zr-org-link-dict-link "reserved" '((:dictionary (dict1 dict2 similar))) "prefix")`
 生成链接。在查询结果 buffer 中用 `org-store-link` 保存当前查询及其配置。
 导出时仍生成翻译 URL，只使用查询词语。
 
 按文件选择词典，直接在目标 Org 文件的**第一行**设置标准文件局部变量：
 
 ```org
-# -*- zr-dictionary-dictionaries: ((dictd-db-eng-zho gcide) wordnet similar); -*-
+# -*- zr-dictionary-dictionaries: ((:dictionary (dictd-db-eng-zho gcide)) (:dictionary wordnet) similar); -*-
 #+title: 英語
 ```
 
@@ -164,17 +205,15 @@ dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函
 Org 文件和子目录中的 deck，包括之后创建的文件：
 
 ```elisp
-((org-mode . ((zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))))
+((org-mode . ((zr-dictionary-dictionaries
+              . ((:dictionary (dictd-db-eng-zho gcide))
+                 (:dictionary wordnet) similar)))))
 ```
 
 文件局部变量优先于目录局部变量；两者都未设置时使用全局
-`zr-dictionary-dictionaries`。Emacs 对文件和目录局部变量的信任规则照常
-生效；可以提前允许所需的具体值，避免首次制卡请求等待信任确认：
-
-```elisp
-(add-to-list 'safe-local-variable-values
-             '(zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))
-```
+`zr-dictionary-dictionaries`。变量通过 `zr-dictionary-dictionaries-p` 注册了
+`safe-local-variable`：结构和值合法的 plist 配置可以直接作为文件或目录局部变量，
+无需逐项加入 `safe-local-variable-values`；该谓词不会建立连接或执行配置中的 Lisp。
 
 修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
 `M-x normal-mode`，或关闭后重新打开文件，使设置生效。
@@ -209,11 +248,11 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 (setq zr-org-srs-x-model-alist
       '((modelofluna
          . ((deck . "Luna")
-            (dictionaries . ((edict local) similar))
+            (dictionaries . ((:server t :port t :dictionary (edict local similar))))
             (name . ("%s" .word)) (front . ("%s\n\n%s" .word .example_sentence))
             (back . ("%s\n\n%s" .remarks dictionary))))
         (t . ((deck . "Words::English")
-              (dictionaries . ((gcide wordnet) similar))
+              (dictionaries . ((:server t :port t :dictionary (gcide wordnet similar))))
               (name . ("%s" .word)) (front . ("%s" .word))
               (back . ("%s" dictionary))))))
 

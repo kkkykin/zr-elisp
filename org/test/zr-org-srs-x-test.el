@@ -129,7 +129,7 @@
     (let* ((word "<猫 & dog>")
            (zr-org-srs-x-model-alist
             '((modelofluna . ((name . "Wrong") (front . "") (back . "")))
-              (t . ((deck . "Words::Manual") (dictionaries . (edict))
+              (t . ((deck . "Words::Manual") (dictionaries . ((:server t :port t :dictionary edict)))
                     (name . ("%s" .word)) (front . ("%s" .word)) (back . ("%s" dictionary))))))
            (id (zr-org-srs-x-create-card word)))
       (should (integerp id))
@@ -202,15 +202,15 @@
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
    (zr-dictionary-test-with-server
-    (let* ((zr-dictionary-dictionaries '(globaldb))
-           (renderer '((deck . "Words") (dictionaries . (modeldb))
+    (let* ((zr-dictionary-dictionaries '((:server t :port t :dictionary globaldb)))
+           (renderer '((deck . "Words") (dictionaries . ((:server t :port t :dictionary modeldb)))
                        (name . ("%s" .word)) (front . ("%s" .word)) (back . ("%s" dictionary))))
            (zr-org-srs-x-model-alist (list (cons t renderer)))
            (safe-local-variable-values
-            (cons '(zr-dictionary-dictionaries . (localdb)) safe-local-variable-values)))
+            (cons '(zr-dictionary-dictionaries . ((:server t :port t :dictionary localdb))) safe-local-variable-values)))
       (make-directory zr-org-srs-x-directory t)
       (with-temp-file (zr-org-srs-x--deck-file "Words")
-        (insert "# -*- zr-dictionary-dictionaries: (localdb); -*-\n#+title: Words\n"))
+        (insert "# -*- zr-dictionary-dictionaries: ((:server t :port t :dictionary localdb)); -*-\n#+title: Words\n"))
       (dolist (case '((localdb localdb) (local-nil nil) (model modeldb)
                       (model-nil globaldb) (model-absent globaldb)))
         (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "Words"))
@@ -233,10 +233,10 @@
                   (progn
                     (re-search-forward "\\[\\[dict:\\([^]\n]+\\)\\]" end)
                     (should (equal (cadr (zr-org-link--dict-query (match-string 1)))
-                                   (list database))))
+                                   (list (list (list :dictionary (symbol-name database)))))))
                 (should-not (re-search-forward "\\[\\[dict:" end t)))))))
       (zr-org-srs-x-test--create-model)
-      (push '(modelofluna . ((deck . "Anki") (dictionaries . (ankidb))
+      (push '(modelofluna . ((deck . "Anki") (dictionaries . ((:server t :port t :dictionary ankidb)))
                             (name . ("%s" .word)) (front . ("%s" .word))
                             (back . ("%s" dictionary))))
             zr-org-srs-x-model-alist)
@@ -247,12 +247,12 @@
         (zr-org-srs-x-test--call "addNote" "note" note))
       (should (equal (zr-dictionary-test-queries dictionary-commands)
                      '("define ankidb \"Anki word\"")))
-      (should (equal zr-dictionary-dictionaries '(globaldb)))))))
+      (should (equal zr-dictionary-dictionaries '((:server t :port t :dictionary globaldb))))))))
 
 (ert-deftest zr-org-srs-x-test-back-without-dictionary-skips-lookup ()
   (zr-org-srs-x-test--require-srs)
   (zr-org-srs-x-test--with-decks
-   (let ((zr-dictionary-dictionaries '(invalid similar)))
+   (let ((zr-dictionary-dictionaries '((:server t :port t :dictionary (invalid similar)))))
      (cl-letf (((symbol-function 'zr-dictionary-lookup)
                 (lambda (&rest _) (ert-fail "Unexpected dictionary lookup"))))
        (dolist (back '("" "dictionary $dictionary %s" ("%s" .word)
@@ -495,15 +495,15 @@
    (make-directory zr-org-srs-x-directory t)
    (let ((file (zr-org-srs-x--deck-file "英語"))
          (safe-local-variable-values
-          (cons '(zr-dictionary-dictionaries . ((dictd-db-eng-zho "gcide") similar))
+          (cons '(zr-dictionary-dictionaries . ((:server t :port t :dictionary (dictd-db-eng-zho "gcide" similar))))
                 safe-local-variable-values)))
      (with-temp-file file
-       (insert "# -*- mode: text; zr-dictionary-dictionaries: ((dictd-db-eng-zho \"gcide\") similar); -*-\n"
+       (insert "# -*- mode: text; zr-dictionary-dictionaries: ((:server t :port t :dictionary (dictd-db-eng-zho \"gcide\" similar))); -*-\n"
                "#+title: 英語\n"))
      (with-current-buffer (zr-org-srs-x--buffer file)
        (should (derived-mode-p 'org-mode))
        (should (local-variable-p 'zr-dictionary-dictionaries))
-       (should (equal zr-dictionary-dictionaries '((dictd-db-eng-zho "gcide") similar)))
+       (should (equal zr-dictionary-dictionaries '((:server t :port t :dictionary (dictd-db-eng-zho "gcide" similar)))))
        ;; Reusing a visited deck must keep its current buffer-local settings.
        (setq-local zr-dictionary-dictionaries nil)
        (should (eq (zr-org-srs-x--buffer file) (current-buffer)))
@@ -513,10 +513,10 @@
   (zr-org-srs-x-test--with-decks
    (make-directory zr-org-srs-x-directory t)
    (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
-     (insert "((org-mode . ((zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) similar)))))\n"))
+     (insert "((org-mode . ((zr-dictionary-dictionaries . ((:server t :port t :dictionary (dictd-db-eng-zho gcide similar)))))))\n"))
    (let ((safe-local-variable-values
-          (append '((zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) similar))
-                    (zr-dictionary-dictionaries . ("gcide"))
+          (append '((zr-dictionary-dictionaries . ((:server t :port t :dictionary (dictd-db-eng-zho gcide similar))))
+                    (zr-dictionary-dictionaries . ((:server t :port t :dictionary "gcide")))
                     (zr-dictionary-dictionaries . nil))
                   safe-local-variable-values)))
      ;; Include a new deck and a deck whose automatic mode is not Org.
@@ -528,7 +528,7 @@
            (with-temp-file file
              (insert
               (pcase deck
-                ("override" "# -*- zr-dictionary-dictionaries: (\"gcide\"); -*-\n")
+                ("override" "# -*- zr-dictionary-dictionaries: ((:server t :port t :dictionary \"gcide\")); -*-\n")
                 ("disabled" "# -*- zr-dictionary-dictionaries: nil; -*-\n")
                 (_ ""))
               "#+title: 英語\n")))
@@ -537,9 +537,9 @@
            (should (local-variable-p 'zr-dictionary-dictionaries))
            (should (equal zr-dictionary-dictionaries
                           (pcase deck
-                            ("override" '("gcide"))
+                            ("override" '((:server t :port t :dictionary "gcide")))
                             ("disabled" nil)
-                            (_ '((dictd-db-eng-zho gcide) similar)))))))))
+                            (_ '((:server t :port t :dictionary (dictd-db-eng-zho gcide similar)))))))))))
    (should-not zr-dictionary-dictionaries)))
 
 (ert-deftest zr-org-srs-x-test-file-local-dictionaries-require-stage-list ()
@@ -563,7 +563,7 @@
    (zr-org-srs-x-test--create-model)
    (make-directory zr-org-srs-x-directory t)
    (with-temp-file (expand-file-name ".dir-locals.el" zr-org-srs-x-directory)
-     (insert "((org-mode . ((zr-dictionary-dictionaries . (edict)))))\n"))
+     (insert "((org-mode . ((zr-dictionary-dictionaries . ((:server t :port t :dictionary edict))))))\n"))
    (zr-org-srs-x-test--call "createDeck" "deck" "英語")
    (zr-org-srs-x-test--call "createDeck" "deck" "日本語")
    (zr-org-srs-x-test--call "createDeck" "deck" "英語::directory")
@@ -574,7 +574,7 @@
          (unless (equal deck "英語::directory")
            (goto-char (point-min))
            (insert (format "# -*- zr-dictionary-dictionaries: %S; -*-\n"
-                           (if (equal deck "英語") '(edict) '("local"))))
+                           (if (equal deck "英語") '((:server t :port t :dictionary edict)) '((:server t :port t :dictionary "local")))))
            (zr-org-srs-x--save))
          (kill-buffer (current-buffer)))))
    (zr-dictionary-test-with-server
@@ -586,8 +586,8 @@
     (dolist (deck '("英語" "日本語" "英語::directory"))
      (let* ((note (zr-org-srs-x-test--note deck))
             (safe-local-variable-values
-             (append '((zr-dictionary-dictionaries . (edict))
-                       (zr-dictionary-dictionaries . ("local")))
+             (append '((zr-dictionary-dictionaries . ((:server t :port t :dictionary edict)))
+                       (zr-dictionary-dictionaries . ((:server t :port t :dictionary "local"))))
                      safe-local-variable-values))
             (id (zr-org-srs-x-test--call "addNote" "note" note))
             (file (zr-org-srs-x--deck-file deck)))
@@ -622,7 +622,7 @@
                                                     zr-org-srs-x-directory))))))
     (should (member "define edict \"猫\"" dictionary-commands))
     (should (member "define local \"猫\"" dictionary-commands))
-    (should (equal zr-dictionary-dictionaries '("*" similar))))))
+    (should (equal zr-dictionary-dictionaries '((:server t :port t :dictionary t)))))))
 
 (ert-deftest zr-org-srs-x-test-nil-dictionary-disables-lookup ()
   (zr-org-srs-x-test--require-srs)
@@ -720,9 +720,9 @@
     (let* ((file (zr-org-srs-x--deck-file "lunadeck"))
            (on-disk (with-temp-buffer (insert-file-contents file) (buffer-string))))
       (with-current-buffer (zr-org-srs-x--buffer file)
-        (setq-local zr-dictionary-dictionaries '((dict1 dict2) similar))
+        (setq-local zr-dictionary-dictionaries '((:server t :port t :dictionary (dict1 dict2 similar))))
         (let ((zr-dictionary-name-function
-               (lambda (name id) (format "%s [%s]" name id)))
+               (lambda (name id _source) (format "%s [%s]" name id)))
               (before (buffer-substring-no-properties
                        (point-min) (save-excursion
                                      (goto-char (point-min))
@@ -753,11 +753,10 @@
                          (lambda (link)
                            (when (equal (org-element-property :type link) "dict")
                              (zr-org-link--dict-query (org-element-property :path link)))))))
-            (should (equal links '(("猫" ((dict1 dict2) similar) ".")
-                                   ("猫" ((dict1 dict2) similar) ".")
-                                   ("a phrase" ((dict1 dict2) similar) ".")
-                                   ("猫" ((dict1 dict2) similar) ".")
-                                   ("a phrase" ((dict1 dict2) similar) ".")))))
+            (should (equal links (mapcar (lambda (word)
+                                              (list word '(((:dictionary ("dict1" similar))
+                                                            (:dictionary ("dict2" similar)))) "."))
+                                            '("猫" "猫" "a phrase" "猫" "a phrase")))))
           ;; Reload from text to verify replacement without transient properties.
           (let ((text (buffer-substring-no-properties (point-min) (point-max))))
             (erase-buffer)
@@ -811,7 +810,7 @@
 
 (ert-deftest zr-org-srs-x-test-update-dictionaries-remove-old-definitions ()
   (zr-dictionary-test-with-server
-   (dolist (configuration '(nil (dict1)))
+   (dolist (configuration '(nil ((:server t :port t :dictionary dict1))))
      (with-temp-buffer
        (org-mode)
        (insert "* word\n:PROPERTIES:\n:ID: 1\n:END:\n"
@@ -867,7 +866,7 @@
      (let* ((names nil)
             (zr-dictionary-name-function
              (if custom
-                 (lambda (name id)
+                 (lambda (name id _source)
                    (should (equal buffer-file-name (zr-org-srs-x--deck-file "lunadeck")))
                    (push (cons name id) names)
                    (format "%s [%s]" name id))
@@ -1095,7 +1094,7 @@
      (zr-org-srs-x-test--create-model)
      (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
      (zr-dictionary-test-with-server
-      (let ((zr-dictionary-dictionaries (list database 'similar)))
+      (let ((zr-dictionary-dictionaries (list (list :server t :port t :dictionary (list database 'similar)))))
         (setq dictionary-response-function
               (lambda (command)
                 (cond

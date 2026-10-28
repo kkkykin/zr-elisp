@@ -33,6 +33,13 @@
 
 (defvar zr-org-link--saved nil)
 
+(defcustom zr-org-link-dict-include-server nil
+  "Whether generated dict links include resolved server addresses and ports.
+Nil keeps links compact and uses the defaults when a link is followed.
+Non-nil preserves the original endpoints, including cross-server groups."
+  :type 'boolean
+  :group 'zr-org-link)
+
 (defun zr-org-link-open-wezterm (url)
   "Open URL through the configured WezTerm transport."
   (interactive "sURL: ")
@@ -64,9 +71,16 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
 
 (defun zr-org-link--dict-path (word dictionaries strategy)
   "Return a dict path for WORD, DICTIONARIES and STRATEGY."
-  (concat "dict:" (url-hexify-string word)
-          "?dictionaries=" (url-hexify-string (prin1-to-string dictionaries))
-          "&strategy=" (url-hexify-string strategy)))
+  (let* ((resolved (zr-dictionary-resolve-dictionaries dictionaries))
+         (stages (if zr-org-link-dict-include-server
+                     resolved
+                   (mapcar (lambda (stage)
+                             (if (eq stage 'similar) stage
+                               (mapcar (lambda (target)
+                                         (list :dictionary (plist-get target :dictionary))) stage))) resolved))))
+    (concat "dict:" (url-hexify-string word)
+            "?dictionaries=" (url-hexify-string (prin1-to-string stages))
+            "&strategy=" (url-hexify-string strategy))))
 
 (cl-defun zr-org-link-dict-link
     (word &optional (dictionaries zr-dictionary-dictionaries)

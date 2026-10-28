@@ -67,7 +67,8 @@
         (zr-org-link-mode nil)
         (zr-org-link--saved nil)
         (word "猫 a?b&c+100%")
-        (stages '(("dict1" dict2) dict3 similar))
+        (stages '((:server t :port t :dictionary ("dict1" dict2))
+                  (:server t :port t :dictionary dict3) similar))
         calls)
     (unwind-protect
         (progn
@@ -76,16 +77,17 @@
             (cl-letf (((symbol-function 'zr-dictionary-search)
                        (lambda (&rest args) (push args calls))))
               (org-open-at-point)
-              (should (equal calls (list (list word stages "prefix")))))))
+              (should (equal calls (list (list word '(((:dictionary "dict1") (:dictionary "dict2"))
+                                                    ((:dictionary "dict3")) similar) "prefix")))))))
       (zr-org-link-mode -1))))
 
 (ert-deftest zr-org-link-test-dict-defaults-and-nil-override ()
-  (let ((zr-dictionary-dictionaries '((dict1 dict2) similar))
+  (let ((zr-dictionary-dictionaries '((:server t :port t :dictionary (dict1 dict2 similar))))
         (zr-dictionary-strategy "suffix"))
     (should (equal (zr-org-link--dict-query "word")
-                   '("word" ((dict1 dict2) similar) "suffix")))
+                   '("word" ((:server t :port t :dictionary (dict1 dict2 similar))) "suffix")))
     (should (equal (zr-org-link--dict-query "word?strategy=prefix")
-                   '("word" ((dict1 dict2) similar) "prefix")))
+                   '("word" ((:server t :port t :dictionary (dict1 dict2 similar))) "prefix")))
     (should (equal (zr-org-link--dict-query "word?dictionaries=nil")
                    '("word" nil "suffix")))
     (should-error (zr-org-link--dict-query "word?unknown=value") :type 'user-error)
@@ -96,12 +98,12 @@
    (save-window-excursion
      (unwind-protect
          (progn
-           (zr-dictionary-search "猫" '(dict1 similar) "prefix")
+           (zr-dictionary-test-search "猫" '((:server t :port t :dictionary (dict1 similar))) "prefix")
            (let* ((org-store-link-plist nil)
                   (link (zr-org-link--store)))
              (should (equal (plist-get org-store-link-plist :description) "猫"))
              (should (equal (zr-org-link--dict-query (substring link 5))
-                            '("猫" (dict1 similar) "prefix")))))
+                            '("猫" (((:dictionary ("dict1" similar)))) "prefix")))))
        (when-let* ((buffer (get-buffer "*zr-dictionary*")))
          (kill-buffer buffer))))))
 
@@ -110,6 +112,27 @@
     (should (string-match-p "a%26b" html))
     (should (string-match-p ">a&amp;b</a>" html))
     (should-not (string-match-p "dictionaries\\|strategy" html))))
+
+(ert-deftest zr-org-link-test-generated-links-freeze-server-defaults ()
+  (let* ((zr-org-link-dict-include-server t)
+         (dictionary-server "initial.example")
+         (dictionary-port 1234)
+         (stages '(((:server t :port t :dictionary local)
+                    (:server "remote.example" :port t :dictionary (a b))) similar))
+         (resolved (zr-dictionary-resolve-dictionaries stages))
+         (path (zr-org-link--dict-path "猫" stages "prefix")))
+    (setq dictionary-server "changed.example" dictionary-port 4321)
+    (should (equal (zr-org-link--dict-query (substring path 5))
+                   (list "猫" resolved "prefix")))))
+
+(ert-deftest zr-org-link-test-generated-links-omit-servers-by-default ()
+  (let* ((zr-org-link-dict-include-server nil)
+         (stages '(((:server "first.example" :port 1234 :dictionary (a b))
+                    (:server "second.example" :port 2345 :dictionary c)) similar))
+         (path (zr-org-link--dict-path "猫" stages "prefix")))
+    (should (equal (zr-org-link--dict-query (substring path 5))
+                   '("猫" (((:dictionary "a") (:dictionary "b") (:dictionary "c")) similar) "prefix")))
+    (should-not (string-match-p "first.example\\|second.example\\|1234\\|2345" path))))
 
 (provide 'zr-org-link-test)
 ;;; zr-org-link-test.el ends here

@@ -6,6 +6,61 @@
 (require 'dictionary)
 (require 'zr-dictionary)
 
+(defun zr-dictionary-test-wait (&optional buffer)
+  "Wait for BUFFER's asynchronous search to finish, failing if it gets stuck."
+  (with-current-buffer (or buffer (current-buffer))
+    (let ((deadline (+ (float-time) 3)))
+      (while (and zr-dictionary--request (< (float-time) deadline))
+        (accept-process-output nil 0.01))
+      (should-not zr-dictionary--request))))
+
+(defun zr-dictionary-test-search (&rest args)
+  "Start a real search with ARGS and wait before checking its complete result."
+  (let ((buffer (apply #'zr-dictionary-search args)))
+    (zr-dictionary-test-wait buffer)
+    buffer))
+
+(defun zr-dictionary-test-until (predicate)
+  "Wait for PREDICATE, failing after three seconds."
+  (let ((deadline (+ (float-time) 3)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))
+    (should (funcall predicate))))
+
+(defun zr-dictionary-test-server (response-function)
+  "Create a local DICT fixture using RESPONSE-FUNCTION of (CLIENT COMMAND).
+Store commands and accepted clients on the server process for assertions."
+  (make-network-process
+   :name "zr-dictionary-multi-server" :server t :host "127.0.0.1"
+   :service t :family 'ipv4 :coding 'binary :noquery t
+   :log (lambda (server client _message)
+          (process-put client 'server server)
+          (process-put server 'clients (cons client (process-get server 'clients)))
+          (set-process-query-on-exit-flag client nil)
+          (process-send-string client "220 test DICT server\r\n"))
+   :filter
+   (lambda (client chunk)
+     (let ((input (concat (or (process-get client 'input) "") chunk)))
+       (while (string-match "\r\n" input)
+         (let* ((end (match-beginning 0))
+                (command (decode-coding-string (substring input 0 end) 'utf-8))
+                (server (process-get client 'server)))
+           (setq input (substring input (+ end 2)))
+           (process-put server 'commands (cons command (process-get server 'commands)))
+           (when-let* ((response (if (string-prefix-p "client " command)
+                                    "250 ok\r\n" (funcall response-function client command))))
+             (process-send-string client (encode-coding-string response 'utf-8)))))
+       (process-put client 'input input)))))
+
+(defun zr-dictionary-test-stop-server (server)
+  "Release SERVER and all of its accepted clients."
+  (delete-process server)
+  (dolist (client (process-get server 'clients)) (delete-process client)))
+
+(defun zr-dictionary-test-target (server dictionaries)
+  "Return an explicit target for DICTIONARIES on fixture SERVER."
+  (list :server "127.0.0.1" :port (process-contact server :service) :dictionary dictionaries))
+
 (defmacro zr-dictionary-test-with-server (&rest body)
   "Run BODY against a local DICT server, using the real dictionary.el client."
   (declare (indent 0) (debug t))
@@ -21,7 +76,7 @@
           (dictionary-server "127.0.0.1")
           (dictionary-use-http-proxy nil)
           (dictionary-default-dictionary "*")
-          (zr-dictionary-dictionaries '("*" similar))
+          (zr-dictionary-dictionaries '((:server t :port t :dictionary t)))
           (zr-dictionary-timeout 1)
           (zr-dictionary-strategy ".")
           (server

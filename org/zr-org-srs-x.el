@@ -257,24 +257,26 @@ Render in the deck buffer after dictionary lookup and attachment import."
   "Render WORD's `zr-dictionary-lookup' results as Org definitions.
 Put a query link before the first dictionary heading and turn brace-marked
 words and phrases into dict links using the current query configuration."
-  (if-let* ((definitions (zr-dictionary-lookup word)))
-      (concat
-       (zr-org-link-dict-link word)
-       "\n\n"
-       (mapconcat
-	(lambda (entry)
-          (concat
-           (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
-           (car entry) "\n"
-           (replace-regexp-in-string
-            "{\\([^{}]+\\)}"
-            (lambda (match)
-              (zr-org-link-dict-link
-               (string-trim (replace-regexp-in-string
-                             "[ \t\r\n]+" " " (substring match 1 -1)))))
-            (string-join (cdr entry) "\n\n") t t)))
-	definitions "\n\n"))
-    ""))
+  (let ((zr-dictionary-dictionaries
+         (zr-dictionary-resolve-dictionaries zr-dictionary-dictionaries)))
+    (if-let* ((definitions (zr-dictionary-lookup word)))
+	(concat
+	 (zr-org-link-dict-link word)
+	 "\n\n"
+	 (mapconcat
+	  (lambda (entry)
+            (concat
+             (propertize "*** " 'zr-org-srs-x--dictionary-heading t)
+             (car entry) "\n"
+             (replace-regexp-in-string
+              "{\\([^{}]+\\)}"
+              (lambda (match)
+		(zr-org-link-dict-link
+		 (string-trim (replace-regexp-in-string
+                               "[ \t\r\n]+" " " (substring match 1 -1)))))
+              (string-join (cdr entry) "\n\n") t t)))
+	  definitions "\n\n"))
+      "")))
 
 (defun zr-org-srs-x-render-default-note (fields variables)
   "Render FIELDS and VARIABLES with the first field as name and front.
