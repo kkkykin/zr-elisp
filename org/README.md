@@ -6,11 +6,13 @@
 
 ## 启用
 
-将仓库的 `org/` 目录加入 `load-path`，配置保存目录：
+将仓库根目录和 `org/` 目录加入 `load-path`，配置保存目录并启用词典链接：
 
 ```elisp
+(add-to-list 'load-path "/path/to/zr-elisp")
 (add-to-list 'load-path "/path/to/zr-elisp/org")
 (require 'zr-org-srs-x)
+(zr-org-link-mode 1)
 (setq zr-org-srs-x-directory "~/org/srs/"
       zr-org-srs-x-host "127.0.0.1"
       zr-org-srs-x-port 8765)
@@ -61,14 +63,26 @@ HTML 转成 Org 文本和链接，脚本、样式不参与正文。
 
 ## dictionary.el 查词
 
+查询实现独立在根目录的 `zr-dictionary.el`，不依赖 Org。
+`M-x zr-dictionary-search` 用当前 buffer 的配置查词，在结果窗口中显示释义，
+`{词语或短语}` 引用可点击继续查词，`g` 重新查询，`q` 关闭窗口。
+`C-u M-x zr-dictionary-search` 可临时指定词典阶段列表和匹配策略。
+程序调用 `zr-dictionary-lookup` 返回 `((词典显示名 释义...) ...)`，不切换窗口，
+可用可选参数传入词典列表和策略；显式传入 `nil` 词典列表禁用查询。
+
 LunaTranslator 发来的 `dictionaryInfo`、`dictionaryContent` 直接丢弃，
-不解析、不保存。制卡时用 Emacs 自带的 `dictionary.el` 查询单词，将命中阶段的
+不解析、不保存。制卡时通过 `zr-dictionary-lookup` 使用 Emacs 自带的 `dictionary.el`
+查询单词，将命中阶段的
 全部释义追加到背面。每个词典默认使用 `*** [数据库 id]` 子标题，
 id 为 `unknown` 时使用完整词典名；多个词典分别分段，同一显示名称的多条释义放在同一子标题下。
+首个词典标题前加入原词的 dict link，释义中的 `{词语或短语}` 转成 dict link，
+换行短语合并为空格。生成的链接保存本次词典列表和策略，follow 时重新查询。
 
 ```org
 ** Back
 一个小村庄
+
+[[dict:hamlet?dictionaries=%28%22%2A%22%20similar%29&strategy=.][hamlet]]
 
 *** [dictd-db-eng-zho]
 hamlet
@@ -80,24 +94,25 @@ hamlet
     n 1: a community of people smaller than a village
 ```
 
-可通过 `zr-org-srs-x-dictionary-name-function` 自定义标题。
+可通过 `zr-dictionary-name-function` 自定义标题。
 函数接收完整词典名和数据库 id，返回不含开头星号的单行标题文字。例如始终显示完整名称和 id：
 
 ```elisp
-(setq zr-org-srs-x-dictionary-name-function
+(setq zr-dictionary-name-function
       (lambda (name id) (format "%s [%s]" name id)))
 ```
 
-用 `zr-org-srs-x-dictionaries` 配置查词顺序，独立于交互查词使用的
+用 `zr-dictionary-dictionaries` 配置制卡与 `zr-dictionary-search` 的查词顺序，独立于原生查词的
 `dictionary-default-dictionary`：
 
 ```elisp
-(setq zr-org-srs-x-dictionaries '((dict1 dict2) dict3 similar))
+(setq zr-dictionary-dictionaries '((dict1 dict2) dict3 similar)
+      zr-dictionary-strategy ".")
 ```
 
 先查询 `dict1` 和 `dict2`，合并两者返回的全部释义；只要其中一个有结果，
 就结束查词。两者都未命中才查询 `dict3`。所有精确查询都未命中，才执行最后的
-`similar`：按原顺序重试这些词典组，使用 DICT 默认匹配策略 `.` 获取每个词典的
+`similar`：按原顺序重试这些词典组，使用 `zr-dictionary-strategy`（默认 `.`）获取每个词典的
 第一个候选词，再查询候选词在其所属词典中的释义。同组的结果合并，整组未命中
 才继续下一组；不尝试第二个候选词。例如 `reserved` 匹配到 `reserve` 时，
 背面填入 `reserve` 的释义，卡片标题和原有词语仍保留 `reserved`。
@@ -120,10 +135,24 @@ hamlet
 需要有可用的 DICT 服务；查询使用独立连接，不打开 Dictionary 窗口，
 也不改动已有 Dictionary 缓冲区及其连接，不受 `dictionary-use-single-buffer` 影响。
 
+`zr-org-link.el` 位于 `org/`，依赖 `zr-dictionary.el`。执行 `zr-org-link-mode` 启用
+dict link 的 follow、store 和导出；关闭时恢复原先的链接处理函数。
+`[[dict:word]]` 使用当前 buffer 的配置，可在链接查询参数里覆盖 `dictionaries` / `strategy`：
+
+```org
+[[dict:reserved?dictionaries=%28%28dict1%20dict2%29%20similar%29&strategy=prefix][reserved]]
+```
+
+`dictionaries` 是经过 URL 编码的 Lisp 阶段列表；上例解码后为
+`((dict1 dict2) similar)`。词语、参数值含空格、中文或 `?&%` 时也用 URL 编码。
+可调用 `(zr-org-link-dict-link "reserved" '((dict1 dict2) similar) "prefix")`
+生成链接。在查询结果 buffer 中用 `org-store-link` 保存当前查询及其配置。
+导出时仍生成翻译 URL，只使用查询词语。
+
 按文件选择词典，直接在目标 Org 文件的**第一行**设置标准文件局部变量：
 
 ```org
-# -*- zr-org-srs-x-dictionaries: ((dictd-db-eng-zho gcide) wordnet similar); -*-
+# -*- zr-dictionary-dictionaries: ((dictd-db-eng-zho gcide) wordnet similar); -*-
 #+title: 英語
 ```
 
@@ -131,16 +160,16 @@ hamlet
 Org 文件和子目录中的 deck，包括之后创建的文件：
 
 ```elisp
-((org-mode . ((zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))))
+((org-mode . ((zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))))
 ```
 
 文件局部变量优先于目录局部变量；两者都未设置时使用全局
-`zr-org-srs-x-dictionaries`。Emacs 对文件和目录局部变量的信任规则照常
+`zr-dictionary-dictionaries`。Emacs 对文件和目录局部变量的信任规则照常
 生效；可以提前允许所需的具体值，避免首次制卡请求等待信任确认：
 
 ```elisp
 (add-to-list 'safe-local-variable-values
-             '(zr-org-srs-x-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))
+             '(zr-dictionary-dictionaries . ((dictd-db-eng-zho gcide) wordnet similar)))
 ```
 
 修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
@@ -148,15 +177,18 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 新配置会用于之后创建的卡片。要覆盖已有卡片的词典，在 deck buffer 中执行
 `M-x zr-org-srs-x-update-dictionaries`：无选区时更新光标所在卡片，光标可位于
 正面、背面或释义中；有选区时更新与选区相交的所有卡片。
-命令以卡片标题查词，使用当前 buffer 的 `zr-org-srs-x-dictionaries` 和
-`zr-org-srs-x-dictionary-name-function`，替换 `Front` / `Back` 下的三级词典子标题；
+命令以卡片标题查词，使用当前 buffer 的 `zr-dictionary-dictionaries` 和
+`zr-dictionary-strategy`、`zr-dictionary-name-function`，替换查询链接及
+`Front` / `Back` 下的三级词典子标题；
 没有词典子标题时追加到 `Back`。其他正文和复习日志保留。
 配置为 `nil` 或全部未命中时移除旧释义；查询或更新失败时撤销整批修改。
 修改留在 buffer 中，确认后用 `C-x C-s` 保存。
 
 查询超时或服务错误会让 `addNote` 返回错误，
 不保存新卡片；全部阶段共用一个超时，默认为 10 秒，可通过
-`zr-org-srs-x-dictionary-timeout` 修改。
+`zr-dictionary-timeout` 修改。
+原有 `zr-org-srs-x-dictionaries`、`zr-org-srs-x-dictionary-timeout`、
+`zr-org-srs-x-dictionary-name-function` 已移除，配置与文件局部变量需使用上述新名称。
 
 ## 音频与截图
 
@@ -258,9 +290,9 @@ file-local 或 `.dir-locals.el` 设置，遵循 Emacs 的局部变量信任规�
 模型要求非 cloze 且只有一个卡片模板，其他 AnkiConnect 操作返回错误。
 
 ```sh
-make test TEST_FILE=org/test/zr-org-srs-x-test.el
-make check-parens FILE='org/zr-org-srs-x.el org/test/zr-org-srs-x-test.el'
-make byte-compile FILE=org/zr-org-srs-x.el
+make test TEST_FILE='test/zr-dictionary-test.el org/test/zr-org-link-test.el org/test/zr-org-srs-x-test.el'
+make check-parens FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el'
+make byte-compile FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el'
 make clean
 ```
 

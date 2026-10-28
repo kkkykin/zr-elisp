@@ -12,17 +12,16 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'org)
 (require 'org-element)
 (require 'url-util)
 (require 'subr-x)
+(require 'zr-dictionary)
 (autoload 'zr-wezterm-send-json "zr-wezterm")
-(declare-function dictionary-search "dictionary")
 (declare-function org-html-encode-plain-text "ox-html")
 (declare-function org-latex-plain-text "ox-latex")
 (declare-function org-texinfo-plain-text "ox-texinfo")
-
-(defvar dictionary-current-data)
 
 (defgroup zr-org-link nil
   "Additional Org links."
@@ -63,10 +62,46 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
         (zr-org-link-open-wezterm (org-element-property :raw-link element))
         t))))
 
-(defun zr-org-link--follow (word _argument)
-  "Look up WORD in Dictionary."
-  (require 'dictionary)
-  (dictionary-search word))
+(defun zr-org-link--dict-path (word dictionaries strategy)
+  "Return a dict path for WORD, DICTIONARIES and STRATEGY."
+  (concat "dict:" (url-hexify-string word)
+          "?dictionaries=" (url-hexify-string (prin1-to-string dictionaries))
+          "&strategy=" (url-hexify-string strategy)))
+
+(cl-defun zr-org-link-dict-link
+    (word &optional (dictionaries zr-dictionary-dictionaries)
+          (strategy zr-dictionary-strategy))
+  "Return a dict link for WORD with DICTIONARIES and matching STRATEGY.
+Encode stages as a Lisp list in the dictionaries query parameter."
+  (org-link-make-string (zr-org-link--dict-path word dictionaries strategy) word))
+
+(defun zr-org-link--dict-query (path)
+  "Parse dict link PATH as (WORD DICTIONARIES STRATEGY).
+Missing query parameters use the current buffer's dictionary configuration."
+  (let* ((parts (split-string path "?"))
+         (word (decode-coding-string (url-unhex-string (car parts)) 'utf-8))
+         (dictionaries zr-dictionary-dictionaries)
+         (strategy zr-dictionary-strategy))
+    (unless (<= (length parts) 2)
+      (user-error "Invalid dict link: %s" path))
+    (dolist (parameter (split-string (or (cadr parts) "") "&" t))
+      (unless (string-match "\\`\\([^=]+\\)=\\(.*\\)\\'" parameter)
+        (user-error "Invalid dict link parameter: %s" parameter))
+      (let ((key (match-string 1 parameter))
+            (value (decode-coding-string (url-unhex-string (match-string 2 parameter)) 'utf-8)))
+        (pcase key
+          ("dictionaries"
+           (let ((parsed (read-from-string value)))
+             (unless (string-blank-p (substring value (cdr parsed)))
+               (user-error "Invalid dictionary stages: %s" value))
+             (setq dictionaries (car parsed))))
+          ("strategy" (setq strategy value))
+          (_ (user-error "Unknown dict link parameter: %s" key)))))
+    (list word dictionaries strategy)))
+
+(defun zr-org-link--follow (path _argument)
+  "Look up the word and configuration in dict link PATH."
+  (apply #'zr-dictionary-search (zr-org-link--dict-query path)))
 
 (defun zr-org-link--translation-url (word)
   "Return a translation URL for WORD."
@@ -74,10 +109,11 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
           (url-hexify-string zr-org-link-translation-language) "&text="
           (url-hexify-string word) "&op=translate"))
 
-(defun zr-org-link--export (word description backend _info)
-  "Export WORD and DESCRIPTION using BACKEND."
-  (let ((url (zr-org-link--translation-url word))
-        (description (or description word)))
+(defun zr-org-link--export (path description backend _info)
+  "Export dict link PATH and DESCRIPTION using BACKEND."
+  (let* ((word (car (zr-org-link--dict-query path)))
+         (url (zr-org-link--translation-url word))
+         (description (or description word)))
     (pcase backend
       ('html
        (require 'ox-html)
@@ -98,11 +134,9 @@ Suitable for `org-open-at-point-functions'; return nil for other links."
 
 (defun zr-org-link--store (&optional _interactive)
   "Store the current Dictionary query as an Org link."
-  (when (and (derived-mode-p 'dictionary-mode) (boundp 'dictionary-current-data)
-             (eq (car-safe dictionary-current-data) 'dictionary-new-search-internal)
-             (stringp (cadr dictionary-current-data)))
-    (let* ((word (cadr dictionary-current-data))
-           (link (concat "dict:" word)))
+  (when (and (derived-mode-p 'zr-dictionary-mode) zr-dictionary-word)
+    (let* ((word zr-dictionary-word)
+           (link (zr-org-link--dict-path word zr-dictionary-dictionaries zr-dictionary-strategy)))
       (org-link-store-props :type "dict" :link link :description word)
       link)))
 

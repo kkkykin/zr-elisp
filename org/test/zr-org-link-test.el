@@ -61,5 +61,52 @@
     (zr-org-link-mode -1)
     (should (eq (org-link-get-parameter "dict" :follow) #'ignore))))
 
+(ert-deftest zr-org-link-test-dict-follow-parameters-and-encoding ()
+  (let ((org-link-parameters (copy-tree org-link-parameters))
+        (zr-org-link-mode nil)
+        (zr-org-link--saved nil)
+        (word "猫 a?b&c+100%")
+        (stages '(("dict1" dict2) dict3 similar))
+        calls)
+    (unwind-protect
+        (progn
+          (zr-org-link-mode 1)
+          (zr-test-with-org-buffer (zr-org-link-dict-link word stages "prefix")
+            (cl-letf (((symbol-function 'zr-dictionary-search)
+                       (lambda (&rest args) (push args calls))))
+              (org-open-at-point)
+              (should (equal calls (list (list word stages "prefix")))))))
+      (zr-org-link-mode -1))))
+
+(ert-deftest zr-org-link-test-dict-defaults-and-nil-override ()
+  (let ((zr-dictionary-dictionaries '((dict1 dict2) similar))
+        (zr-dictionary-strategy "suffix"))
+    (should (equal (zr-org-link--dict-query "word")
+                   '("word" ((dict1 dict2) similar) "suffix")))
+    (should (equal (zr-org-link--dict-query "word?strategy=prefix")
+                   '("word" ((dict1 dict2) similar) "prefix")))
+    (should (equal (zr-org-link--dict-query "word?dictionaries=nil")
+                   '("word" nil "suffix")))
+    (should-error (zr-org-link--dict-query "word?unknown=value") :type 'user-error)
+    (should-error (zr-org-link--dict-query "word?dictionaries=(dict1)%20junk") :type 'user-error)))
+
+(ert-deftest zr-org-link-test-store-dictionary-query ()
+  (with-temp-buffer
+    (zr-dictionary-mode)
+    (setq-local zr-dictionary-word "猫"
+                zr-dictionary-dictionaries '(dict1 similar)
+                zr-dictionary-strategy "prefix")
+    (let* ((org-store-link-plist nil)
+           (link (zr-org-link--store)))
+      (should (equal (plist-get org-store-link-plist :description) "猫"))
+      (should (equal (zr-org-link--dict-query (substring link 5))
+                     '("猫" (dict1 similar) "prefix"))))))
+
+(ert-deftest zr-org-link-test-export-dict-query-uses-only-word ()
+  (let ((html (zr-org-link--export "a%26b?dictionaries=(dict1)&strategy=prefix" nil 'html nil)))
+    (should (string-match-p "a%26b" html))
+    (should (string-match-p ">a&amp;b</a>" html))
+    (should-not (string-match-p "dictionaries\\|strategy" html))))
+
 (provide 'zr-org-link-test)
 ;;; zr-org-link-test.el ends here

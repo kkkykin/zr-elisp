@@ -17,7 +17,7 @@
 | init-org | zr-org | 列表速度命令、条目剪切、表格查询、编辑模板、`org-dblock-write:zr-file-finder` |
 | init-org | zr-org-babel | 块/调用执行、展开、结果图片、语言补全、JSON 格式化、Bat 变量赋值；AHK/Bat 默认头参数在 init.el |
 | init-org | zr-org-tangle | `zr-org-tangle-path`、CUSTOM_ID、`zr-org-tangle-detangle` |
-| init-org | zr-org-link | `dict:` 链接及导出，调用现有 zr-wezterm 打开链接 |
+| init-org | org/zr-org-link | `dict:` 链接依赖 zr-dictionary，可指定 dictionaries/strategy；调用 zr-wezterm 打开链接 |
 | init-org | zr-org-export | Pandoc OPTIONS 与 LaTeX 图片路径修正 |
 | init-org | zr-org-protocol | 显式 Windows 协议注册、Netscape Cookie 导入 |
 | init-viper、init-org | zr-viper | Ex 扩展、临时行号、Wdired/Org 编辑保存；使用 Org 功能时才加载相应库 |
