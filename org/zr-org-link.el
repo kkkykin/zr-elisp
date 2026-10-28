@@ -134,7 +134,7 @@ Missing query parameters use the current buffer's dictionary configuration."
 
 (defun zr-org-link--store (&optional _interactive)
   "Store the current Dictionary query as an Org link."
-  (when (and (derived-mode-p 'zr-dictionary-mode) zr-dictionary-word)
+  (when (and (derived-mode-p 'dictionary-mode) zr-dictionary-word)
     (let* ((word zr-dictionary-word)
            (link (zr-org-link--dict-path word zr-dictionary-dictionaries zr-dictionary-strategy)))
       (org-link-store-props :type "dict" :link link :description word)

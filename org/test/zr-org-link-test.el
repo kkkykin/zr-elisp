@@ -6,6 +6,7 @@
 (require 'cl-lib)
 (require 'zr-org-link)
 (require 'zr-test-helpers)
+(require 'zr-dictionary-test-helpers)
 
 (ert-deftest zr-org-link-test-ssh-opens-once ()
   (dolist (text '("https://example.com/path?q=1&x=2\n"
@@ -91,16 +92,18 @@
     (should-error (zr-org-link--dict-query "word?dictionaries=(dict1)%20junk") :type 'user-error)))
 
 (ert-deftest zr-org-link-test-store-dictionary-query ()
-  (with-temp-buffer
-    (zr-dictionary-mode)
-    (setq-local zr-dictionary-word "猫"
-                zr-dictionary-dictionaries '(dict1 similar)
-                zr-dictionary-strategy "prefix")
-    (let* ((org-store-link-plist nil)
-           (link (zr-org-link--store)))
-      (should (equal (plist-get org-store-link-plist :description) "猫"))
-      (should (equal (zr-org-link--dict-query (substring link 5))
-                     '("猫" (dict1 similar) "prefix"))))))
+  (zr-dictionary-test-with-server
+   (save-window-excursion
+     (unwind-protect
+         (progn
+           (zr-dictionary-search "猫" '(dict1 similar) "prefix")
+           (let* ((org-store-link-plist nil)
+                  (link (zr-org-link--store)))
+             (should (equal (plist-get org-store-link-plist :description) "猫"))
+             (should (equal (zr-org-link--dict-query (substring link 5))
+                            '("猫" (dict1 similar) "prefix")))))
+       (when-let* ((buffer (get-buffer "*zr-dictionary*")))
+         (kill-buffer buffer))))))
 
 (ert-deftest zr-org-link-test-export-dict-query-uses-only-word ()
   (let ((html (zr-org-link--export "a%26b?dictionaries=(dict1)&strategy=prefix" nil 'html nil)))

@@ -15,32 +15,9 @@
 (require 'subr-x)
 (require 'button)
 (require 'thingatpt)
+(require 'dictionary)
 
-(declare-function dictionary-do-search "dictionary" (word dictionary function &optional nomatching))
-(declare-function dictionary-read-reply "dictionary" ())
-(declare-function dictionary-read-reply-and-split "dictionary" ())
-(declare-function dictionary-check-reply "dictionary" (reply code))
-(declare-function dictionary-reply-list "dictionary" (reply))
-(declare-function dictionary-reply "dictionary" (reply))
-(declare-function dictionary-read-answer "dictionary" ())
-(declare-function dictionary-decode-charset "dictionary" (text dictionary))
-(declare-function dictionary-encode-charset "dictionary" (text dictionary))
-(declare-function dictionary-check-initial-reply "dictionary" ())
-(declare-function dictionary-send-command "dictionary" (string))
-(declare-function dictionary-connection-create-data "dictionary-connection" (buffer process point))
-(declare-function dictionary-connection-buffer "dictionary-connection" (connection))
-(declare-function dictionary-connection-process "dictionary-connection" (connection))
-(declare-function dictionary-connection-set-process "dictionary-connection" (connection process))
-(declare-function dictionary-connection-close "dictionary-connection" (connection))
-
-(defvar dictionary-server)
-(defvar dictionary-port)
-(defvar dictionary-connection)
 (defvar dictionary-current-server)
-(defvar dictionary-identification)
-(defvar dictionary-use-http-proxy)
-(defvar dictionary-proxy-server)
-(defvar dictionary-proxy-port)
 
 (defgroup zr-dictionary nil
   "Staged dictionary lookups."
@@ -177,8 +154,8 @@ up the buffer even when connecting fails or times out."
     (mapcar (lambda (entry) (cons (car entry) (nreverse (cdr entry))))
             (nreverse definitions))))
 
-(defun zr-dictionary--first-match (word database)
-  "Return the first (DATABASE . WORD) matching escaped WORD, or nil.
+(defun zr-dictionary--matches (word database)
+  "Return (DATABASE . WORD) matches for escaped WORD, or nil.
 Use `zr-dictionary-strategy' and consume the entire response."
   (dictionary-send-command
    (concat "match " database " " zr-dictionary-strategy " \""
@@ -187,21 +164,23 @@ Use `zr-dictionary-strategy' and consume the entire response."
     (cond
      ((dictionary-check-reply reply 552) nil)
      ((dictionary-check-reply reply 152)
-      (let* ((line (car (split-string (dictionary-read-answer) "\n" t)))
+      (let* ((lines (split-string (dictionary-read-answer) "\n" t))
              (reply (dictionary-read-reply-and-split)))
         (unless (dictionary-check-reply reply 250)
           (error "Unexpected dictionary reply: %s" (dictionary-reply reply)))
-        (when line
-          (unless (string-match "\\`\\([^ \t]+\\)[ \t]+\\(.+\\)\\'" line)
-            (error "Invalid dictionary match: %s" line))
-          (let ((database (match-string 1 line)) (word (match-string 2 line)))
-            (zr-dictionary--id database)
-            (when (string-prefix-p "\"" word)
-              (unless (and (> (length word) 1) (string-suffix-p "\"" word))
-                (error "Invalid dictionary match: %s" line))
-              (setq word (replace-regexp-in-string
-                          (concat (regexp-quote "\\") "\\(.\\)") "\\1" (substring word 1 -1))))
-            (cons database (dictionary-decode-charset word database))))))
+        (mapcar
+         (lambda (line)
+           (unless (string-match "\\`\\([^ \t]+\\)[ \t]+\\(.+\\)\\'" line)
+             (error "Invalid dictionary match: %s" line))
+           (let ((database (match-string 1 line)) (word (match-string 2 line)))
+             (zr-dictionary--id database)
+             (when (string-prefix-p "\"" word)
+               (unless (and (> (length word) 1) (string-suffix-p "\"" word))
+                 (error "Invalid dictionary match: %s" line))
+               (setq word (replace-regexp-in-string
+                           (concat (regexp-quote "\\") "\\(.\\)") "\\1" (substring word 1 -1))))
+             (cons database (dictionary-decode-charset word database))))
+         lines)))
      (t (error "Unexpected dictionary reply: %s" (dictionary-reply reply))))))
 
 (defun zr-dictionary--query-group (word databases &optional similar)
@@ -211,7 +190,7 @@ When SIMILAR is non-nil, use the first matching word from each database."
     (dolist (database databases)
       (let ((entries
              (if similar
-                 (when-let* ((match (zr-dictionary--first-match word database)))
+                 (when-let* ((match (car (zr-dictionary--matches word database))))
                    (dictionary-do-search
                     (zr-dictionary--escape-word (cdr match)) (car match)
                     #'zr-dictionary--definitions t))
@@ -222,6 +201,19 @@ When SIMILAR is non-nil, use the first matching word from each database."
             (push entry definitions)))))
     (nreverse definitions)))
 
+(defun zr-dictionary--call-with-connection (function)
+  "Call FUNCTION on an isolated DICT connection, then close it."
+  (let ((dictionary-connection nil)
+        (dictionary-current-server nil)
+        ;; Avoid dictionary.el's automatic server selection prompt.
+        (dictionary-server (or dictionary-server "localhost")))
+    (unwind-protect
+        (with-timeout (zr-dictionary-timeout
+                       (error "Dictionary lookup timed out"))
+          (zr-dictionary--connect)
+          (funcall function))
+      (dictionary-connection-close dictionary-connection))))
+
 (cl-defun zr-dictionary-lookup
     (word &optional (dictionaries zr-dictionary-dictionaries)
           (strategy zr-dictionary-strategy))
@@ -230,40 +222,165 @@ Default to the current buffer's configuration.  Return the first successful
 stage as (NAME DEFINITION...) groups, or nil when no definitions are found.
 Format names with `zr-dictionary-name-function'.  Use a separate connection,
 leaving interactive Dictionary buffers, windows and connections untouched."
-  (require 'dictionary)
   (zr-dictionary--string word)
   (let ((zr-dictionary-dictionaries dictionaries)
         (zr-dictionary-strategy (zr-dictionary--id strategy)))
     (if (or (null dictionaries) (string-blank-p word))
         nil
       (let ((stages (zr-dictionary--stages))
-            (dictionary-connection nil)
-            (dictionary-current-server nil)
-            ;; Avoid dictionary.el's automatic server selection prompt.
-            (dictionary-server (or dictionary-server "localhost"))
             (word (zr-dictionary--escape-word word)))
-	(unwind-protect
-            (with-timeout (zr-dictionary-timeout
-                           (error "Dictionary lookup timed out"))
-              (zr-dictionary--connect)
-              (catch 'definitions
-                (dolist (similar (if (memq 'similar stages) '(nil t) '(nil)))
-                  (dolist (group (remq 'similar stages))
-                    (when-let* ((definitions (zr-dictionary--query-group word group similar)))
-                      (throw 'definitions definitions))))))
-          (dictionary-connection-close dictionary-connection))))))
+        (zr-dictionary--call-with-connection
+         (lambda ()
+           (catch 'definitions
+             (dolist (similar (if (memq 'similar stages) '(nil t) '(nil)))
+               (dolist (group (remq 'similar stages))
+                 (when-let* ((definitions (zr-dictionary--query-group word group similar)))
+                   (throw 'definitions definitions)))))))))))
 
 (defvar-local zr-dictionary-word nil
   "Word displayed in the current dictionary result buffer.")
 
-(define-derived-mode zr-dictionary-mode special-mode "ZR Dictionary"
-  "Display dictionary definitions and follow their cross references."
-  (setq-local revert-buffer-function
-              (lambda (&rest _) (zr-dictionary-search zr-dictionary-word))))
+(defvar-local zr-dictionary--matching-p nil
+  "Whether the current result displays matching words.")
 
-(defun zr-dictionary--follow-reference (button)
-  "Look up the word stored on BUTTON using the result buffer's settings."
-  (zr-dictionary-search (button-get button 'zr-dictionary-word)))
+(defun zr-dictionary--new-search (args &optional _all)
+  "Look up the word in native dictionary button ARGS using local stages."
+  (zr-dictionary-search (car args)))
+
+(defun zr-dictionary--prompt-search (&rest _)
+  "Prompt for a staged search from a native dictionary button."
+  (call-interactively #'zr-dictionary-search))
+
+(defun zr-dictionary--lookup-definition ()
+  "Look up the word or reference at point using local stages."
+  (interactive)
+  (zr-dictionary-search (or (dictionary-search-default)
+                            (user-error "No word at point"))))
+
+(defun zr-dictionary--lookup-matches (word dictionaries strategy)
+  "Return grouped matches for WORD from the first successful dictionary stage."
+  (let ((zr-dictionary-dictionaries dictionaries)
+        (zr-dictionary-strategy (zr-dictionary--id strategy))
+        (word (zr-dictionary--escape-word word)))
+    (when (and dictionaries (not (string-blank-p word)))
+      (let ((stages (zr-dictionary--stages)))
+        (zr-dictionary--call-with-connection
+         (lambda ()
+           (catch 'matches
+             (dolist (group (remq 'similar stages))
+               (let (matches)
+                 (dolist (database group)
+                   (dolist (match (zr-dictionary--matches word database))
+                     (if-let* ((entry (assoc (car match) matches)))
+                         (setcdr entry (append (cdr entry) (list (cdr match))))
+                       (push (list (car match) (cdr match)) matches))))
+                 (when matches (throw 'matches (nreverse matches))))))))))))
+
+(defun zr-dictionary--display (word entries dictionaries strategy name-function matching)
+  "Render ENTRIES and query settings in the current `dictionary-mode' buffer."
+  (setq-local zr-dictionary-word word
+              zr-dictionary-dictionaries dictionaries
+              zr-dictionary-strategy strategy
+              zr-dictionary-name-function name-function
+              zr-dictionary--matching-p matching)
+  (dictionary-pre-buffer)
+  (insert (propertize word 'face 'bold) "\n\n")
+  (if entries
+      (dolist (entry entries)
+        (insert (propertize (car entry) 'face 'dictionary-word-entry-face) "\n\n")
+        (dolist (text (cdr entry))
+          (if matching
+              (progn
+                (insert-button text :type 'dictionary-link
+                               'callback #'zr-dictionary--new-search
+                               'data (cons text (car entry)))
+                (insert "\n"))
+            ;; Definitions have already been decoded by the data query.
+            (let ((dictionary-coding-systems-for-dictionaries nil))
+              (dictionary-display-word-definition (encode-coding-string text 'utf-8)
+                                                  word "*"))))
+        (when matching (insert "\n")))
+    (insert (if matching "No matching words found.\n" "No definitions found.\n")))
+  ;; Native buttons call their callbacks directly, bypassing command remapping.
+  (let ((callbacks '((dictionary-search . zr-dictionary--prompt-search)
+                     (dictionary-new-search . zr-dictionary--new-search)
+                     (dictionary-match-words . zr-dictionary--match-words)
+                     (dictionary-select-dictionary . zr-dictionary--select-dictionaries)
+                     (dictionary-select-strategy . zr-dictionary--select-strategy)))
+        (position (point-min)))
+    (while-let ((button (next-button position)))
+      (when-let* ((callback (assq (button-get button 'callback) callbacks)))
+        (button-put button 'callback (cdr callback)))
+      (setq position (button-end button))))
+  (dictionary-post-buffer))
+
+(defun zr-dictionary--show (word entries dictionaries strategy &optional matching)
+  "Show ENTRIES for WORD with DICTIONARIES and STRATEGY, recording history."
+  (let ((buffer (if (and (derived-mode-p 'dictionary-mode) zr-dictionary-word)
+                    (current-buffer)
+                  (get-buffer-create "*zr-dictionary*")))
+        (configuration (current-window-configuration))
+        (window (selected-window))
+        (name-function zr-dictionary-name-function))
+    (with-current-buffer buffer
+      (unless (and (eq major-mode 'dictionary-mode) zr-dictionary-word)
+        (dictionary-mode)
+        (setq-local dictionary-window-configuration configuration
+                    dictionary-selected-window window
+                    dictionary-marker nil
+                    revert-buffer-function #'zr-dictionary--revert)
+        (let ((map (make-sparse-keymap)))
+          (set-keymap-parent map dictionary-mode-map)
+          (dolist (binding '((dictionary-search . zr-dictionary-search)
+                             (dictionary-lookup-definition . zr-dictionary--lookup-definition)
+                             (dictionary-match-words . zr-dictionary--match-words)
+                             (dictionary-select-dictionary . zr-dictionary--select-dictionaries)
+                             (dictionary-select-strategy . zr-dictionary--select-strategy)))
+            (define-key map (vector 'remap (car binding)) (cdr binding)))
+          (use-local-map map))))
+    (pop-to-buffer buffer)
+    (dictionary-store-positions)
+    (let ((args (list word entries dictionaries strategy name-function matching)))
+      (apply #'zr-dictionary--display args)
+      (dictionary-store-state #'zr-dictionary--display args))))
+
+(defun zr-dictionary--revert (&rest _)
+  "Refresh the current definitions or matches without adding a history entry."
+  (let ((args (list zr-dictionary-word
+                    (if zr-dictionary--matching-p
+                        (zr-dictionary--lookup-matches zr-dictionary-word
+                                                       zr-dictionary-dictionaries
+                                                       zr-dictionary-strategy)
+                      (zr-dictionary-lookup zr-dictionary-word))
+                    zr-dictionary-dictionaries zr-dictionary-strategy
+                    zr-dictionary-name-function zr-dictionary--matching-p)))
+    (apply #'zr-dictionary--display args)
+    (setq dictionary-current-data (cons #'zr-dictionary--display args))))
+
+(cl-defun zr-dictionary--match-words
+    (&optional word (dictionaries zr-dictionary-dictionaries)
+               (strategy zr-dictionary-strategy))
+  "Display all matches in the first successful stage for WORD."
+  (interactive)
+  (setq word (or word (read-string "Search pattern: " nil 'dictionary-word-history
+                                  (dictionary-search-default))))
+  (zr-dictionary--show word (zr-dictionary--lookup-matches word dictionaries strategy)
+                       dictionaries strategy t))
+
+(defun zr-dictionary--select-dictionaries (&rest _)
+  "Prompt for dictionary stages and repeat the current query."
+  (interactive)
+  (funcall (if zr-dictionary--matching-p #'zr-dictionary--match-words #'zr-dictionary-search)
+           zr-dictionary-word
+           (read-minibuffer "Dictionary stages: " (prin1-to-string zr-dictionary-dictionaries))
+           zr-dictionary-strategy))
+
+(defun zr-dictionary--select-strategy (&rest _)
+  "Prompt for a matching strategy and repeat the current query."
+  (interactive)
+  (funcall (if zr-dictionary--matching-p #'zr-dictionary--match-words #'zr-dictionary-search)
+           zr-dictionary-word zr-dictionary-dictionaries
+           (read-string "Matching strategy: " nil nil zr-dictionary-strategy)))
 
 ;;;###autoload
 (cl-defun zr-dictionary-search
@@ -272,42 +389,20 @@ leaving interactive Dictionary buffers, windows and connections untouched."
   "Display definitions of WORD using DICTIONARIES and matching STRATEGY.
 Interactively, offer the active region or word at point as the default.
 With a prefix argument, also prompt for dictionary stages and strategy.
-Words or phrases enclosed in braces become clickable cross references."
+Use `dictionary-mode' with buffer-local staged search commands and native
+history, definition formatting and cross references."
   (interactive
    (let* ((default (if (use-region-p)
                        (buffer-substring-no-properties (region-beginning) (region-end))
                      (thing-at-point 'word t)))
-          (word (read-string "Dictionary word: " nil nil default)))
+          (word (read-string "Dictionary word: " nil 'dictionary-word-history default)))
      (if current-prefix-arg
          (list word
                (read-minibuffer "Dictionary stages: " (prin1-to-string zr-dictionary-dictionaries))
                (read-string "Matching strategy: " nil nil zr-dictionary-strategy))
        (list word))))
-  (let ((definitions (zr-dictionary-lookup word dictionaries strategy))
-        (name-function zr-dictionary-name-function)
-        (buffer (get-buffer-create "*zr-dictionary*")))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (zr-dictionary-mode)
-        (setq-local zr-dictionary-word word
-                    zr-dictionary-dictionaries dictionaries
-                    zr-dictionary-strategy strategy
-                    zr-dictionary-name-function name-function)
-        (insert (propertize word 'face 'bold) "\n\n")
-        (if definitions
-            (dolist (entry definitions)
-              (insert (propertize (car entry) 'face 'bold) "\n"
-                      (string-join (cdr entry) "\n\n") "\n\n"))
-          (insert "No definitions found.\n"))
-        (goto-char (point-min))
-        (while (re-search-forward "{\\([^{}]+\\)}" nil t)
-          (make-text-button (match-beginning 1) (match-end 1)
-                            'zr-dictionary-word (replace-regexp-in-string
-                                                 "[ \t\r\n]+" " " (match-string-no-properties 1))
-                            'action #'zr-dictionary--follow-reference 'follow-link t))
-        (goto-char (point-min))))
-    (pop-to-buffer buffer)))
+  (zr-dictionary--show word (zr-dictionary-lookup word dictionaries strategy)
+                       dictionaries strategy))
 
 (provide 'zr-dictionary)
 ;;; zr-dictionary.el ends here
