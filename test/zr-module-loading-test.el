@@ -103,6 +103,37 @@
       (ert-info ((buffer-string))
         (should (eq status 0))))))
 
+(ert-deftest zr-module-loading-test-dictionary-autoload-does-not-load-module ()
+  ;; The test runner has loaded cl-lib, which hides this startup failure.
+  (with-temp-buffer
+    (let* ((form
+            '(progn
+               (require 'loaddefs-gen)
+               ;; Compressed sources must not bootstrap jka-compr here.
+               (let* ((load-suffixes '(".el"))
+                      (definitions
+                       (loaddefs-generate--parse-file
+                        (locate-library "zr-dictionary")
+                        (expand-file-name "zr-loaddefs.el"))))
+                 (dolist (definition definitions)
+                   (let ((form (nth 2 definition)))
+                     (eval (if (stringp form) (car (read-from-string form)) form) t))))
+               (when (or (featurep 'cl-lib) (featurep 'dictionary)
+                         (featurep 'zr-dictionary))
+                 (error "Dictionary autoload generation loaded its dependencies"))
+               (unless (and (autoloadp (symbol-function 'zr-dictionary-search))
+                            (commandp 'zr-dictionary-search))
+                 (error "Dictionary command autoload is missing"))
+               (let ((buffer (zr-dictionary-search "word" nil)))
+                 (unless (and (buffer-live-p buffer) (featurep 'zr-dictionary))
+                   (error "Dictionary command did not load on use"))
+                 (kill-buffer buffer))))
+           (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
+                                 zr-module-loading-test--root
+                                 "--eval" (prin1-to-string form))))
+      (ert-info ((buffer-string))
+        (should (eq status 0))))))
+
 (ert-deftest zr-module-loading-test-platform-commands-reject-wrong-system ()
   (let ((system-type 'gnu/linux))
     (should-error (zr-windows-shell) :type 'user-error)

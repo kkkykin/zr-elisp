@@ -808,7 +808,8 @@ REFRESH skips history.  GROUP-INDEX restricts lookup to that configured group."
            zr-dictionary-word zr-dictionary-dictionaries
            (read-string "Matching strategy: " nil nil zr-dictionary-strategy)))
 
-;;;###autoload
+;; Avoid loading this file to expand `cl-defun' during autoload generation.
+;;;###autoload (autoload 'zr-dictionary-search "zr-dictionary" nil t)
 (cl-defun zr-dictionary-search
     (word &optional (dictionaries zr-dictionary-dictionaries)
           (strategy zr-dictionary-strategy))
