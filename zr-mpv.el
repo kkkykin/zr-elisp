@@ -132,8 +132,8 @@ If nil, defaults to ssh://<system-name> when inside an SSH session."
   :type '(repeat (cons (string :tag "Header name") (string :tag "Value")))
   :group 'zr-mpv)
 
-(defcustom zr-mpv-android-package "is.xyz.mpv.ytdl"
-  "Android package name for mpv."
+(defcustom zr-mpv-android-package "app.gyrolet.mpvrx"
+  "Android package name for the mpvRx player."
   :type 'string
   :group 'zr-mpv)
 
@@ -395,9 +395,12 @@ HEADERS is an optional alist or list of HTTP header strings."
   "Start a temporary HTTP server providing an M3U8 playlist of FILES.
 The server automatically terminates after TIMEOUT seconds (default
 `zr-mpv-android-server-timeout').  Returns the server process."
-  (let* ((items (or (zr-mpv-normalize-files files)
-                    (user-error "No files to play")))
-         (body (zr-mpv-format-playlist items))
+  (zr-mpv--serve-playlist-items
+   (or (zr-mpv-normalize-files files) (user-error "No files to play")) timeout))
+
+(defun zr-mpv--serve-playlist-items (items &optional timeout)
+  "Serve already normalized ITEMS, shutting down after TIMEOUT seconds."
+  (let* ((body (zr-mpv-format-playlist items))
          (encoded-body (encode-coding-string body 'utf-8 t))
          (body-bytes (string-bytes encoded-body))
          (response (concat "HTTP/1.1 200 OK\r\n"
@@ -414,6 +417,8 @@ The server automatically terminates after TIMEOUT seconds (default
            :host "127.0.0.1"
            :service t
            :family 'ipv4
+           :coding 'binary
+           :noquery t
            :sentinel
            (lambda (proc event)
              (when (string-prefix-p "open from" event)
@@ -430,18 +435,100 @@ The server automatically terminates after TIMEOUT seconds (default
                          (delete-process server-proc))))))
     server-proc))
 
-(defun zr-mpv-play-android (files &optional _args _headers)
-  "Play FILES on Android via mpv-android and `zr-mpv-android-am-program'."
-  (let* ((server (zr-mpv-serve-playlist files))
-         (port (process-contact server :service))
-         (url (format "http://127.0.0.1:%d" port)))
-    (apply #'call-process
-           zr-mpv-android-am-program nil 0 nil
-           "start" "-a" "android.intent.action.VIEW"
-           "-t" "video/any"
-           "-p" zr-mpv-android-package
-           "-d" url
-           nil)))
+(defun zr-mpv--android-position (value)
+  "Convert an absolute mpv start time VALUE to Intent milliseconds."
+  (unless (string-match-p "\\`[0-9]+\\(?::[0-9]+\\)\\{0,2\\}\\(?:\\.[0-9]+\\)?\\'" value)
+    (user-error "Android --start requires seconds or HH:MM:SS"))
+  (let ((seconds 0))
+    (dolist (part (split-string value ":"))
+      (setq seconds (+ (* seconds 60) (string-to-number part))))
+    (let ((milliseconds (round (* seconds 1000))))
+      (unless (<= milliseconds 2147483647)
+        (user-error "Android start position exceeds the Intent integer range"))
+      (number-to-string milliseconds))))
+
+(defun zr-mpv--android-extras (args headers)
+  "Convert supported ARGS and HEADERS to mpvRx Intent extras.
+ARGS accepts --start, --force-media-title, --title, --user-agent and
+--referrer, with either --option=value or --option value syntax."
+  (let ((args (zr-mpv--split-args args))
+        (fields (zr-mpv--format-headers headers))
+        extras pairs)
+    (while args
+      (let* ((argument (pop args))
+             (separator (string-search "=" argument))
+             (option (if separator (substring argument 0 separator) argument))
+             (value (if separator (substring argument (1+ separator)) (pop args))))
+        (unless (member option '("--start" "--force-media-title" "--title"
+                                 "--user-agent" "--referrer"))
+          (user-error "Unsupported Android playback argument: %s" option))
+        (unless value (user-error "Missing value for %s" option))
+        (pcase option
+          ("--start"
+           (setq extras (append extras (list "--ei" "position" (zr-mpv--android-position value)))))
+          ((or "--force-media-title" "--title")
+           (setq extras (append extras (list "--es" "title" value))))
+          ("--user-agent" (setq fields (append fields (list (concat "User-Agent: " value)))))
+          ("--referrer" (setq fields (append fields (list (concat "Referer: " value))))))))
+    (dolist (field fields)
+      (unless (and (not (string-match-p "[\r\n\000]" field))
+                   (string-match "\\`\\([^:]+\\):[ \t]*\\(.*\\)\\'" field))
+        (user-error "Invalid HTTP header"))
+      (let ((name (match-string 1 field))
+            (value (match-string 2 field)))
+        (setq name (string-trim name) value (string-trim value))
+        (unless (string-match-p "\\`[!#$%&'*+.^_`|~0-9A-Za-z-]+\\'" name)
+          (user-error "Invalid HTTP header name: %s" name))
+        ;; mpvRx trims values.  A trailing space keeps a terminal backslash
+        ;; from escaping the next array separator in Activity Manager.
+        (setq pairs (append pairs (list name (concat value " "))))))
+    (when pairs
+      (setq extras
+            (append extras
+                    (list "--esa" "headers"
+                          (mapconcat (lambda (value)
+                                       (replace-regexp-in-string "," "\\," value t t))
+                                     pairs ",")))))
+    extras))
+
+(defun zr-mpv--android-uri (file)
+  "Convert a local FILE to an encoded absolute file URI; retain other URIs."
+  (if (string-match-p "\\`[[:alpha:]][[:alnum:]+.-]*:" file)
+      file
+    (concat "file://" (url-hexify-string (expand-file-name file)
+                                       (cons ?/ url-unreserved-chars)))))
+
+(defun zr-mpv-play-android (files &optional args headers)
+  "Play FILES in mpvRx via `zr-mpv-android-am-program'.
+Single media URIs are opened directly.  Multiple files are served as a
+temporary /playlist.m3u8 so mpvRx can import its native playback queue.
+HEADERS is an alist or a list of HTTP header strings.  Supported ARGS
+are documented in `zr-mpv--android-extras'; other mpv arguments signal
+an error.  Desktop `zr-mpv-default-arguments' are not applied."
+  (let* ((items (mapcar #'zr-mpv--android-uri
+                        (or (zr-mpv-normalize-files files) (user-error "No files to play"))))
+         (extras (zr-mpv--android-extras args headers))
+         (server (when (cdr items) (zr-mpv--serve-playlist-items items)))
+         (uri (if server
+                  (format "http://127.0.0.1:%d/playlist.m3u8" (process-contact server :service))
+                (car items)))
+         started)
+    (unwind-protect
+        (with-temp-buffer
+          (let* ((coding-system-for-read 'utf-8-unix)
+                 (coding-system-for-write 'utf-8-unix)
+                 (status (apply #'call-process zr-mpv-android-am-program nil '(t t) nil
+                                (append (list "start" "-a" "android.intent.action.VIEW"
+                                              "-t" "video/any" "-p" zr-mpv-android-package
+                                              "-d" uri)
+                                        extras))))
+            (unless (and (eq status 0)
+                         (not (string-match-p "^Error:" (buffer-string))))
+              (user-error "Could not start mpvRx (%s): %s" status (string-trim (buffer-string))))
+            (setq started t)
+            status))
+      (when (and server (not started) (process-live-p server))
+        (delete-process server)))))
 
 ;;; Backend Selection & Dispatcher
 

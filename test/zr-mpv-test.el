@@ -288,8 +288,8 @@
       (when (process-live-p client)
         (delete-process client)))))
 
-(ert-deftest zr-mpv-test-serve-playlist-and-android-proc ()
-  "Test M3U8 temporary server provides valid HTTP response and android am call."
+(ert-deftest zr-mpv-test-serve-playlist-response ()
+  "The temporary M3U8 server returns an HTTP playlist response."
   (let* ((zr-mpv-path-transform-alist '(("\\`http://" . "http://cache/")))
          (server (zr-mpv-serve-playlist '("http://stream/1.mp4") 10))
          (port (process-contact server :service))
@@ -309,29 +309,76 @@
           (should (string-search "application/vnd.apple.mpegurl" received-response))
           (should (string-search "#EXTM3U\nhttp://cache/stream/1.mp4\n" received-response)))
       (when (process-live-p server)
-        (delete-process server))))
+        (delete-process server)))))
 
-  ;; Test zr-mpv-play-android command call
+(ert-deftest zr-mpv-test-android-single-uri-and-intent-extras ()
+  "A single media URI needs no server and carries headers as flat pairs."
   (let ((zr-mpv-path-transform-alist '(("\\`http://" . "http://cache/")))
-        (serve (symbol-function 'zr-mpv-serve-playlist))
-        server call-args)
-    (cl-letf (((symbol-function 'zr-mpv-serve-playlist)
-               (lambda (files &optional timeout)
-                 (setq server (funcall serve files (or timeout 0)))))
+        call-args)
+    (cl-letf (((symbol-function 'zr-mpv--serve-playlist-items)
+               (lambda (&rest _) (ert-fail "Unexpected playlist server")))
               ((symbol-function 'call-process)
-               (lambda (prog &rest args)
-                 (setq call-args (cons prog args))
-                 0)))
+               (lambda (program _in _out _display &rest args)
+                 (setq call-args (cons program args)) 0)))
+      (should (= 0 (zr-mpv-play-android
+                    '("http://stream/中文.mp4")
+                    '("--start=01:02.5" "--force-media-title" "中文 标题"
+                      "--user-agent=custom" "--referrer=https://example.org/")
+                    '(("Authorization" . "Bearer fixture")
+                      ("Accept" . "video/mp4,video/webm")
+                      ("X-Trailing" . "backslash\\")))))
+      (should (equal "termux-am" (car call-args)))
+      (should (member "android.intent.action.VIEW" call-args))
+      (should (member "app.gyrolet.mpvrx" call-args))
+      (should (equal (cadr (member "-d" call-args)) "http://cache/stream/中文.mp4"))
+      (should (equal (cadr (member "position" call-args)) "62500"))
+      (should (equal (cadr (member "title" call-args)) "中文 标题"))
+      (should (equal (cadr (member "headers" call-args))
+                     "Authorization,Bearer fixture ,Accept,video/mp4\\,video/webm ,X-Trailing,backslash\\ ,User-Agent,custom ,Referer,https://example.org/ ")))))
+
+(ert-deftest zr-mpv-test-android-playlist-normalizes-once ()
+  "Multiple files use an M3U8 URL, preserve order and transform once."
+  (let ((zr-mpv-path-transform-alist '(("\\`http://" . "http://cache/")))
+        (serve (symbol-function 'zr-mpv--serve-playlist-items))
+        server call-args)
+    (cl-letf (((symbol-function 'zr-mpv--serve-playlist-items)
+               (lambda (items &optional _timeout)
+                 (setq server (funcall serve items 0))))
+              ((symbol-function 'call-process)
+               (lambda (_program _in _out _display &rest args)
+                 (setq call-args args) 0)))
       (unwind-protect
           (progn
-            (zr-mpv-play-android '("http://stream/中文.mp4"))
-            (should (equal "termux-am" (car call-args)))
-            (should (member "android.intent.action.VIEW" call-args))
-            (should (member "is.xyz.mpv.ytdl" call-args))
-            (should (string-search "#EXTM3U\nhttp://cache/stream/中文.mp4\n"
+            (zr-mpv-play-android '("http://stream/中文.mp4" "/storage/emulated/0/a #b.mp4"))
+            (should (string-suffix-p "/playlist.m3u8" (cadr (member "-d" call-args))))
+            (should (string-search "#EXTM3U\nhttp://cache/stream/中文.mp4\nfile:///storage/emulated/0/a%20%23b.mp4\n"
                                    (zr-mpv-test--read-playlist server))))
-        (when (and server (process-live-p server))
-          (delete-process server))))))
+        (when (and server (process-live-p server)) (delete-process server))))))
+
+(ert-deftest zr-mpv-test-android-rejects-invalid-input-before-serving ()
+  "Unsupported options and malformed headers fail before allocating a server."
+  (cl-letf (((symbol-function 'zr-mpv--serve-playlist-items)
+             (lambda (&rest _) (ert-fail "Unexpected playlist server"))))
+    (should-error (zr-mpv-play-android nil) :type 'user-error)
+    (should-error (zr-mpv-play-android '("https://example.org/a" "https://example.org/b")
+                                      "--speed=2") :type 'user-error)
+    (dolist (value '("-10" "abc" "3000000"))
+      (should-error (zr-mpv-play-android '("https://example.org/a") (list (concat "--start=" value)))
+                    :type 'user-error))
+    (should-error (zr-mpv-play-android '("https://example.org/a") '("--title")) :type 'user-error)
+    (should-error (zr-mpv-play-android '("https://example.org/a") nil '("Broken")) :type 'user-error)
+    (should-error (zr-mpv-play-android '("https://example.org/a") nil '("X-Test: x\r\ny")) :type 'user-error)))
+
+(ert-deftest zr-mpv-test-android-launch-failure-cleans-server ()
+  "A failed Activity Manager launch releases its temporary server."
+  (let ((serve (symbol-function 'zr-mpv--serve-playlist-items)) server)
+    (cl-letf (((symbol-function 'zr-mpv--serve-playlist-items)
+               (lambda (items &optional _timeout) (setq server (funcall serve items 0))))
+              ((symbol-function 'call-process)
+               (lambda (&rest _) (insert "Error: Activity not found") 0)))
+      (should-error (zr-mpv-play-android '("https://example.org/a" "https://example.org/b"))
+                    :type 'user-error)
+      (should-not (process-live-p server)))))
 
 ;;; DWIM File Collection
 
