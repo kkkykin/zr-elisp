@@ -69,7 +69,11 @@ Emacs reads the same files through a WSL mount."
   '((modelofluna
      (name "%s" .word)
      (front "%s\n%s" .example_sentence .screenshot)
-     (back "%s\n\n%s" .remarks dictionary))
+     (back "%s\n%s" .remarks dictionary))
+    (TampermonkeyWord
+     (name "%s" .word)
+     (front "%s" .sentence)
+     (back "%s\n%s" .translation dictionary))
     (t . zr-org-srs-x-render-default-note))
   "Renderers selected by an Anki note's modelName.
 Keys are model names as strings or symbols; t supplies the fallback and
