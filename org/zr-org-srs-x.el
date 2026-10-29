@@ -67,12 +67,9 @@ Emacs reads the same files through a WSL mount."
 
 (defcustom zr-org-srs-x-model-alist
   '((modelofluna
-     . ((name . ("%s" .word))
-        (front . ("%s\n\n%s\n\n%s\n\n%s\n\n%s"
-                  .word .example_sentence .audio_for_word
-                  .audio_for_example_sentence .screenshot))
-        (back . ("%s\n\n%s\n\n%s\n\n%s"
-                 .rubytextHtml .remarks .user_custom_1 dictionary))))
+     (name "%s" .word)
+     (front "%s\n%s" .example_sentence .screenshot)
+     (back "%s\n\n%s" .remarks dictionary))
     (t . zr-org-srs-x-render-default-note))
   "Renderers selected by an Anki note's modelName.
 Keys are model names as strings or symbols; t supplies the fallback and
