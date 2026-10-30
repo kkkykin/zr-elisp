@@ -12,5 +12,6 @@
 - **专注业务**: `.claude/.env` 等 dotfile 作为环境文件不需要特别关注。
 - **重构勿兼容旧代码**：改动时不必为旧代码做兼容处理，保持代码干净简洁。
 - **常用操作用 Makefile**：`make test/check-parens/byte-compile/clean` 等，具体见 `Makefile`。
+- **图标**：需要图标时，从 Emacs 自带的 `etc/images` 目录中查找。
 - **业务文件独立**：每个业务代码文件尽量保持独立。
 - **自定义**: 默认不影响 emacs 本身工作环境，根据功能决定是否 hook/custom/command。

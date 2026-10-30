@@ -1,4 +1,4 @@
-;;; zr-org-srs-x.el --- AnkiConnect capture for Org-srs -*- lexical-binding: t; -*-
+;;; zr-org-srs-x.el --- AnkiConnect capture and TTS for Org-srs -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "30.2") (org-srs "0.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -14,6 +14,8 @@
 ;; `zr-org-srs-x-protocol-mode' for org-protocol://srs-card requests.
 ;; Add `zr-org-srs-x-capture-template' to `org-capture-templates' to capture
 ;; selected dictionaries from a zr-dictionary result buffer as one card.
+;; During review, a buffer-local TTS tool-bar button speaks the card title;
+;; a prefix argument speaks Front instead, using Termux or Windows TTS.
 ;; Original fields and Anki HTML/CSS/JavaScript templates are discarded.
 ;; Loading this library does not start the server or load Org-srs.
 
@@ -30,14 +32,20 @@
 
 (declare-function org-srs-item-new "org-srs-item" (type &rest args))
 (declare-function org-srs-review-start "org-srs-review" (&optional source))
+(declare-function org-srs-review-add-hook-once "org-srs-review"
+                  (hook function &optional depth local))
+(declare-function org-srs-item-marker "org-srs-item" (item &optional id buffer))
+(declare-function org-srs-item-card-regions "org-srs-item-card" ())
+(declare-function tool-bar-local-item "tool-bar" (icon def key map &rest props))
 (declare-function org-protocol-parse-parameters "org-protocol"
                   (info &optional new-style default-order))
 (declare-function org-capture-get "org-capture" (property &optional local))
 (declare-function org-capture-put "org-capture" (&rest elements))
 (defvar org-protocol-protocol-alist)
 (defvar org-capture-entry)
+(defvar org-srs-review-item)
 (defgroup zr-org-srs-x nil
-  "Capture AnkiConnect notes as Org-srs cards."
+  "Capture AnkiConnect notes and review Org-srs cards."
   :group 'org
   :prefix "zr-org-srs-x-")
 
@@ -115,11 +123,27 @@ Render in the deck buffer after dictionary lookup and attachment import."
   "Maximum HTTP request body size in bytes."
   :type 'integer)
 
+(defcustom zr-org-srs-x-tts-function #'zr-org-srs-x--tts-speak
+  "Function called with card text by `zr-org-srs-x-tts'.
+The default uses termux-tts-speak when available, otherwise Windows
+PowerShell, including powershell.exe accessible from WSL."
+  :type 'function)
+
+(defcustom zr-org-srs-x-tts-termux-arguments '("-s" "MUSIC")
+  "Arguments to termux-tts-speak, which receives the text on stdin.
+For example, add -l ja for Japanese or -r 0.8 for a slower rate."
+  :type '(repeat string))
+
+(defcustom zr-org-srs-x-tts-windows-voice nil
+  "Installed Windows System.Speech voice name, or nil for the default."
+  :type '(choice (const :tag "System default" nil) string))
+
 (defvar zr-org-srs-x--server nil)
 (defvar zr-org-srs-x--clients nil)
 (defvar zr-org-srs-x--models (make-hash-table :test #'equal))
 (defvar zr-org-srs-x--last-id nil)
 (defvar zr-org-srs-x--protocol-entry nil)
+(defvar-local zr-org-srs-x--review-tool-bar nil)
 
 (defun zr-org-srs-x--new-id ()
   "Generate a strictly monotonic integer ID compatible with Anki."
@@ -804,6 +828,114 @@ Only the v6 capture actions documented in org/README.md are supported."
   (interactive)
   (require 'org-srs)
   (org-srs-review-start (expand-file-name zr-org-srs-x-directory)))
+
+(defun zr-org-srs-x--tts-speak (text)
+  "Speak TEXT asynchronously using Termux or Windows System.Speech."
+  (let* ((termux (executable-find "termux-tts-speak"))
+         (powershell (unless termux
+                       (or (executable-find "powershell.exe")
+                           (and (eq system-type 'windows-nt)
+                                (executable-find "powershell")))))
+         (command
+          (cond
+           (termux (cons termux zr-org-srs-x-tts-termux-arguments))
+           (powershell
+            (let ((script
+                   (concat
+                    "$ErrorActionPreference = 'Stop'; "
+                    "Add-Type -AssemblyName System.Speech; "
+                    "$speech = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                    "try { "
+                    (when zr-org-srs-x-tts-windows-voice
+                      (format "$speech.SelectVoice('%s'); "
+                              (string-replace "'" "''" zr-org-srs-x-tts-windows-voice)))
+                    (format "$speech.Speak('%s') " (string-replace "'" "''" text))
+                    "} finally { $speech.Dispose() }")))
+              (list powershell "-NoProfile" "-NonInteractive" "-EncodedCommand"
+                    (base64-encode-string (encode-coding-string script 'utf-16le) t))))
+           (t (user-error "TTS requires termux-tts-speak or Windows PowerShell"))))
+         (process
+          (make-process
+           :name "zr-org-srs-x-tts" :buffer "*zr-org-srs-x-tts*"
+           :command command :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :sentinel
+           (lambda (process event)
+             (when (and (memq (process-status process) '(exit signal))
+                        (not (zerop (process-exit-status process))))
+               (message "TTS failed: %s (see *zr-org-srs-x-tts*)"
+                        (string-trim event)))))))
+    (when termux
+      (process-send-string process text)
+      (process-send-eof process))
+    process))
+
+;;;###autoload
+(defun zr-org-srs-x-tts (&optional front)
+  "Speak the current card's name, or its Front body when FRONT is non-nil.
+Interactively, a prefix argument selects Front.  During review, use the
+review item even if point has moved within the buffer."
+  (interactive "P")
+  (unless (derived-mode-p 'org-mode)
+    (user-error "This command requires an Org buffer"))
+  (require 'org-srs-item-card)
+  (let ((text
+         (save-excursion
+           (save-restriction
+             (widen)
+             (when (bound-and-true-p org-srs-review-item)
+               (goto-char (apply #'org-srs-item-marker org-srs-review-item)))
+             (org-back-to-heading t)
+             (while (and (not (zr-org-srs-x--note-id)) (org-up-heading-safe)))
+             (unless (zr-org-srs-x--note-id)
+               (user-error "No zr-org-srs-x card found"))
+             (if front
+                 (let ((region (cl-nth-value 0 (org-srs-item-card-regions))))
+                   (narrow-to-region (car region) (cdr region))
+                   (goto-char (point-min))
+                   (when (org-at-heading-p)
+                     (forward-line 1)
+                     (org-end-of-meta-data t))
+                   (buffer-substring-no-properties (point) (point-max)))
+               (org-get-heading t))))))
+    (setq text
+          (string-trim
+           (org-link-display-format
+            (replace-regexp-in-string
+             "\\[\\[\\(?:file\\|attachment\\):[^]\n]*\\]\\]" "" text))))
+    (when (string-empty-p text)
+      (user-error "Card %s has no text to speak" (if front "Front" "name")))
+    (funcall zr-org-srs-x-tts-function text)))
+
+(defun zr-org-srs-x--review-tool-bar-remove ()
+  "Restore the current buffer's tool bar after review."
+  (when zr-org-srs-x--review-tool-bar
+    (if (car zr-org-srs-x--review-tool-bar)
+        (setq-local tool-bar-map (cdr zr-org-srs-x--review-tool-bar))
+      (kill-local-variable 'tool-bar-map))
+    (setq zr-org-srs-x--review-tool-bar nil)
+    (force-mode-line-update)))
+
+(defun zr-org-srs-x--review-tool-bar-add (&rest _)
+  "Add the TTS button to the current review buffer's tool bar."
+  (when (and (bound-and-true-p org-srs-review-item)
+             (not zr-org-srs-x--review-tool-bar))
+    (require 'tool-bar)
+    (setq zr-org-srs-x--review-tool-bar
+          (cons (local-variable-p 'tool-bar-map) tool-bar-map))
+    (setq-local tool-bar-map
+                (if (keymapp tool-bar-map) (copy-keymap tool-bar-map)
+                  (make-sparse-keymap)))
+    (tool-bar-local-item
+     "mpc/play" #'zr-org-srs-x-tts 'zr-org-srs-x-tts tool-bar-map
+     :label "TTS" :help "Speak card name (C-u: Front)")
+    ;; A session can move between deck buffers; quitting skips finish-hook.
+    (org-srs-review-add-hook-once
+     'org-srs-review-continue-hook #'zr-org-srs-x--review-tool-bar-remove 30)))
+
+(with-eval-after-load 'org-srs-review
+  (add-hook 'org-srs-review-start-hook #'zr-org-srs-x--review-tool-bar-add)
+  (add-hook 'org-srs-item-before-review-hook #'zr-org-srs-x--review-tool-bar-add)
+  (add-hook 'org-srs-review-finish-hook #'zr-org-srs-x--review-tool-bar-remove))
 
 (defun zr-org-srs-x--current-deck ()
   "Return the current buffer's deck name, or nil outside a deck Org file."
