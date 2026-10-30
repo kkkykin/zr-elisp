@@ -824,7 +824,12 @@
                 "150 1 definition\r\n151 \"猫\" edict \"English\"\r\ncat from DICT\r\n.\r\n250 ok\r\n"
               "150 1 definition\r\n151 \"猫\" local \"日本語\"\r\n猫の定義 from DICT\r\n.\r\n250 ok\r\n")))
     (dolist (deck '("英語" "日本語" "英語::directory"))
-     (let* ((note (zr-org-srs-x-test--note deck))
+     (let* ((zr-org-srs-x-model-alist
+             '((modelofluna
+                (name "%s" .word)
+                (front "%s" .example_sentence)
+                (back "%s\n%s\n%s\n%s" .rubytextHtml .remarks .user_custom_1 dictionary))))
+            (note (zr-org-srs-x-test--note deck))
             (safe-local-variable-values
              (append '((zr-dictionary-dictionaries . ((:server t :port t :dictionary edict)))
                        (zr-dictionary-dictionaries . ((:server t :port t :dictionary "local"))))
@@ -1170,7 +1175,12 @@
   (zr-org-srs-x-test--with-decks
    (zr-org-srs-x-test--create-model)
    (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
-   (let* ((source (expand-file-name "audio.mp3"))
+   (let* ((zr-org-srs-x-model-alist
+           '((modelofluna
+              (name "%s" .word)
+              (front "%s\n%s" .screenshot .audio_for_word)
+              (back . ""))))
+          (source (expand-file-name "audio.mp3"))
           (bytes (unibyte-string 0 255 128 10))
           (note (zr-org-srs-x-test--note "lunadeck")))
      (with-current-buffer (zr-org-srs-x--buffer (zr-org-srs-x--deck-file "lunadeck"))
@@ -1364,7 +1374,12 @@
      (zr-org-srs-x-test--create-model)
      (zr-org-srs-x-test--call "createDeck" "deck" "lunadeck")
      (zr-dictionary-test-with-server
-      (let ((zr-dictionary-dictionaries (list (list :server t :port t :dictionary (list database 'similar)))))
+      (let ((zr-dictionary-dictionaries (list (list :server t :port t :dictionary (list database 'similar))))
+            (zr-org-srs-x-model-alist
+             '((modelofluna
+                (name "%s" .word)
+                (front "%s" .word)
+                (back "%s" dictionary)))))
         (setq dictionary-response-function
               (lambda (command)
                 (cond
