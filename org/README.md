@@ -360,18 +360,19 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 切换卡片、退出或完成复习时恢复原工具栏；工具栏的显示仍由 `tool-bar-mode` 控制。
 正文链接使用描述文本，没有描述的 `file:` / `attachment:` 链接会跳过。
 
-Android 使用 PATH 中的 `termux-tts-speak`，文本通过 UTF-8 stdin 传入，
-默认使用 `MUSIC` 音频流；需有可用的 Termux:API。
-Windows 使用 `powershell.exe` 调用 `System.Speech`，也支持 WSL 中可访问的
-Windows PowerShell。播放异步执行，错误输出在 `*zr-org-srs-x-tts*` 中查看。
+Android 由 `zr-termux-tts-speak` 调用 PATH 中的 `termux-tts-speak`，
+文本通过 UTF-8 stdin 传入，默认使用 `MUSIC` 音频流；需有可用的 Termux:API。
+Windows 由 `zr-windows-tts-speak` 使用 `powershell.exe` 调用 `System.Speech`，
+也支持 WSL 中可访问的 Windows PowerShell。平台模块按需加载，播放异步执行，错误输出分别在
+`*zr-termux-tts*` / `*zr-windows-tts*` 中查看。
 可按语言调整参数或选择已安装的 Windows voice：
 
 ```elisp
-(setq zr-org-srs-x-tts-termux-arguments '("-s" "MUSIC" "-l" "ja" "-r" "0.8"))
-(setq zr-org-srs-x-tts-windows-voice "Microsoft Haruka Desktop")
+(setq zr-termux-tts-arguments '("-s" "MUSIC" "-l" "ja" "-r" "0.8"))
+(setq zr-windows-tts-voice "Microsoft Haruka Desktop")
 ```
 
-`zr-org-srs-x-tts-windows-voice` 默认为 `nil`，使用系统默认 voice。
+`zr-windows-tts-voice` 默认为 `nil`，使用系统默认 voice。
 需要其他后端时，将 `zr-org-srs-x-tts-function` 设为接收一个文本参数的函数。
 
 用 `zr-org-srs-x-model-alist` 按 Anki 的 `modelName` 配置卡片内容。

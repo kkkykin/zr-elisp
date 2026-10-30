@@ -6,6 +6,43 @@
 (require 'cl-lib)
 (require 'zr-windows)
 
+(ert-deftest zr-windows-test-tts-unicode-and-literal-quotes ()
+  (let ((system-type 'gnu/linux)
+        (zr-windows-tts-voice "Voice's name") command)
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (name) (when (equal name "powershell.exe") "/windows/powershell.exe")))
+              ((symbol-function 'make-process)
+               (lambda (&rest options) (setq command (plist-get options :command)))))
+      (zr-windows-tts-speak "猫'); throw 'injected\n$literal `text"))
+    (should (equal (cl-subseq command 0 4)
+                   '("/windows/powershell.exe" "-NoProfile" "-NonInteractive" "-EncodedCommand")))
+    (let ((script (decode-coding-string (base64-decode-string (nth 4 command)) 'utf-16le)))
+      (should (string-match-p (regexp-quote "$speech.SelectVoice('Voice''s name')") script))
+      (should (string-match-p
+               (regexp-quote "$speech.Speak('猫''); throw ''injected\n$literal `text')") script))
+      (should (string-match-p (regexp-quote "finally { $speech.Dispose() }") script)))))
+
+(ert-deftest zr-windows-test-tts-native-powershell-and-unavailable-backend ()
+  (let ((zr-windows-tts-voice nil))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (name) (when (equal name "powershell") "/windows/powershell"))))
+      (let ((system-type 'windows-nt) command)
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest options)
+                     (setq command (plist-get options :command))
+                     'tts-process)))
+          (should (eq (zr-windows-tts-speak "猫") 'tts-process)))
+        (should (equal (car command) "/windows/powershell"))
+        (should-not
+         (string-match-p "SelectVoice"
+                         (decode-coding-string (base64-decode-string (nth 4 command))
+                                               'utf-16le))))
+      ;; Linux PowerShell cannot supply Windows System.Speech.
+      (let ((system-type 'gnu/linux))
+        (should-error (zr-windows-tts-speak "猫") :type 'user-error))))
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+    (should-error (zr-windows-tts-speak "猫") :type 'user-error)))
+
 (ert-deftest zr-windows-test-coding-keeps-remote-behavior ()
   (let ((default-directory "/ssh:example.org:/tmp/")
         calls)

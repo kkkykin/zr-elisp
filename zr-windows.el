@@ -1,4 +1,4 @@
-;;; zr-windows.el --- Windows shell, archive and IME helpers -*- lexical-binding: t; -*-
+;;; zr-windows.el --- Windows shell, TTS, archive and IME helpers -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "30.2"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -12,6 +12,7 @@
 ;; OneDrive, elevation scripts or environment changes are performed here.
 ;; For "moyu", enable `zr-windows-ime-mode' in selected buffers and use
 ;; `zr-windows-quit-ime-buffers' to hide their windows without killing them.
+;; TTS uses Windows PowerShell, including when accessible from WSL.
 
 ;;; Code:
 
@@ -31,6 +32,10 @@
   "Normal shell to switch back to; nil captures the current setting on first use."
   :type '(choice (const nil) file))
 
+(defcustom zr-windows-tts-voice nil
+  "Installed Windows System.Speech voice name, or nil for the default."
+  :type '(choice (const :tag "System default" nil) string))
+
 (defvar eshell-in-pipeline-p)
 
 (defvar explicit-shell-file-name)
@@ -46,6 +51,38 @@
   "Signal a useful error off Windows."
   (unless (eq system-type 'windows-nt)
     (user-error "This command requires Windows")))
+
+;;;###autoload
+(defun zr-windows-tts-speak (text)
+  "Speak TEXT asynchronously using Windows System.Speech; return the process.
+Also supports powershell.exe accessible from WSL."
+  (interactive "sText: ")
+  (let* ((program (or (executable-find "powershell.exe")
+                      (and (eq system-type 'windows-nt)
+                           (executable-find "powershell"))
+                      (user-error "Windows TTS requires Windows PowerShell")))
+         (script
+          (concat
+           "$ErrorActionPreference = 'Stop'; "
+           "Add-Type -AssemblyName System.Speech; "
+           "$speech = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+           "try { "
+           (when zr-windows-tts-voice
+             (format "$speech.SelectVoice('%s'); "
+                     (string-replace "'" "''" zr-windows-tts-voice)))
+           (format "$speech.Speak('%s') " (string-replace "'" "''" text))
+           "} finally { $speech.Dispose() }")))
+    (make-process
+     :name "zr-windows-tts" :buffer "*zr-windows-tts*"
+     :command (list program "-NoProfile" "-NonInteractive" "-EncodedCommand"
+                    (base64-encode-string (encode-coding-string script 'utf-16le) t))
+     :connection-type 'pipe :coding 'utf-8-unix :noquery t
+     :sentinel
+     (lambda (process event)
+       (when (and (memq (process-status process) '(exit signal))
+                  (not (zerop (process-exit-status process))))
+         (message "Windows TTS failed: %s (see *zr-windows-tts*)"
+                  (string-trim event)))))))
 
 (defun zr-windows-allow-loopback (package)
   "Allow the UWP PACKAGE to connect to localhost."

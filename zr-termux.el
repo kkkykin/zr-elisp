@@ -24,6 +24,12 @@
   "Termux files directory."
   :type 'directory)
 
+(defcustom zr-termux-tts-arguments '("-s" "MUSIC")
+  "Arguments to termux-tts-speak, which receives the text on stdin.
+For example, add -l ja for Japanese or -r 0.8 for a slower rate.
+Use -e with an engine name from termux-tts-engines to select an engine."
+  :type '(repeat string))
+
 (defvar zr-termux--notification-timers (make-hash-table :test #'equal))
 
 (defvar zr-termux--notification-counter 0)
@@ -73,6 +79,27 @@
          (append (when short
                    '("-s"))
                  (list text))))
+
+;;;###autoload
+(defun zr-termux-tts-speak (text)
+  "Speak TEXT asynchronously using Termux:API and return the process."
+  (interactive "sText: ")
+  (let* ((program (or (executable-find "termux-tts-speak")
+                      (user-error "termux-tts-speak is unavailable")))
+         (process
+          (make-process
+           :name "zr-termux-tts" :buffer "*zr-termux-tts*"
+           :command (cons program zr-termux-tts-arguments)
+           :connection-type 'pipe :coding 'utf-8-unix :noquery t
+           :sentinel
+           (lambda (process event)
+             (when (and (memq (process-status process) '(exit signal))
+                        (not (zerop (process-exit-status process))))
+               (message "Termux TTS failed: %s (see *zr-termux-tts*)"
+                        (string-trim event)))))))
+    (process-send-string process text)
+    (process-send-eof process)
+    process))
 
 (defun zr-termux--notification-arguments (title body options)
   "Translate notification TITLE, BODY and OPTIONS to CLI arguments."

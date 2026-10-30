@@ -30,6 +30,9 @@
 (require 'zr-dictionary)
 (require 'zr-org-link)
 
+(autoload 'zr-termux-tts-speak "zr-termux" nil t)
+(autoload 'zr-windows-tts-speak "zr-windows" nil t)
+
 (declare-function org-srs-item-new "org-srs-item" (type &rest args))
 (declare-function org-srs-review-start "org-srs-review" (&optional source))
 (declare-function org-srs-review-add-hook-once "org-srs-review"
@@ -125,18 +128,9 @@ Render in the deck buffer after dictionary lookup and attachment import."
 
 (defcustom zr-org-srs-x-tts-function #'zr-org-srs-x--tts-speak
   "Function called with card text by `zr-org-srs-x-tts'.
-The default uses termux-tts-speak when available, otherwise Windows
-PowerShell, including powershell.exe accessible from WSL."
+The default calls `zr-termux-tts-speak' when termux-tts-speak is available,
+otherwise `zr-windows-tts-speak', which also supports WSL."
   :type 'function)
-
-(defcustom zr-org-srs-x-tts-termux-arguments '("-s" "MUSIC")
-  "Arguments to termux-tts-speak, which receives the text on stdin.
-For example, add -l ja for Japanese or -r 0.8 for a slower rate."
-  :type '(repeat string))
-
-(defcustom zr-org-srs-x-tts-windows-voice nil
-  "Installed Windows System.Speech voice name, or nil for the default."
-  :type '(choice (const :tag "System default" nil) string))
 
 (defvar zr-org-srs-x--server nil)
 (defvar zr-org-srs-x--clients nil)
@@ -830,44 +824,10 @@ Only the v6 capture actions documented in org/README.md are supported."
   (org-srs-review-start (expand-file-name zr-org-srs-x-directory)))
 
 (defun zr-org-srs-x--tts-speak (text)
-  "Speak TEXT asynchronously using Termux or Windows System.Speech."
-  (let* ((termux (executable-find "termux-tts-speak"))
-         (powershell (unless termux
-                       (or (executable-find "powershell.exe")
-                           (and (eq system-type 'windows-nt)
-                                (executable-find "powershell")))))
-         (command
-          (cond
-           (termux (cons termux zr-org-srs-x-tts-termux-arguments))
-           (powershell
-            (let ((script
-                   (concat
-                    "$ErrorActionPreference = 'Stop'; "
-                    "Add-Type -AssemblyName System.Speech; "
-                    "$speech = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                    "try { "
-                    (when zr-org-srs-x-tts-windows-voice
-                      (format "$speech.SelectVoice('%s'); "
-                              (string-replace "'" "''" zr-org-srs-x-tts-windows-voice)))
-                    (format "$speech.Speak('%s') " (string-replace "'" "''" text))
-                    "} finally { $speech.Dispose() }")))
-              (list powershell "-NoProfile" "-NonInteractive" "-EncodedCommand"
-                    (base64-encode-string (encode-coding-string script 'utf-16le) t))))
-           (t (user-error "TTS requires termux-tts-speak or Windows PowerShell"))))
-         (process
-          (make-process
-           :name "zr-org-srs-x-tts" :buffer "*zr-org-srs-x-tts*"
-           :command command :connection-type 'pipe :coding 'utf-8-unix :noquery t
-           :sentinel
-           (lambda (process event)
-             (when (and (memq (process-status process) '(exit signal))
-                        (not (zerop (process-exit-status process))))
-               (message "TTS failed: %s (see *zr-org-srs-x-tts*)"
-                        (string-trim event)))))))
-    (when termux
-      (process-send-string process text)
-      (process-send-eof process))
-    process))
+  "Speak TEXT through the available platform TTS backend."
+  (if (executable-find "termux-tts-speak")
+      (zr-termux-tts-speak text)
+    (zr-windows-tts-speak text)))
 
 ;;;###autoload
 (defun zr-org-srs-x-tts (&optional front)
