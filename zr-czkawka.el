@@ -2,7 +2,7 @@
 
 ;; Author: kkkykin
 ;; Keywords: files, tools
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 
 ;;; Commentary:
 

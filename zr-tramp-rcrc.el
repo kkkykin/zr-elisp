@@ -1,6 +1,6 @@
 ;;; zr-tramp-rcrc.el --- TRAMP file access through rclone rc -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm, files
 
 ;;; Commentary:

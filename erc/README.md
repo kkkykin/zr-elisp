@@ -1,6 +1,6 @@
 # ERC modules
 
-Requires Emacs 30.1 or newer. Add this directory to `load-path` before
+Requires Emacs 31.1 or newer. Add this directory to `load-path` before
 loading a module. Loading files and setting options do not enable modules.
 Enable them with their mode commands, or list them in `erc-modules` so ERC
 enables them during setup.

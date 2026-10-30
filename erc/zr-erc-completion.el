@@ -1,6 +1,6 @@
 ;;; zr-erc-completion.el --- Complete relayed names from ERC history -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;;; Commentary:
 ;; Enable `erc-zr-completion-mode'.  At @name, TAB completes names extracted
 ;; from retained messages, including relaymsg senders absent from NAMES.

@@ -1,6 +1,6 @@
 ;;; zr-eww.el --- Optional EWW URL and rendering rules -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.2"))
+;; Package-Requires: ((emacs "31.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Source: ../emacs.d/user-lisp/init-net.el (selected functionality).
 

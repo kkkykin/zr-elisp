@@ -1,6 +1,6 @@
 ;;; zr-face.el --- Fonts, themes and faces -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: faces
 
 ;;; Commentary:

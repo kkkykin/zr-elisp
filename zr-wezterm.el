@@ -1,6 +1,6 @@
 ;;; zr-wezterm.el --- Talk to WezTerm -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm, terminals
 
 ;;; Commentary:

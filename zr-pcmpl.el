@@ -1,6 +1,6 @@
 ;;; zr-pcmpl.el --- Optional command completions -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.2"))
+;; Package-Requires: ((emacs "31.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2024
 ;; Source: ../emacs.d/user-lisp/init-pcmpl.el (selected functionality).

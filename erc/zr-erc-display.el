@@ -1,6 +1,6 @@
 ;;; zr-erc-display.el --- Local message display rules for ERC -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;;; Commentary:
 ;; Enable `erc-zr-display-mode' to rename speakers or replace captured text.
 ;; Overlays leave messages and identities intact.

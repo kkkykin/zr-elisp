@@ -1,6 +1,6 @@
 ;;; zr-org-srs-x.el --- AnkiConnect capture and TTS for Org-srs -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.2") (org-srs "0.1"))
+;; Package-Requires: ((emacs "31.1") (org-srs "0.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;;; Commentary:

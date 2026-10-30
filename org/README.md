@@ -1,7 +1,22 @@
-# zr-org-srs-x
+# Org 工具包
+
+Org 模块统一放在 `org/`，对应测试放在 `org/test/`。
+将仓库根目录和 `org/` 加入 `load-path` 后，按需加载模块：
+
+| 模块 | 功能 |
+| --- | --- |
+| `zr-org` | 列表速度命令、条目剪切、表格查询、编辑模板和动态块 |
+| `zr-org-babel` | Babel 执行、展开、结果显示和语言补全 |
+| `zr-org-tangle` | Tangle 路径、CUSTOM_ID 和 Detangle |
+| `zr-org-export` | Pandoc OPTIONS 和 LaTeX 图片路径修正 |
+| `zr-org-link` | 词典链接和 WezTerm 链接打开 |
+| `zr-org-protocol` | Windows 协议注册和 Netscape Cookie 导入 |
+| `zr-org-srs-x` | AnkiConnect 制卡、Org-srs 复习和 TTS |
+
+以下介绍 `zr-org-srs-x` 的配置与接口。
 
 让 LunaTranslator 通过 AnkiConnect v6 HTTP 接口，把词条保存为 Org-srs 卡片。
-需要 Emacs 30.2 及以上、带 libxml 支持，并已安装 `org-srs` 和它的依赖。
+需要 Emacs 31.1 及以上、带 libxml 支持，并已安装 `org-srs` 和它的依赖。
 只加载库不会启动服务；用 `M-x zr-org-srs-x-start` 开始接收制卡请求。
 
 ## 启用
@@ -470,9 +485,9 @@ file-local 或 `.dir-locals.el` 设置，遵循 Emacs 的局部变量信任规�
 模型要求非 cloze 且只有一个卡片模板，其他 AnkiConnect 操作返回错误。
 
 ```sh
-make test TEST_FILE='test/zr-dictionary-test.el org/test/zr-org-link-test.el org/test/zr-org-srs-x-test.el org/test/zr-org-protocol-test.el test/zr-module-loading-test.el'
-make check-parens FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el org/zr-org-protocol.el'
-make byte-compile FILE='zr-dictionary.el org/zr-org-link.el org/zr-org-srs-x.el org/zr-org-protocol.el'
+make test TEST_FILE='test/zr-dictionary-test.el $(wildcard org/test/*-test.el) test/zr-module-loading-test.el'
+make check-parens FILE='zr-dictionary.el $(wildcard org/*.el)'
+make byte-compile FILE='zr-dictionary.el $(wildcard org/*.el)'
 make clean
 ```
 

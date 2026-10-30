@@ -1,6 +1,6 @@
 ;;; zr-rclone.el --- Rclone RC control and file-list consumers -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1") (transient "0.4"))
+;; Package-Requires: ((emacs "31.1") (transient "0.4"))
 ;; Keywords: files, comm
 
 ;;; Commentary:

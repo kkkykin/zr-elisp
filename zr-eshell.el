@@ -1,6 +1,6 @@
 ;;; zr-eshell.el --- Eshell output and interpreter helpers -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.2"))
+;; Package-Requires: ((emacs "31.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;; Copyright (C) 2025
 ;; Author:  <kw@comhb>

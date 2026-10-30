@@ -1,6 +1,6 @@
 ;;; zr-proxy.el --- URL transformations, xget acceleration and proxy management -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm, network, hypermedia
 
 ;;; Commentary:

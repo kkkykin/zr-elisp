@@ -1,6 +1,6 @@
 ;;; zr-erc-link.el --- Org link handlers and media previews in ERC -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;;; Commentary:
 ;; Enable `erc-zr-link-mode' to turn rule matches into clickable actions.
 ;; `zr-erc-link-rules' dispatches images, downloads, ERC commands and Org

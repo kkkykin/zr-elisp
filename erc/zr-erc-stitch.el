@@ -1,6 +1,6 @@
 ;;; zr-erc-stitch.el --- Reassemble clipped ERC messages -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;;; Commentary:
 ;; Enable `erc-zr-stitch-mode'.  A fragment ending in " <clipped message>"
 ;; waits for the same sender's next message in that conversation.  Complete

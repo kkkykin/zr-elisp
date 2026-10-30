@@ -1,6 +1,6 @@
 ;;; zr-mpv.el --- Control and play media with mpv -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: multimedia, processes
 
 ;;; Commentary:

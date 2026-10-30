@@ -1,6 +1,6 @@
 ;;; zr-erc-reply.el --- IRCv3 replies for ERC -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm
 
 ;;; Commentary:

@@ -1,6 +1,6 @@
 ;;; zr-erc-common.el --- Message metadata for ERC modules -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "30.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;;; Commentary:
 ;; Shared, side-effect-free metadata and rule helpers.  Selectors match
 ;; regular expressions against :sender, :body, :text, :target, :server,

@@ -9,6 +9,7 @@
 
 ## Conventions
 
+- **Emacs 版本**：最低支持 Emacs 31.1；可使用更新的开发环境，后续发现不兼容 31.1 的地方再调整。
 - **专注业务**: `.claude/.env` 等 dotfile 作为环境文件不需要特别关注。
 - **重构勿兼容旧代码**：改动时不必为旧代码做兼容处理，保持代码干净简洁。
 - **常用操作用 Makefile**：`make test/check-parens/byte-compile/clean` 等，具体见 `Makefile`。

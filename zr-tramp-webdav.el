@@ -1,6 +1,6 @@
 ;;; zr-tramp-webdav.el --- Portable WebDAV for TRAMP -*- lexical-binding: t; -*-
 
-;; Package-Requires: ((emacs "29.1"))
+;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm, files
 
 ;;; Commentary:
