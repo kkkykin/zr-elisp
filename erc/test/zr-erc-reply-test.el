@@ -159,6 +159,28 @@
     (goto-char (point-min))
     (should-error (zr-erc-reply-jump) :type 'user-error)))
 
+(ert-deftest zr-erc-reply-filling-preserves-annotation-line ()
+  (require 'erc-fill)
+  (let ((erc-modules nil)
+        (erc-fill-function #'erc-fill-variable)
+        (erc-fill-column 24))
+    (unwind-protect
+        (with-temp-buffer
+          (erc-zr-reply-mode 1)
+          (zr-erc-reply-test--insert "parent" "original")
+          (let ((start (point-max)))
+            (zr-erc-reply-test--insert "child" "one two three four five six seven" "parent")
+            (save-restriction
+              (narrow-to-region start (point-max))
+              (erc-fill)
+              (should (string-prefix-p "[↪ alice: original]\n<alice> one"
+                                       (buffer-substring-no-properties
+                                        (point-min) (point-max))))
+              (should (> (cl-count ?\n (buffer-string)) 2))
+              (should (equal (button-get (button-at start) 'zr-erc-reply-parent)
+                             "parent")))))
+      (erc-zr-reply-mode -1))))
+
 (ert-deftest zr-erc-reply-missing-parent-and-buffer-isolation ()
   (with-temp-buffer
     (zr-erc-reply-test--insert "same-id" "another conversation")

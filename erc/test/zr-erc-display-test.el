@@ -705,10 +705,13 @@
          (erc-insert-modify-hook '(erc-fill))
          (erc-insert-post-hook nil)
          (erc-send-post-hook nil))
-     (with-temp-buffer
-       (erc-mode)
-       (erc-fill-wrap-mode 1)
-       ,@body)))
+     (unwind-protect
+         (with-temp-buffer
+           (erc-mode)
+           (erc-fill-wrap-mode 1)
+           (erc-zr-reply-mode 1)
+           ,@body)
+       (erc-zr-reply-mode -1))))
 
 (defun zr-erc-display-test--wrapped (name &optional id parent outgoing)
   "Insert a relay from NAME with optional ID and PARENT through ERC hooks.
@@ -737,9 +740,7 @@ after the post hook, as `erc-insert-line' does."
             (zr-erc-reply--outgoing-insert)
             (erc-fill)
             (run-hooks 'erc-send-post-hook))
-        (when parent (zr-erc-reply--insert))
-        (run-hooks 'erc-insert-modify-hook 'erc-insert-post-hook)
-        (when id (zr-erc-reply--remember)))
+        (run-hooks 'erc-insert-modify-hook 'erc-insert-post-hook))
       (add-text-properties start (1+ start)
                            (map-into erc--msg-props 'plist)))
     (setq erc-insert-marker (copy-marker (point-max)))
@@ -807,11 +808,16 @@ Measure a separate buffer containing the literal rendered text."
       (zr-erc-display-test--wrapped "終🍥" "parent")
       (let ((child (zr-erc-display-test--wrapped "Other" "child" "parent")))
         (erc-zr-display-mode 1)
-        (should (equal (get-text-property child 'line-prefix)
-                       (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello]\n<Other> ")))
+        (should (equal (get-char-property child 'line-prefix)
+                       '(space :width erc-fill--wrap-value)))
+        (should (equal (get-char-property (1+ (button-end (button-at child))) 'line-prefix)
+                       (zr-erc-display-test--wrap-prefix "<Other> ")))
         (let ((outgoing (zr-erc-display-test--wrapped "Local" nil "parent" t)))
-          (should (equal (get-text-property outgoing 'line-prefix)
-                         (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello]\n<me> ")))
+          (should (equal (get-char-property outgoing 'line-prefix)
+                         '(space :width erc-fill--wrap-value)))
+          (should (equal (get-char-property
+                          (1+ (button-end (button-at outgoing))) 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "<me> ")))
           (let ((before (buffer-string)))
             (erc-fill-wrap-refill-buffer nil)
             (should (equal (buffer-string) before))
@@ -822,12 +828,65 @@ Measure a separate buffer containing the literal rendered text."
           (should (equal (get-text-property child 'wrap-prefix)
                          '(space :width erc-fill--wrap-value)))
           (erc-zr-display-mode -1)
-          (should (equal (get-text-property child 'line-prefix)
-                         (zr-erc-display-test--wrap-prefix
-                          "[↪ bot: [終🍥] hello]\n<bot> ")))
-          (should (equal (get-text-property outgoing 'line-prefix)
-                         (zr-erc-display-test--wrap-prefix
-                          "[↪ bot: [終🍥] hello]\n<me> "))))))))
+          (should (equal (get-char-property child 'line-prefix)
+                         '(space :width erc-fill--wrap-value)))
+          (should (equal (get-char-property
+                          (1+ (button-end (button-at child))) 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "<bot> ")))
+          (should (equal (get-char-property
+                          (1+ (button-end (button-at outgoing))) 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "<me> "))))))))
+
+(ert-deftest zr-erc-display-wrap-reply-keeps-annotation-when-merging ()
+  (dolist (erc-fill-wrap-use-pixels '(nil t))
+    (zr-erc-display-test--with-wrap
+      (setq-local erc-fill-wrap-merge t)
+      (zr-erc-display-test--wrapped "Original" "parent")
+      (let* ((child (zr-erc-display-test--wrapped "Reply" "child" "parent"))
+             (body (1+ (button-end (button-at child)))))
+        (dolist (repair '(nil t))
+          (erc-fill-wrap-refill-buffer repair)
+          (should-not (get-char-property child 'display))
+          (should-not (text-property-not-all child body 'erc-fill--wrap-merge nil))
+          (should (equal (get-char-property child 'line-prefix)
+                         '(space :width erc-fill--wrap-value)))
+          (should (equal (get-char-property body 'display) ""))
+          (should (equal (marker-position erc-fill--wrap-last-msg) child))
+          (should (= (length (cl-remove-if-not
+                             (lambda (ov) (overlay-get ov 'zr-erc-reply-wrap))
+                             (overlays-in child body)))
+                     1)))
+        ;; The next message must still merge against the reply's metadata.
+        (let ((next (zr-erc-display-test--wrapped "Next" "next")))
+          (should (equal (get-char-property next 'display) "")))
+        (goto-char body)
+        (zr-erc-reply-jump)
+        (should (= (point) (zr-erc-reply--find "parent")))))))
+
+(ert-deftest zr-erc-display-wrap-reply-margin-timestamps ()
+  (dolist (stamp-function '(erc-insert-timestamp-left erc-insert-timestamp-right))
+    (zr-erc-display-test--with-wrap
+      (let ((erc-timestamp-only-if-changed-flag nil)
+            (zr-erc-display-rules
+             '((:source body :regexp "\\[\\([^]]+\\)\\] "
+                :replace-sender "\\1" :replace-text ""))))
+        (add-hook 'erc-insert-post-hook
+                  (lambda () (funcall stamp-function (copy-sequence "[00:00]"))) 70)
+        (zr-erc-display-test--wrapped "Original" "parent")
+        (let* ((child (zr-erc-display-test--wrapped "Other" "child" "parent"))
+               (button (next-button child t))
+               (body (1+ (button-end button)))
+               (original (buffer-substring-no-properties child (point-max))))
+          (dotimes (_ 2)
+            (should (equal (get-char-property child 'line-prefix)
+                           '(space :width erc-fill--wrap-value)))
+            (should (equal (get-char-property body 'line-prefix)
+                           (zr-erc-display-test--wrap-prefix "<bot> ")))
+            (erc-fill-wrap-refill-buffer nil))
+          (erc-zr-display-mode 1)
+          (should (equal (get-char-property body 'line-prefix)
+                         (zr-erc-display-test--wrap-prefix "<Other> ")))
+          (should (equal (buffer-substring-no-properties child (point-max)) original)))))))
 
 (ert-deftest zr-erc-display-wrap-margin-timestamps ()
   (dolist (stamp-function '(erc-insert-timestamp-left erc-insert-timestamp-right))

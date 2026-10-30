@@ -48,6 +48,7 @@
 (defvar erc-zr-reply-mode)
 (defvar erc-message-parsed nil)
 (defvar erc-server-CAP-functions nil)
+(defvar erc-fill--wrap-last-msg)
 (defvar zr-erc-reply--cap-hook nil)
 (defvar zr-erc-reply--installed nil)
 (defvar zr-erc-reply--outgoing nil
@@ -279,6 +280,45 @@ Retain the original context on the nickname for optional display overlays."
     (put-text-property (point-min) (point-max) 'zr-erc-reply-parent
                        (cdr zr-erc-reply--outgoing))))
 
+(defun zr-erc-reply--align-annotation ()
+  "Include any leading margin timestamp in the annotation's wrap overlay."
+  (dolist (overlay (overlays-in (point-min) (point-max)))
+    (when (overlay-get overlay 'zr-erc-reply-wrap)
+      (move-overlay overlay (point-min) (overlay-end overlay)))))
+
+(defun zr-erc-reply--fill (original)
+  "Call filling function ORIGINAL on the message after its reply annotation.
+Keep the annotation outside filling and speaker merging.  For `fill-wrap',
+align it with the body column using an overlay.  The underlying prefixes
+stay uniform so ERC's native refiller still visits the whole message."
+  (if-let* ((start (point-min))
+            (annotation (if (eq (get-text-property start 'field) 'erc-timestamp)
+                            (next-single-property-change start 'field nil (point-max))
+                          start))
+            (button (button-at annotation))
+            ((button-get button 'zr-erc-reply-parent))
+            (body (1+ (button-end button)))
+            ((< body (point-max))))
+      (prog1
+          (save-restriction
+            (narrow-to-region body (point-max))
+            (funcall original))
+        ;; ERC stores metadata at the start of the complete message.
+        (when (and (bound-and-true-p erc-fill--wrap-last-msg)
+                   (equal (marker-position erc-fill--wrap-last-msg) body))
+          (set-marker erc-fill--wrap-last-msg start))
+        (when-let* ((prefix (get-text-property body 'line-prefix)))
+          (add-text-properties
+           start body (list 'line-prefix prefix
+                            'wrap-prefix (get-text-property body 'wrap-prefix)))
+          (remove-overlays start body 'zr-erc-reply-wrap t)
+          (let ((overlay (make-overlay start body nil t nil)))
+            (overlay-put overlay 'zr-erc-reply-wrap t)
+            (overlay-put overlay 'evaporate t)
+            (overlay-put overlay 'line-prefix
+                         '(space :width erc-fill--wrap-value)))))
+    (funcall original)))
+
 ;;;###autoload
 (defun zr-erc-reply (text)
   "Reply with literal TEXT to the message at point.
@@ -325,15 +365,19 @@ split by ERC's length limit) references the same original message."
     (erc-server-send . zr-erc-reply--send)
     (erc-display-msg . zr-erc-reply--local-display)
     (erc--send-action-display . zr-erc-reply--local-display)
-    (erc-display-message . zr-erc-reply--display-message)))
+    (erc-display-message . zr-erc-reply--display-message)
+    (erc-fill . zr-erc-reply--fill)
+    (erc-fill-wrap . zr-erc-reply--fill)))
 
 (defconst zr-erc-reply--hooks
   '((erc-after-connect zr-erc-reply--negotiate 0)
     (erc--server-post-connect-hook zr-erc-reply--reset 0)
     (erc-disconnected-hook zr-erc-reply--reset 0)
     (erc-insert-modify-hook zr-erc-reply--insert -90)
+    (erc-insert-post-hook zr-erc-reply--align-annotation 80)
     (erc-insert-post-hook zr-erc-reply--remember 90)
-    (erc-send-modify-hook zr-erc-reply--outgoing-insert -90)))
+    (erc-send-modify-hook zr-erc-reply--outgoing-insert -90)
+    (erc-send-post-hook zr-erc-reply--align-annotation 80)))
 
 (defun zr-erc-reply--install ()
   "Install transport and display integration exactly once."

@@ -27,8 +27,10 @@ to `erc-modules` before connecting, or run `M-x erc-zr-display-mode`
 in an existing conversation. `erc-update-modules` skips local modules.
 
 `zr-erc-reply` implements the IRCv3 `+reply` tag. Put point on a message
-and run `M-x zr-erc-reply`. Replies show the original sender and an excerpt;
-click the excerpt or run `M-x zr-erc-reply-jump` to visit the original.
+and run `M-x zr-erc-reply`. Replies show the original sender and an excerpt
+on a separate line; click the excerpt or run `M-x zr-erc-reply-jump` to visit
+the original. With `fill-wrap`, the excerpt aligns with the body column
+and remains visible when consecutive speaker labels are merged.
 
 From the repository root:
 
