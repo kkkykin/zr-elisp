@@ -808,10 +808,10 @@ Measure a separate buffer containing the literal rendered text."
       (let ((child (zr-erc-display-test--wrapped "Other" "child" "parent")))
         (erc-zr-display-mode 1)
         (should (equal (get-text-property child 'line-prefix)
-                       (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello] <Other> ")))
+                       (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello]\n<Other> ")))
         (let ((outgoing (zr-erc-display-test--wrapped "Local" nil "parent" t)))
           (should (equal (get-text-property outgoing 'line-prefix)
-                         (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello] <me> ")))
+                         (zr-erc-display-test--wrap-prefix "[↪ 終🍥: hello]\n<me> ")))
           (let ((before (buffer-string)))
             (erc-fill-wrap-refill-buffer nil)
             (should (equal (buffer-string) before))
@@ -824,10 +824,10 @@ Measure a separate buffer containing the literal rendered text."
           (erc-zr-display-mode -1)
           (should (equal (get-text-property child 'line-prefix)
                          (zr-erc-display-test--wrap-prefix
-                          "[↪ bot: [終🍥] hello] <bot> ")))
+                          "[↪ bot: [終🍥] hello]\n<bot> ")))
           (should (equal (get-text-property outgoing 'line-prefix)
                          (zr-erc-display-test--wrap-prefix
-                          "[↪ bot: [終🍥] hello] <me> "))))))))
+                          "[↪ bot: [終🍥] hello]\n<me> "))))))))
 
 (ert-deftest zr-erc-display-wrap-margin-timestamps ()
   (dolist (stamp-function '(erc-insert-timestamp-left erc-insert-timestamp-right))

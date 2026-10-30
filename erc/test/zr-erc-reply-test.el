@@ -145,7 +145,7 @@
   (with-temp-buffer
     (zr-erc-reply-test--insert "first" "明天几点开会？")
     (zr-erc-reply-test--insert "second" "十点" "first")
-    (should (string-match-p "\\[↪ alice: 明天几点开会？\\] <alice> 十点"
+    (should (string-match-p "\\[↪ alice: 明天几点开会？\\]\n<alice> 十点"
                             (buffer-string)))
     (goto-char (zr-erc-reply--find (copy-sequence "second")))
     (should (button-at (point)))
@@ -184,7 +184,7 @@
     (zr-erc-reply-test--insert
      "r7jw8mf9znnm5ht5di9xem7v3w" "xxxx 我说呢"
      "93hudzrjsp2a92yk68q428ccb6" nil "+draft/reply")
-    (should (string-match-p "\\[↪ alice: 想说什么\\] <alice> xxxx 我说呢"
+    (should (string-match-p "\\[↪ alice: 想说什么\\]\n<alice> xxxx 我说呢"
                             (buffer-string)))
     (goto-char (zr-erc-reply--find "r7jw8mf9znnm5ht5di9xem7v3w"))
     (should (button-at (point)))

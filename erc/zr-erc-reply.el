@@ -16,7 +16,8 @@
 ;; message.  M-x zr-erc-reply-jump also works anywhere in a reply.
 ;; The sender and a short excerpt are visible without following the button:
 ;;   <alice> When shall we meet?
-;;   [↪ alice: When shall we meet?] <bob> At ten.
+;;   [↪ alice: When shall we meet?]
+;;   <bob> At ten.
 ;; No keys are installed in `erc-mode-map'.
 ;;
 ;; Implements https://ircv3.net/specs/client-tags/reply using +reply and
@@ -229,7 +230,7 @@ Retain the original context on the nickname for optional display overlays."
   (zr-erc-reply--visit (button-get button 'zr-erc-reply-parent)))
 
 (defun zr-erc-reply--annotate (parent)
-  "Insert a reply button for PARENT in the narrowed message."
+  "Insert a reply button for PARENT on its own line in the narrowed message."
   (let* ((pos (zr-erc-reply--find parent))
          (summary (and pos (save-restriction
                              (widen)
@@ -246,7 +247,7 @@ Retain the original context on the nickname for optional display overlays."
      'action #'zr-erc-reply--button 'follow-link t
      'zr-erc-reply-parent parent
      'help-echo "Visit the original message in this conversation")
-    (insert " ")))
+    (insert "\n")))
 
 (defun zr-erc-reply--insert ()
   "Annotate incoming replies before ERC fills the narrowed message."
