@@ -269,27 +269,19 @@ from `zr-face-theme-customize'."
 
 (defun zr-face-theme-list-update ()
   "Update the light and dark theme lists based on available themes.
-Automatically categorizes newly installed themes as light or dark by
-checking their background colors. Updates `zr-face-theme-light-list' and
-`zr-face-theme-dark-list' accordingly, and removes itself from the hooks it
-was run from."
+Recheck every theme's background, including classifications saved by earlier
+sessions.  Update `zr-face-theme-light-list' and `zr-face-theme-dark-list',
+then remove this function from `server-after-make-frame-hook'."
   (interactive)
-  (let ((cur (cons 'default
-                   (cl-set-difference (custom-available-themes)
-                                      zr-face-theme-disabled-list)))
-        (light (multisession-value zr-face-theme-light-list))
-        (dark (multisession-value zr-face-theme-dark-list)))
-    (unless (seq-set-equal-p cur (append light dark))
-      (let (cur-light cur-dark)
-        (dolist (theme cur)
-          (cond
-           ((memq theme light)
-            (push theme cur-light))
-           ((memq theme dark)
-            (push theme cur-dark))
-           (t (push theme (if (zr-face-theme-dark-p theme) cur-dark cur-light)))))
-        (setf (multisession-value zr-face-theme-light-list) cur-light
-              (multisession-value zr-face-theme-dark-list) cur-dark))))
+  (let (light dark)
+    (dolist (theme (cons 'default
+                        (cl-set-difference (custom-available-themes)
+                                           zr-face-theme-disabled-list)))
+      (if (zr-face-theme-dark-p theme)
+          (push theme dark)
+        (push theme light)))
+    (setf (multisession-value zr-face-theme-light-list) light
+          (multisession-value zr-face-theme-dark-list) dark))
   (remove-hook 'server-after-make-frame-hook #'zr-face-theme-list-update))
 
 (defun zr-face--color-to-rgb (color)

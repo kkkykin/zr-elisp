@@ -121,16 +121,16 @@
                 ((symbol-function 'frame-parameter) (lambda (&rest _) mode)))
         (should (eq (eq mode 'dark) (zr-face-theme-dark-p)))))))
 
-(ert-deftest zr-face-test-theme-list-update-does-not-switch-themes ()
-  "A fresh daemon can classify built-in themes without changing its faces."
+(ert-deftest zr-face-test-theme-list-update-repairs-cached-categories ()
+  "A daemon repairs stale classifications without changing its faces."
   (let* ((multisession-directory (make-temp-file "zr-face-test-" t))
          (multisession-storage 'files)
          (zr-face-theme-light-list
           (make-multisession :package "zr-face-test" :key "light"
-                            :initial-value '(default)))
+                            :initial-value '(default wombat)))
          (zr-face-theme-dark-list
           (make-multisession :package "zr-face-test" :key "dark"
-                            :initial-value nil))
+                            :initial-value '(adwaita)))
          (enabled (copy-sequence custom-enabled-themes))
          (background (face-attribute 'default :background))
          (server-after-make-frame-hook '(zr-face-theme-list-update)))
@@ -143,7 +143,9 @@
                    (lambda (&rest _) (ert-fail "Theme scan disabled a theme"))))
           (run-hooks 'server-after-make-frame-hook)
           (should (memq 'adwaita (multisession-value zr-face-theme-light-list)))
+          (should-not (memq 'wombat (multisession-value zr-face-theme-light-list)))
           (should (memq 'wombat (multisession-value zr-face-theme-dark-list)))
+          (should-not (memq 'adwaita (multisession-value zr-face-theme-dark-list)))
           (should (equal enabled custom-enabled-themes))
           (should (equal background (face-attribute 'default :background)))
           (should-not (memq 'zr-face-theme-list-update server-after-make-frame-hook)))
