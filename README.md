@@ -10,6 +10,7 @@
 | 仓库根目录 | 编辑、词典、进程、网络、媒体和平台工具 | `test/` |
 | [`org/`](org/README.md) | Org 编辑、Babel、Tangle、导出、链接、协议和 Org-srs | `org/test/` |
 | [`erc/`](erc/README.md) | ERC 消息显示、补全、链接和回复 | `erc/test/` |
+| [`scripts/`](scripts/) | 按模块存放的 PowerShell 等辅助脚本 | 随对应模块测试 |
 
 ## 加载
 
@@ -32,6 +33,7 @@
 
 Minor mode 用参数 `-1` 关闭。路径、快捷键及站点配置由个人初始化文件设置。
 各模块的配置与入口见对应文件的 Commentary 和 docstring；Org、ERC 的详细说明见目录中的 README。
+使用脚本的模块会按自身位置查找 `scripts/`；复制或安装时需一并保留该目录结构。
 
 `zr-terminal` 提供公共 OSC 编码、发送和 OSC 777 通知，`zr-wezterm` 负责
 `ZRTransport` JSON 分块传输。发送接口默认使用当前终端 frame，也可传入明确的
@@ -80,6 +82,10 @@ Android 原生 ERC 已直接调用 Android 通知 API；Windows 和 SSH Linux
 通过全局适配转发。关闭 `zr-notify-mode` 即可恢复 `notifications-notify`。
 Termux 后端不会转发此接口的操作按钮和 Lisp 回调，因为 Termux 的操作
 接口接受 shell 命令，语义不同。
+
+Windows 上执行 `M-x zr-windows-register-emacs-shortcut`，可创建或修复当前用户
+开始菜单中的 `Emacs.lnk`，并将通知应用标识设置为 `GNU.Emacs`。已有快捷方式
+保留目标和启动参数；也可通过 Lisp 调用传入其他 `.lnk` 路径。
 
 ## 验证
 

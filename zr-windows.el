@@ -1,4 +1,4 @@
-;;; zr-windows.el --- Windows shell, TTS, archive and IME helpers -*- lexical-binding: t; -*-
+;;; zr-windows.el --- Windows shortcuts, shell, TTS, archive and IME helpers -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "31.1"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -9,10 +9,12 @@
 ;;; Commentary:
 
 ;; Platform commands and opt-in encoding/IME modes.  No terminal focusing,
-;; OneDrive, elevation scripts or environment changes are performed here.
+;; OneDrive, elevation scripts or environment variable changes are performed here.
 ;; For "moyu", enable `zr-windows-ime-mode' in selected buffers and use
 ;; `zr-windows-quit-ime-buffers' to hide their windows without killing them.
 ;; TTS uses Windows PowerShell, including when accessible from WSL.
+;; Use `zr-windows-register-emacs-shortcut' to create or repair the Emacs
+;; Start Menu entry for native Windows notifications.
 
 ;;; Code:
 
@@ -52,6 +54,65 @@
   (unless (eq system-type 'windows-nt)
     (user-error "This command requires Windows")))
 
+(defconst zr-windows--script-directory
+  (expand-file-name "scripts/zr-windows/"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "Directory containing the PowerShell scripts used by this module.")
+
+(defun zr-windows--powershell-string (text)
+  "Quote TEXT as a literal PowerShell string, or return $null for nil."
+  (if text (format "'%s'" (string-replace "'" "''" text)) "$null"))
+
+(defun zr-windows--powershell-script (name &rest arguments)
+  "Read script NAME and construct an invocation with literal ARGUMENTS."
+  (let ((file (expand-file-name name zr-windows--script-directory)))
+    (unless (file-readable-p file)
+      (user-error "PowerShell script is missing or unreadable: %s" file))
+    (with-temp-buffer
+      (let ((coding-system-for-read 'utf-8-unix))
+        (insert-file-contents file))
+      (concat "& {\n" (buffer-string) "\n} "
+              (mapconcat #'zr-windows--powershell-string arguments " ")))))
+
+;;;###autoload
+(defun zr-windows-register-emacs-shortcut (&optional shortcut)
+  "Create or repair the Emacs Start Menu SHORTCUT for Windows notifications.
+SHORTCUT defaults to Emacs.lnk in the current user's Programs folder.
+Existing shortcuts retain their target, arguments, working directory and icon.
+A new shortcut launches runemacs.exe from the current Emacs installation,
+falling back to the current Emacs executable if runemacs.exe is absent.
+Set System.AppUserModel.ID to GNU.Emacs and verify it before returning
+the shortcut's absolute path.  Requires native Windows and PowerShell."
+  (interactive)
+  (zr-windows--require)
+  (let* ((shortcut (when shortcut (expand-file-name shortcut)))
+         (default-directory invocation-directory)
+         (program (or (executable-find "powershell.exe")
+                      (executable-find "powershell")
+                      (user-error "Shortcut registration requires Windows PowerShell")))
+         (launcher (expand-file-name "runemacs.exe" invocation-directory))
+         (target (if (file-exists-p launcher) launcher
+                   (expand-file-name invocation-name invocation-directory))))
+    (when (and shortcut (file-remote-p shortcut))
+      (user-error "The Emacs shortcut must be a local Windows file"))
+    (with-temp-buffer
+      (let* ((script (zr-windows--powershell-script
+                      "register-emacs-shortcut.ps1" shortcut target))
+             (coding-system-for-read 'utf-8-unix)
+             (status
+              (call-process
+               program nil t nil "-NoProfile" "-NonInteractive" "-EncodedCommand"
+               (base64-encode-string (encode-coding-string script 'utf-16le) t))))
+        (unless (eq status 0)
+          (error "Emacs shortcut registration failed (%s): %s"
+                 status (string-trim (buffer-string))))
+        (let* ((result (json-parse-string (buffer-string) :object-type 'plist
+                                         :false-object nil))
+               (path (expand-file-name (plist-get result :shortcut))))
+          (message "%s Emacs shortcut: %s"
+                   (if (plist-get result :created) "Created" "Repaired") path)
+          path)))))
+
 ;;;###autoload
 (defun zr-windows-tts-speak (text)
   "Speak TEXT asynchronously using Windows System.Speech; return the process.
@@ -61,17 +122,8 @@ Also supports powershell.exe accessible from WSL."
                       (and (eq system-type 'windows-nt)
                            (executable-find "powershell"))
                       (user-error "Windows TTS requires Windows PowerShell")))
-         (script
-          (concat
-           "$ErrorActionPreference = 'Stop'; "
-           "Add-Type -AssemblyName System.Speech; "
-           "$speech = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-           "try { "
-           (when zr-windows-tts-voice
-             (format "$speech.SelectVoice('%s'); "
-                     (string-replace "'" "''" zr-windows-tts-voice)))
-           (format "$speech.Speak('%s') " (string-replace "'" "''" text))
-           "} finally { $speech.Dispose() }")))
+         (script (zr-windows--powershell-script
+                  "tts-speak.ps1" text zr-windows-tts-voice)))
     (make-process
      :name "zr-windows-tts" :buffer "*zr-windows-tts*"
      :command (list program "-NoProfile" "-NonInteractive" "-EncodedCommand"

@@ -6,6 +6,128 @@
 (require 'cl-lib)
 (require 'zr-windows)
 
+(ert-deftest zr-windows-test-shortcut-requires-native-windows-and-powershell ()
+  (let ((system-type 'gnu/linux))
+    (cl-letf (((symbol-function 'executable-find)
+               (lambda (_) (ert-fail "Looked for PowerShell off Windows"))))
+      (should-error (zr-windows-register-emacs-shortcut) :type 'user-error)))
+  (let ((system-type 'windows-nt))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) nil)))
+      (should-error (zr-windows-register-emacs-shortcut) :type 'user-error))))
+
+(ert-deftest zr-windows-test-shortcut-path-encoding-and-launcher-selection ()
+  (let* ((directory (make-temp-file "zr-windows-shortcut-" t))
+         (invocation-directory (expand-file-name "Emacs' tools/" directory))
+         (invocation-name "emacs.exe")
+         (shortcut (expand-file-name "猫's $literal `text/Emacs.lnk"
+                                     directory))
+         (launcher-present t)
+         commands)
+    (unwind-protect
+        (progn
+          (make-directory invocation-directory t)
+          (write-region "" nil (expand-file-name "runemacs.exe" invocation-directory) nil 'silent)
+          (cl-letf (((symbol-function 'executable-find)
+                     (lambda (name) (when (equal name "powershell") "/windows/powershell")))
+                    ((symbol-function 'call-process)
+                     (lambda (program _infile _destination _display &rest args)
+                       (push (cons program args) commands)
+                       (insert (decode-coding-string
+                                (json-serialize (list :shortcut shortcut
+                                                      :created (if launcher-present t :false)))
+                                'utf-8))
+                       0)))
+            (let ((system-type 'windows-nt))
+              (should (equal (zr-windows-register-emacs-shortcut shortcut) shortcut)))
+            (delete-file (expand-file-name "runemacs.exe" invocation-directory))
+            (setq launcher-present nil)
+            (let ((system-type 'windows-nt))
+              (should (equal (zr-windows-register-emacs-shortcut) shortcut))))
+          (should (= (length commands) 2))
+          (dolist (command commands)
+            (should (equal (cl-subseq command 0 4)
+                           '("/windows/powershell" "-NoProfile" "-NonInteractive" "-EncodedCommand"))))
+          (let ((creation (decode-coding-string (base64-decode-string (nth 4 (cadr commands)))
+                                                'utf-16le))
+                (repair (decode-coding-string (base64-decode-string (nth 4 (car commands)))
+                                              'utf-16le)))
+            (should (string-suffix-p
+                     (format "\n} '%s/猫''s $literal `text/Emacs.lnk' '%s/Emacs'' tools/runemacs.exe'"
+                             directory directory)
+                     creation))
+            (should (string-suffix-p
+                     (format "\n} $null '%s/Emacs'' tools/emacs.exe'" directory)
+                     repair))))
+      (delete-directory directory t))))
+
+(ert-deftest zr-windows-test-shortcut-reports-process-errors-and-rejects-remote-paths ()
+  (let ((system-type 'windows-nt))
+    (cl-letf (((symbol-function 'executable-find) (lambda (_) "/windows/powershell.exe")))
+      (dolist (status '(1 "terminated"))
+        (cl-letf (((symbol-function 'call-process)
+                   (lambda (&rest _) (insert "AppID verification failed") status)))
+          (let ((failure (should-error (zr-windows-register-emacs-shortcut))))
+            (should (string-match-p "AppID verification failed"
+                                    (error-message-string failure))))))
+      (cl-letf (((symbol-function 'call-process)
+                 (lambda (&rest _) (ert-fail "Launched PowerShell for a remote shortcut"))))
+        (should-error (zr-windows-register-emacs-shortcut "/ssh:example.org:/tmp/Emacs.lnk")
+                      :type 'user-error)))))
+
+(ert-deftest zr-windows-test-shortcut-native-creation-and-repair ()
+  (skip-unless (eq system-type 'windows-nt))
+  (let ((program (or (executable-find "powershell.exe") (executable-find "powershell"))))
+    (skip-unless program)
+    (let* ((directory (make-temp-file "zr-windows-shortcut-" t))
+           (shortcut (expand-file-name "猫's folder/Emacs.lnk" directory))
+           (target (expand-file-name invocation-name invocation-directory)))
+      (cl-labels
+          ((powershell-json
+             (script)
+             (with-temp-buffer
+               (let* ((coding-system-for-read 'utf-8-unix)
+                      (status
+                       (call-process
+                        program nil t nil "-NoProfile" "-NonInteractive" "-EncodedCommand"
+                        (base64-encode-string
+                         (encode-coding-string
+                          (concat "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
+                                  "$ErrorActionPreference = 'Stop'\n" script)
+                          'utf-16le) t))))
+                 (ert-info ((buffer-string)) (should (eq status 0)))
+                 (json-parse-string (buffer-string) :object-type 'plist)))))
+        (unwind-protect
+            (progn
+              (should (equal (zr-windows-register-emacs-shortcut shortcut)
+                             (subst-char-in-string ?\\ ?/ shortcut)))
+              (should (file-exists-p shortcut))
+              (let* ((open
+                      (format "$path = %s\n$wscript = New-Object -ComObject WScript.Shell\n$link = $wscript.CreateShortcut($path)\n"
+                              (zr-windows--powershell-string shortcut)))
+                     (snapshot
+                      "$shell = New-Object -ComObject Shell.Application
+$folder = $shell.Namespace([IO.Path]::GetDirectoryName($path))
+$item = $folder.ParseName([IO.Path]::GetFileName($path))
+[pscustomobject]@{
+    target = $link.TargetPath; arguments = $link.Arguments
+    directory = $link.WorkingDirectory; icon = $link.IconLocation
+    appId = $item.ExtendedProperty('System.AppUserModel.ID')
+} | ConvertTo-Json -Compress")
+                     (before
+                      (powershell-json
+                       (concat open
+                               (format "$link.TargetPath = %s\n$link.Arguments = '--debug-init'\n$link.WorkingDirectory = %s\n$link.IconLocation = %s\n$link.Save()\n"
+                                       (zr-windows--powershell-string target)
+                                       (zr-windows--powershell-string directory)
+                                       (zr-windows--powershell-string (concat target ",0")))
+                               snapshot))))
+                (zr-windows-register-emacs-shortcut shortcut)
+                (let ((after (powershell-json (concat open snapshot))))
+                  (should (equal (plist-get after :appId) "GNU.Emacs"))
+                  (dolist (property '(:target :arguments :directory :icon))
+                    (should (equal (plist-get after property) (plist-get before property)))))))
+          (delete-directory directory t))))))
+
 (ert-deftest zr-windows-test-tts-unicode-and-literal-quotes ()
   (let ((system-type 'gnu/linux)
         (zr-windows-tts-voice "Voice's name") command)
@@ -17,10 +139,8 @@
     (should (equal (cl-subseq command 0 4)
                    '("/windows/powershell.exe" "-NoProfile" "-NonInteractive" "-EncodedCommand")))
     (let ((script (decode-coding-string (base64-decode-string (nth 4 command)) 'utf-16le)))
-      (should (string-match-p (regexp-quote "$speech.SelectVoice('Voice''s name')") script))
-      (should (string-match-p
-               (regexp-quote "$speech.Speak('猫''); throw ''injected\n$literal `text')") script))
-      (should (string-match-p (regexp-quote "finally { $speech.Dispose() }") script)))))
+      (should (string-suffix-p
+               "\n} '猫''); throw ''injected\n$literal `text' 'Voice''s name'" script)))))
 
 (ert-deftest zr-windows-test-tts-native-powershell-and-unavailable-backend ()
   (let ((zr-windows-tts-voice nil))
@@ -33,10 +153,10 @@
                      'tts-process)))
           (should (eq (zr-windows-tts-speak "猫") 'tts-process)))
         (should (equal (car command) "/windows/powershell"))
-        (should-not
-         (string-match-p "SelectVoice"
-                         (decode-coding-string (base64-decode-string (nth 4 command))
-                                               'utf-16le))))
+        (should (string-suffix-p
+                 "\n} '猫' $null"
+                 (decode-coding-string (base64-decode-string (nth 4 command))
+                                       'utf-16le))))
       ;; Linux PowerShell cannot supply Windows System.Speech.
       (let ((system-type 'gnu/linux))
         (should-error (zr-windows-tts-speak "猫") :type 'user-error))))
