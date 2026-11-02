@@ -52,6 +52,35 @@ frame，适合 daemon 的多个终端连接。目标必须是存活的终端 fra
 通知文本里的分号和控制字符会替换为空格。终端通知后端仅使用 `:frame` 选项，
 不提供通知 ID、超时、优先级或操作按钮；加载库时不会自动更换通知后端。
 
+启用 `zr-notify-mode` 后，调用 `notifications-notify` 的包也会使用
+`zr-notify` 后端。Android、Windows 默认使用原生通知；其他平台未设置
+`zr-notify-function` 时保留原来的 D-Bus 通知。以 Android、Windows 和
+SSH Linux 共用配置为例：
+
+```elisp
+(use-package zr-notify
+  :config
+  (setq zr-notify-function
+        (pcase system-type
+          ((or 'android 'windows-nt) nil)
+          ('gnu/linux
+           (if (getenv "TERMUX_VERSION")
+               #'zr-termux-notify
+             #'zr-notify-terminal))))
+  (zr-notify-mode 1))
+
+(with-eval-after-load 'erc
+  (add-to-list 'erc-modules 'match)
+  (add-to-list 'erc-modules 'notifications)
+  (erc-update-modules))
+```
+
+ERC 的 `notifications` 模块负责检测提及、私聊及通知过滤。
+Android 原生 ERC 已直接调用 Android 通知 API；Windows 和 SSH Linux
+通过全局适配转发。关闭 `zr-notify-mode` 即可恢复 `notifications-notify`。
+Termux 后端不会转发此接口的操作按钮和 Lisp 回调，因为 Termux 的操作
+接口接受 shell 命令，语义不同。
+
 ## 验证
 
 ```sh

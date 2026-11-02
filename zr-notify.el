@@ -9,6 +9,7 @@
 ;; Set appt-disp-window-function to `zr-notify-appointment' to opt in.
 ;; Reminder schedules remain personal configuration.
 ;; Set `zr-notify-function' to `zr-notify-terminal' for OSC 777 notifications.
+;; Enable `zr-notify-mode' to route `notifications-notify' through this library.
 
 ;;; Code:
 
@@ -55,6 +56,12 @@ timeouts, urgency levels or actions.  Return t after sending."
       ('windows-nt
        (unless (fboundp 'w32-notification-notify)
          (user-error "This Emacs build has no Windows notification support"))
+       ;; The native API requires closing the active notification first.
+       (when-let* ((id (plist-get options :replaces-id)))
+         (when-let* ((timer (gethash id zr-notify--windows-timers)))
+           (cancel-timer timer))
+         (remhash id zr-notify--windows-timers)
+         (w32-notification-close id))
        (let* ((id (apply #'w32-notification-notify :title title :body body options))
               (timeout (plist-get options :timeout)))
          (when-let* ((timer (gethash id zr-notify--windows-timers)))
@@ -70,6 +77,41 @@ timeouts, urgency levels or actions.  Return t after sending."
       (_
        (require 'notifications)
        (apply #'notifications-notify :title title :body body options)))))
+
+(defun zr-notify--notifications-notify (original &rest options)
+  "Route notification OPTIONS to the configured backend or ORIGINAL."
+  ;; Calling `zr-notify-send' for its D-Bus fallback would recurse here.
+  (if (and (null zr-notify-function)
+           (not (memq system-type '(android windows-nt))))
+      (apply original options)
+    (let* ((title (or (plist-get options :title) ""))
+           (body (or (plist-get options :body) ""))
+           (excluded '(:title :body :bus)))
+      ;; Termux actions are shell commands, not the notification API's
+      ;; action keys and Lisp callbacks.  Never reinterpret them as commands.
+      (when (or (eq zr-notify-function #'zr-termux-notify)
+                (and (null zr-notify-function)
+                     (eq system-type 'android)
+                     (not (fboundp 'android-notifications-notify))))
+        (setq excluded (append excluded '(:actions :on-action :on-close))))
+      (apply #'zr-notify-send title body
+             (cl-loop for (key value) on options by #'cddr
+                      unless (memq key excluded)
+                      append (list key value))))))
+
+;;;###autoload
+(define-minor-mode zr-notify-mode
+  "Route `notifications-notify' through `zr-notify-send' globally.
+Use `zr-notify-function' when configured, or the native Android or Windows
+backend.  Other systems retain the original D-Bus implementation by default.
+Only options supported by the selected backend take effect.  Termux drops
+notification actions and Lisp callbacks because its API uses shell commands.
+This mode can be enabled before the notifications library is loaded."
+  :global t
+  :group 'zr-notify
+  (if zr-notify-mode
+      (advice-add 'notifications-notify :around #'zr-notify--notifications-notify)
+    (advice-remove 'notifications-notify #'zr-notify--notifications-notify)))
 
 (defun zr-notify-appointment (minutes _time message)
   "Display appointment MESSAGE due in MINUTES; suitable for appt."
