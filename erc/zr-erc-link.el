@@ -23,7 +23,11 @@
     (:regexp "https?://[^[:space:]<>\"\x01]+\\.\\(?:pdf\\|zip\\|gz\\|7z\\|tar\\|txt\\|mp4\\|mp3\\)\\(?:[?#][^[:space:]<>\"\x01]*\\)?" :type file)
     (:regexp "\\b\\(?:https?\\|file\\):[^[:space:]<>\"\x01]+" :type org))
   "Ordered rules for clickable message text; nil disables recognition.
-Each rule has :regexp and :type (image, file, command or org).
+Each rule has :type (image, file, command or org).  A rule without :regexp
+or :url-tag supplies defaults for later rules of the same type.  Defaults
+respect :selector and merge in order; later values override earlier ones.
+A matching rule overrides its inherited defaults, including explicit nil.
+Values are replaced as a whole, including :headers and :auth-source plists.
 Regexps match displayed message text, case-sensitively.  Every nonempty
 match becomes a button; earlier rules win overlapping ranges.
 :replace is an optional string using `replace-match' backreferences,
@@ -37,61 +41,21 @@ Org targets are passed to `org-link-open-from-string' when clicked.
 Only image rules can run automatically; commands and Org links require a click.
 Media keys: :headers is an HTTP header alist; :auth-source is t or an
 auth-source search plist; :auth-scheme is basic or bearer; :auth-header
-defaults to Authorization.  :auto-show, :ffmpeg, :max-width, :max-height
-and :max-age override module options.  :max-age is seconds; nil disables
-age checks.  :proxy overrides `zr-erc-link-proxy' (inherit, nil, or an
-HTTP proxy).  Redirects are rejected; rewrite to the final URL so custom
-credentials cannot be forwarded to another host.
+defaults to Authorization.  :auto-show defaults to nil.  :ffmpeg is nil
+to disable conversion, t to use ffmpeg, or an executable name/path.
+:max-width (default 0.85) and :max-height (default 0.6) accept integer
+pixels or fractions of the current window.  :max-age is seconds; nil
+disables age checks (the default).  Age uses the IRC time tag or local
+receipt time; expired links skip automatic previews and reject manual
+requests.  :proxy is inherit (the default), nil for a direct connection,
+or an HTTP proxy as host:port or http://host:port, with IPv6 bracketed.
+Explicit proxies bypass no_proxy and HTTPS uses CONNECT.  :timeout limits
+each HTTP request or FFmpeg conversion (default 30 seconds).  :max-bytes
+limits response body size (default 64 MiB).  :dir is the initial download
+directory (default ~/Downloads/).  Redirects are rejected; rewrite to the
+final URL so custom credentials cannot be forwarded to another host.
 This option supports buffer-local values."
   :type 'sexp :group 'zr-erc-link)
-(defcustom zr-erc-link-auto-show nil
-  "Whether recognized images are automatically fetched and displayed."
-  :type 'boolean :group 'zr-erc-link)
-(defcustom zr-erc-link-max-age nil
-  "Maximum message age in seconds for starting a media request.
-Nil disables the age limit.  A rule's :max-age overrides this option,
-including an explicit nil.  Age is measured from the message's IRC
-server-time tag (time), or local receipt when the tag is absent or invalid.
-Expired links skip automatic previews; manual previews and downloads
-report an error without requesting the URL.  Existing previews and
-requests already in progress are retained."
-  :type '(choice (const :tag "No age limit" nil) (natnum :tag "Seconds"))
-  :group 'zr-erc-link)
-(defcustom zr-erc-link-proxy 'inherit
-  "HTTP proxy for media previews and downloads.
-The default, inherit, uses Emacs's existing URL proxy configuration.
-Nil forces a direct connection.  A string specifies an HTTP proxy as
-host:port or http://host:port, for example http://127.0.0.1:7890.
-IPv6 addresses must be bracketed.  Proxy URLs with credentials or paths
-are not supported.  HTTPS media uses a CONNECT tunnel through the proxy.
-A rule's :proxy overrides this option, including an explicit nil.
-Explicit proxies bypass no_proxy exclusions.  Proxy settings apply only
-to the media request, without changing other Emacs network requests."
-  :type '(choice (const :tag "Use Emacs proxy settings" inherit)
-                 (const :tag "Connect directly" nil)
-                 (string :tag "HTTP proxy (host:port or http://host:port)"))
-  :group 'zr-erc-link)
-(defcustom zr-erc-link-use-ffmpeg nil
-  "Whether to use FFmpeg to create a scaled, single-frame PNG preview."
-  :type 'boolean :group 'zr-erc-link)
-(defcustom zr-erc-link-ffmpeg-program "ffmpeg"
-  "FFmpeg executable used for previews when enabled."
-  :type 'string :group 'zr-erc-link)
-(defcustom zr-erc-link-max-width 0.85
-  "Maximum preview width: integer pixels or fraction of the current window."
-  :type '(choice integer float) :group 'zr-erc-link)
-(defcustom zr-erc-link-max-height 0.6
-  "Maximum preview height: integer pixels or fraction of the current window."
-  :type '(choice integer float) :group 'zr-erc-link)
-(defcustom zr-erc-link-timeout 30
-  "Maximum seconds allowed for an HTTP request or an FFmpeg conversion."
-  :type 'number :group 'zr-erc-link)
-(defcustom zr-erc-link-max-bytes (* 64 1024 1024)
-  "Maximum response body size accepted for a preview or download."
-  :type 'integer :group 'zr-erc-link)
-(defcustom zr-erc-link-download-directory "~/Downloads/"
-  "Initial directory offered by `zr-erc-link-download'."
-  :type 'directory :group 'zr-erc-link)
 
 (cl-defstruct zr-erc-link--job
   buffer anchor item destination overwrite request process timer raw preview overlay
@@ -103,6 +67,23 @@ to the media request, without changing other Emacs network requests."
   "Read KEY from RULE, or use FALLBACK when KEY is absent."
   (if (plist-member rule key) (plist-get rule key) fallback))
 
+(defun zr-erc-link--inherit (rule context)
+  "Merge earlier defaults of RULE's type matching CONTEXT, then RULE.
+Only entries without :regexp or :url-tag supply defaults."
+  (let ((type (plist-get rule :type)) options)
+    (cl-loop for entry in zr-erc-link-rules
+             until (eq entry rule)
+             when (and (eq (plist-get entry :type) type)
+                       (not (plist-get entry :regexp))
+                       (not (plist-get entry :url-tag))
+                       (zr-erc-selector-match-p (plist-get entry :selector) context))
+             do (cl-loop for (key value) on entry by #'cddr
+                         unless (memq key '(:type :selector :replace))
+                         do (setq options (plist-put options key value))))
+    (cl-loop for (key value) on rule by #'cddr
+             do (setq options (plist-put options key value)))
+    options))
+
 (defun zr-erc-link--item (value context &optional only-rule)
   "Describe VALUE using CONTEXT and the first applicable rule.
 When ONLY-RULE is non-nil, only consider that rule."
@@ -110,7 +91,8 @@ When ONLY-RULE is non-nil, only consider that rule."
     (let ((case-fold-search nil))
       (cl-loop
        for rule in (if only-rule (list only-rule) zr-erc-link-rules)
-       when (and (zr-erc-selector-match-p (plist-get rule :selector) context)
+       when (and (or only-rule (plist-get rule :regexp) (plist-get rule :url-tag))
+                 (zr-erc-selector-match-p (plist-get rule :selector) context)
                  (string-match (or (plist-get rule :regexp) "\\`\\(?:.\\|\n\\)*\\'") value))
        thereis
        (zr-erc-link--make-item
@@ -126,7 +108,8 @@ When ONLY-RULE is non-nil, only consider that rule."
                (not (string-empty-p target))
                (or (not (memq type '(image file)))
                    (string-match-p "\\`https?://" target)))
-      (list :target target :original value :rule rule :type type
+      (list :target target :original value
+            :rule (zr-erc-link--inherit rule context) :type type
             :time (or (when-let* ((stamp (cdr (assoc "time" (plist-get context :tags)))))
                         (condition-case nil
                             (encode-time (iso8601-parse stamp t))
@@ -134,9 +117,8 @@ When ONLY-RULE is non-nil, only consider that rule."
                       (current-time))))))
 
 (defun zr-erc-link--expired-p (item)
-  "Whether ITEM exceeds the current buffer's or its rule's age limit."
-  (when-let* ((max-age (zr-erc-link--option
-                       (plist-get item :rule) :max-age zr-erc-link-max-age))
+  "Whether ITEM exceeds its rule's age limit."
+  (when-let* ((max-age (plist-get (plist-get item :rule) :max-age))
               (time (plist-get item :time)))
     (> (float-time (time-subtract (current-time) time)) max-age)))
 
@@ -332,24 +314,25 @@ When ONLY-RULE is non-nil, only consider that rule."
   (zr-erc-link--check-age item)
   (let* ((rule (plist-get item :rule))
          (locator (zr-erc-link--proxy-locator
-                   (zr-erc-link--option rule :proxy zr-erc-link-proxy)))
+                   (zr-erc-link--option rule :proxy 'inherit)))
          ;; URL's connection cache is keyed by destination, not proxy.
          (connections (make-hash-table :test #'equal))
          (window (or (get-buffer-window (current-buffer) t) (selected-window)))
          (headers (zr-erc-link--headers item))
          (ffmpeg (and (not destination)
-                       (zr-erc-link--option rule :ffmpeg zr-erc-link-use-ffmpeg)
-                       zr-erc-link-ffmpeg-program))
+                      (let ((value (plist-get rule :ffmpeg)))
+                        (if (eq value t) "ffmpeg" value))))
          (job (make-zr-erc-link--job
                :buffer (current-buffer) :anchor (copy-marker anchor) :item item
                :destination destination :overwrite overwrite :ffmpeg ffmpeg
                :width (zr-erc-link--dimension
-                       (zr-erc-link--option rule :max-width zr-erc-link-max-width)
+                       (zr-erc-link--option rule :max-width 0.85)
                        (window-body-width window t))
                :height (zr-erc-link--dimension
-                        (zr-erc-link--option rule :max-height zr-erc-link-max-height)
+                        (zr-erc-link--option rule :max-height 0.6)
                         (window-body-height window t))
-               :timeout zr-erc-link-timeout :max-bytes zr-erc-link-max-bytes)))
+               :timeout (zr-erc-link--option rule :timeout 30)
+               :max-bytes (zr-erc-link--option rule :max-bytes (* 64 1024 1024)))))
     (when (and ffmpeg (not (executable-find ffmpeg)))
       (user-error "FFmpeg executable is unavailable"))
     (setf (zr-erc-link--job-raw job) (make-temp-file "erc-media-"))
@@ -365,7 +348,8 @@ When ONLY-RULE is non-nil, only consider that rule."
               (url-http-attempt-keepalives nil)
               (url-max-redirections 0))
           (setf (zr-erc-link--job-timer job)
-                (run-at-time zr-erc-link-timeout nil #'zr-erc-link--fail job "Request timed out")
+                (run-at-time (zr-erc-link--job-timeout job) nil
+                             #'zr-erc-link--fail job "Request timed out")
                 (zr-erc-link--job-request job)
                 (url-retrieve (plist-get item :target) #'zr-erc-link--received (list job) t t))
           (unless (zr-erc-link--job-request job) (error "No request"))
@@ -426,7 +410,7 @@ If any targeted image is displayed or loading, hide all targeted previews
 and cancel their pending requests; otherwise, fetch and show them.
 This also hides automatic previews, even after their links have expired.
 For a range, skip file links and report errors without stopping the other
-previews.  This command works regardless of `zr-erc-link-auto-show'."
+previews.  This command works regardless of a rule's :auto-show setting."
   (interactive
    (cond (current-prefix-arg (list (window-start) (window-end nil t)))
          ((use-region-p) (list (region-beginning) (region-end)))))
@@ -460,7 +444,9 @@ Existing files require explicit OVERWRITE permission."
                  (car (split-string (url-filename (url-generic-parse-url (plist-get item :target))) "?"))))
           (file (progn
                   (zr-erc-link--check-age item)
-                  (read-file-name "Download to: " zr-erc-link-download-directory nil nil name)))
+                  (read-file-name "Download to: "
+                                  (zr-erc-link--option (plist-get item :rule) :dir "~/Downloads/")
+                                  nil nil name)))
           (exists (file-exists-p file)))
      (when (and exists (not (yes-or-no-p "Overwrite the existing file? "))) (user-error "Canceled"))
      (list file exists)))
@@ -508,7 +494,7 @@ Existing files require explicit OVERWRITE permission."
                                  ('org "RET: open Org link")))
   (when (and (eq (plist-get item :type) 'image) (display-images-p)
              (not (zr-erc-link--expired-p item))
-             (zr-erc-link--option (plist-get item :rule) :auto-show zr-erc-link-auto-show))
+             (plist-get (plist-get item :rule) :auto-show))
     (save-excursion
       (goto-char start)
       (condition-case nil (zr-erc-link--toggle-at-point)

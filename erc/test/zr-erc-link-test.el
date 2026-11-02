@@ -76,6 +76,99 @@
         (zr-erc-link--insert)
         (should-not (next-button (point-min) t))))))
 
+(ert-deftest zr-erc-link-type-defaults-and-specific-overrides ()
+  (with-temp-buffer
+    (let* ((zr-erc-link-rules
+            '((:type image :headers (("X-Client" . "erc"))
+               :auth-source (:user "bridge") :auth-scheme bearer
+               :auto-show t :ffmpeg t :max-width 0.85 :max-height 0.6 :max-age 60)
+              (:type file :auth-source (:user "bridge") :auth-scheme bearer
+               :proxy inherit :dir "~/downloads/" :headers (("X-Client" . "curl")))
+              (:type image :selector (:sender "^other$") :max-height 999)
+              (:type image :selector (:sender "^bot$") :max-width 320 :timeout 5)
+              (:regexp "https?://[^[:space:]]+png" :type image :auto-show nil
+               :ffmpeg nil :max-age nil :headers (("X-Image" . "specific")))
+              (:regexp "https?://[^[:space:]]+zip" :type file :proxy nil)
+              (:regexp "https?://[^[:space:]]+" :type org)
+              (:type image :max-height 888)))
+           (original (copy-tree zr-erc-link-rules))
+           (erc-message-parsed (make-erc-response :command "PRIVMSG" :sender "bot!u@h")))
+      (insert "https://example.test/a.png https://example.test/b.zip https://example.test/c")
+      (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+                ((symbol-function 'zr-erc-link--fetch)
+                 (lambda (&rest _) (ert-fail "Explicit nil must disable auto-show"))))
+        (zr-erc-link--insert))
+      (let* ((image (next-button (point-min) t))
+             (file (next-button (button-end image) t))
+             (org (next-button (button-end file) t))
+             (image-rule (plist-get (button-get image 'zr-erc-link-item) :rule))
+             (file-rule (plist-get (button-get file 'zr-erc-link-item) :rule))
+             (org-rule (plist-get (button-get org 'zr-erc-link-item) :rule)))
+        (should (equal (plist-get image-rule :headers) '(("X-Image" . "specific"))))
+        (should (equal (plist-get image-rule :auth-source) '(:user "bridge")))
+        (should (eq (plist-get image-rule :auth-scheme) 'bearer))
+        (should (= (plist-get image-rule :max-width) 320))
+        (should (= (plist-get image-rule :max-height) 0.6))
+        (should (= (plist-get image-rule :timeout) 5))
+        (dolist (key '(:auto-show :ffmpeg :max-age))
+          (should (plist-member image-rule key))
+          (should-not (plist-get image-rule key)))
+        (should (equal (plist-get file-rule :headers) '(("X-Client" . "curl"))))
+        (should (equal (plist-get file-rule :dir) "~/downloads/"))
+        (should-not (plist-get file-rule :proxy))
+        (should-not (plist-member file-rule :max-width))
+        (should-not (plist-member org-rule :auth-source))
+        (should-not (next-button (button-end org) t)))
+      (should (equal zr-erc-link-rules original)))))
+
+(ert-deftest zr-erc-link-defaults-do-not-recognize-links ()
+  (with-temp-buffer
+    (let ((zr-erc-link-rules '((:type image :auto-show t) (:type file :dir "~/downloads/")))
+          (erc-message-parsed (make-erc-response :command "PRIVMSG" :sender "bot!u@h")))
+      (insert "https://example.test/a.png")
+      (zr-erc-link--insert)
+      (should-not (next-button (point-min) t))
+      (should-not (zr-erc-link--item (buffer-string) nil)))))
+
+(ert-deftest zr-erc-link-tag-inherits-type-defaults-without-regexp ()
+  (with-temp-buffer
+    (let ((zr-erc-link-rules
+           '((:type image :headers (("X-Client" . "erc")) :max-age 60)
+             (:url-tag "+image" :type image :max-age nil)))
+          (erc-message-parsed
+           (make-erc-response :command "PRIVMSG" :sender "bot!u@h" :contents "hello"
+                              :unparsed "@+image=https://example.test/photo :bot PRIVMSG #c :hello")))
+      (insert "hello\n")
+      (zr-erc-link--insert)
+      (let* ((button (next-button (point-min) t))
+             (item (button-get button 'zr-erc-link-item)))
+        (should (equal (button-label button) "[image]"))
+        (should (equal (plist-get item :target) "https://example.test/photo"))
+        (should (equal (plist-get (plist-get item :rule) :headers) '(("X-Client" . "erc"))))
+        (should-not (plist-get (plist-get item :rule) :max-age))
+        (should-not (next-button (button-end button) t))))))
+
+(ert-deftest zr-erc-link-download-prompts-in-inherited-directory ()
+  (with-temp-buffer
+    (let ((zr-erc-link-rules '((:type file :dir "~/downloads/")
+                              (:regexp "https?://[^[:space:]]+" :type file)))
+          (erc-message-parsed (make-erc-response :command "PRIVMSG" :sender "bot!u@h"))
+          (destination (make-temp-name (expand-file-name "erc-link-download-" temporary-file-directory)))
+          prompted fetched)
+      (insert "https://example.test/archive.zip?token=value")
+      (zr-erc-link--insert)
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'read-file-name)
+                 (lambda (_prompt directory _default _mustmatch initial &rest _)
+                   (setq prompted (list directory initial)) destination))
+                ((symbol-function 'make-directory) (lambda (&rest _) nil))
+                ((symbol-function 'zr-erc-link--fetch)
+                 (lambda (_item _anchor destination overwrite)
+                   (setq fetched (list destination overwrite)))))
+        (call-interactively #'zr-erc-link-download))
+      (should (equal prompted '("~/downloads/" "archive.zip")))
+      (should (equal fetched (list destination nil))))))
+
 (ert-deftest zr-erc-link-command-rejects-noncommands-and-multiple-lines ()
   (dolist (target '("hello" "//hello" "/join #one\n/part #two" "/join #one\r/part #two"))
     (with-temp-buffer
@@ -208,7 +301,8 @@ TLS, when non-nil, is a list of certificate and key file names."
         (should-not fetched)
         (erase-buffer)
         (insert "<bot> https://example.test/a.png\n")
-        (let ((zr-erc-link-rules '((:regexp "https?://[^[:space:]]+png" :type image :auto-show t))))
+        (let ((zr-erc-link-rules '((:type image :auto-show t)
+                                   (:regexp "https?://[^[:space:]]+png" :type image))))
           (zr-erc-link--insert))
         (should fetched)))))
 
@@ -223,7 +317,7 @@ TLS, when non-nil, is a list of certificate and key file names."
 
 (ert-deftest zr-erc-link-show-at-point-with-auto-show-disabled ()
   (with-temp-buffer
-    (let ((zr-erc-link-auto-show nil) fetched)
+    (let (fetched)
       (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
                 ((symbol-function 'zr-erc-link--fetch)
                  (lambda (item anchor &rest _)
@@ -239,14 +333,13 @@ TLS, when non-nil, is a list of certificate and key file names."
 (ert-deftest zr-erc-link-toggle-manual-and-automatic-previews ()
   (dolist (auto-show '(nil t))
     (with-temp-buffer
-      (let ((zr-erc-link-auto-show auto-show)
-            (image-display t))
+      (let ((image-display t))
         (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) image-display))
                   ((symbol-function 'url-retrieve)
                    (lambda (&rest _) (generate-new-buffer " *erc-media-request*")))
                   ((symbol-function 'create-image)
                    (lambda (file &rest _) (list 'image :type 'png :file file))))
-          (let ((button (zr-erc-link-test--button "image.png")))
+          (let ((button (zr-erc-link-test--button "image.png" 'image (list :auto-show auto-show))))
             (goto-char (button-start button))
             (unless auto-show (call-interactively #'zr-erc-link-show))
             (let* ((job (button-get button 'zr-erc-link-job))
@@ -255,7 +348,7 @@ TLS, when non-nil, is a list of certificate and key file names."
               (should (overlay-buffer (zr-erc-link--job-overlay job)))
               ;; Hiding needs neither a fresh link nor an image-capable display.
               (setf (plist-get (zr-erc-link--job-item job) :time) 0)
-              (setq-local zr-erc-link-max-age 60)
+              (setf (plist-get (plist-get (zr-erc-link--job-item job) :rule) :max-age) 60)
               (setq buffer-read-only t image-display nil)
               (if auto-show (button-activate button)
                 (call-interactively #'zr-erc-link-show))
@@ -267,7 +360,7 @@ TLS, when non-nil, is a list of certificate and key file names."
               (should-not (button-get button 'zr-erc-link-job))
               (should-not zr-erc-link--jobs)
               ;; Once hidden, the next activation starts a new preview.
-              (setq-local zr-erc-link-max-age nil)
+              (setf (plist-get (plist-get (zr-erc-link--job-item job) :rule) :max-age) nil)
               (setq image-display t)
               (button-activate button)
               (let ((next (button-get button 'zr-erc-link-job)))
@@ -472,22 +565,23 @@ TLS, when non-nil, is a list of certificate and key file names."
                                         (list :tags (list (cons "time" stamp))))))
           (should (time-equal-p (plist-get item :time) now)))))))
 
-(ert-deftest zr-erc-link-age-boundary-and-local-overrides ()
+(ert-deftest zr-erc-link-age-boundary-and-inherited-overrides ()
   (let ((now 1000)
-        (zr-erc-link-rules '((:regexp "https?://[^[:space:]]+" :type image))))
+        (zr-erc-link-rules '((:type image :max-age 60)
+                             (:regexp "https?://[^[:space:]]+" :type image))))
     (cl-letf (((symbol-function 'current-time) (lambda () now)))
       (let ((item (zr-erc-link--item "https://example.test/a" nil)))
         (setq now 1060)
         (with-temp-buffer
-          (setq-local zr-erc-link-max-age 60)
           (should-not (zr-erc-link--expired-p item))
           (setq now 1061)
           (should (zr-erc-link--expired-p item))
           (with-temp-buffer
-            (should-not (zr-erc-link--expired-p item)))
+            (setq-local zr-erc-link-rules
+                        '((:regexp "https?://[^[:space:]]+" :type image)))
+            (should-not (zr-erc-link--expired-p (zr-erc-link--item "https://example.test/a" nil))))
           (setf (plist-get (plist-get item :rule) :max-age) nil)
           (should-not (zr-erc-link--expired-p item))
-          (setq-local zr-erc-link-max-age nil)
           (setf (plist-get (plist-get item :rule) :max-age) 60)
           (should (zr-erc-link--expired-p item)))))))
 
@@ -551,10 +645,10 @@ TLS, when non-nil, is a list of certificate and key file names."
     (dolist (proxy '(t "" "localhost" "host:0" "host:65536" "host:bad"
                     "https://host:80" "socks5://host:80" "http://user:secret@host:80"
                     "http://host:80/path" "host:80;DIRECT" "host:80\n"))
-      (let ((zr-erc-link-proxy proxy))
-        (should-error (zr-erc-link--fetch '(:target "http://127.0.0.1/image") (point))
-                      :type 'user-error)
-        (should-not zr-erc-link--jobs))))
+      (should-error (zr-erc-link--fetch
+                     (list :target "http://127.0.0.1/image" :rule (list :proxy proxy)) (point))
+                    :type 'user-error)
+      (should-not zr-erc-link--jobs)))
   (dolist (proxy '("[::1]:7890" "http://[::1]:7890/"))
     (let ((url-proxy-locator (zr-erc-link--proxy-locator proxy)))
       (should (equal (url-find-proxy-for-url (url-generic-parse-url "https://example.test")
@@ -572,30 +666,32 @@ TLS, when non-nil, is a list of certificate and key file names."
                (connections url-http-open-connections)
                (destination (expand-file-name "download" directory)))
           (with-temp-buffer
-            (setq-local zr-erc-link-proxy proxy)
+            (setq-local zr-erc-link-rules (list (list :type 'file :proxy proxy)))
             ;; Explicit proxy overrides no_proxy; nil forces a direct request.
-            (dolist (rule '(nil (:proxy nil)))
-              (let ((job (zr-erc-link--fetch (list :target (concat base "/data") :rule rule)
-                                              (point) destination t)))
+            (dolist (direct '(nil t))
+              (let* ((rule (append '(:type file) (and direct '(:proxy nil))))
+                     (item (zr-erc-link--item (concat base "/data") nil rule))
+                     (job (zr-erc-link--fetch item (point) destination t)))
                 (with-current-buffer (zr-erc-link--job-request job)
                   (should-not (eq url-http-open-connections connections))
                   (should (equal (url-find-proxy-for-url (url-generic-parse-url base) "127.0.0.1")
-                                 (unless rule (concat proxy "/")))))
+                                 (unless direct (concat proxy "/")))))
                 (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
                 (should-not (zr-erc-link--job-error job))))
             (with-current-buffer log
               (should (= 1 (how-many "^GET " (point-min) (point-max)))))
             ;; Another buffer keeps the default (inherited direct connection).
             (with-temp-buffer
+              (setq-local zr-erc-link-rules nil)
               (let ((job (zr-erc-link--fetch (list :target (concat base "/data"))
                                               (point) destination t)))
                 (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
                 (should-not (zr-erc-link--job-error job))))
             ;; A rule can restore an inherited proxy over a local direct setting.
-            (setq-local zr-erc-link-proxy nil)
+            (setq-local zr-erc-link-rules '((:type file :proxy nil)))
             (let* ((url-proxy-locator (lambda (_url _host) (concat "PROXY " (substring proxy 7))))
-                   (job (zr-erc-link--fetch (list :target (concat base "/data") :rule '(:proxy inherit))
-                                             (point) destination t)))
+                   (item (zr-erc-link--item (concat base "/data") nil '(:type file :proxy inherit)))
+                   (job (zr-erc-link--fetch item (point) destination t)))
               (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
               (should-not (zr-erc-link--job-error job))))
           (with-current-buffer log
@@ -716,8 +812,9 @@ TLS, when non-nil, is a list of certificate and key file names."
                                          (point) destination t)))
            (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
            (should (equal (zr-erc-link-test--read destination) "0")))
-         (let* ((zr-erc-link-timeout 0.05)
-                (job (zr-erc-link--fetch (list :target (concat base "/slow")) (point) destination t)))
+         (let ((job (zr-erc-link--fetch
+                     (list :target (concat base "/slow") :rule '(:timeout 0.05))
+                     (point) destination t)))
            (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
            (should (zr-erc-link--job-error job))
            (should-not (buffer-live-p (zr-erc-link--job-request job)))))))))
@@ -728,14 +825,15 @@ TLS, when non-nil, is a list of certificate and key file names."
    (lambda (base _directory)
      (with-temp-buffer
        (insert "image link\n")
-       (let ((zr-erc-link-use-ffmpeg t)
-             (zr-erc-link-max-width 160) (zr-erc-link-max-height 100)
-             job)
+       (let (job)
          ;; This terminal build has no image support.  The actual HTTP and
          ;; FFmpeg pipeline still runs; inspect the output and display property.
          (cl-letf (((symbol-function 'create-image)
                     (lambda (file &rest _) (list 'image :type 'png :file file))))
-           (setq job (zr-erc-link--fetch (list :target (concat base "/image.png") :type 'image) 1))
+           (setq job (zr-erc-link--fetch
+                      (list :target (concat base "/image.png") :type 'image
+                            :rule (list :ffmpeg (executable-find "ffmpeg") :max-width 160 :max-height 100))
+                      1))
            (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job))))
          (should-not (zr-erc-link--job-error job))
          (let ((file (zr-erc-link--job-preview job)))
@@ -748,6 +846,28 @@ TLS, when non-nil, is a list of certificate and key file names."
            (zr-erc-link--cleanup-buffer)
            (should-not (file-exists-p file))
            (should-not (file-exists-p (zr-erc-link--job-raw job)))))))))
+
+(ert-deftest zr-erc-link-http-inherited-response-limit ()
+  (zr-erc-link-test--server
+   (lambda (base directory)
+     (with-temp-buffer
+       (let* ((zr-erc-link-rules '((:type file :max-bytes 12 :timeout 2)
+                                  (:regexp "https?://[^[:space:]]+" :type file)))
+              (destination (expand-file-name "download" directory))
+              (item (zr-erc-link--item (concat base "/data") nil)))
+         (write-region "original" nil destination nil 'silent)
+         (let ((job (zr-erc-link--fetch item (point) destination t)))
+           (should (= (zr-erc-link--job-timeout job) 2))
+           (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
+           (should (zr-erc-link--job-error job))
+           (should (equal (zr-erc-link-test--read destination) "original")))
+         ;; A specific rule can raise the inherited response limit.
+         (setf (plist-get (cadr zr-erc-link-rules) :max-bytes) 13)
+         (let ((job (zr-erc-link--fetch (zr-erc-link--item (concat base "/data") nil)
+                                       (point) destination t)))
+           (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
+           (should-not (zr-erc-link--job-error job))
+           (should (= (length (zr-erc-link-test--read destination)) 13))))))))
 
 (provide 'zr-erc-link-test)
 ;;; zr-erc-link-test.el ends here

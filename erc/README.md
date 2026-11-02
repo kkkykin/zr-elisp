@@ -305,6 +305,37 @@ as the other modules. `:replace` expands regexp backreferences with case
 preserved; without it, the matched text is the action target. The displayed
 text remains unchanged. There is no automatic punctuation trimming.
 
+A default entry has `:type` and parameters, with neither `:regexp` nor
+`:url-tag`. It supplies defaults to later matching rules of the same type,
+without recognizing text itself. Default entries respect `:selector` and
+merge in order: later entries override earlier entries one key at a time.
+The matching rule's own parameters override those defaults. An omitted key
+inherits its value; an explicit nil overrides it. Values such as `:headers`
+and `:auth-source` are replaced as a whole. Defaults only affect rules that
+follow them. Parameters are captured when the message button is created.
+
+For example, prepend image and file defaults to the recognition rules:
+
+```elisp
+(setq-local zr-erc-link-rules
+            (append
+             '((:type image
+                :headers (("X-Client" . "erc"))
+                :auth-source (:user "bridge") :auth-scheme bearer
+                :auto-show t :ffmpeg t :max-width 0.85 :max-height 0.6)
+               (:type file
+                :auth-source (:user "bridge") :auth-scheme bearer
+                :proxy inherit :dir "~/downloads/"
+                :headers (("X-Client" . "curl"))))
+             zr-erc-link-rules))
+```
+
+These entries configure all subsequent image/file rules in this buffer.
+A later image rule can use `:auto-show nil` or `:auth-source nil` to disable
+those inherited settings for its matches. Org and command rules do not
+inherit image/file settings. Keep matching rules in the list: a list
+containing only default entries does not create buttons.
+
 | `:type` | Action on RET/mouse-2 |
 | --- | --- |
 | `image` | Toggle an inline image from an HTTP(S) target |
@@ -355,13 +386,14 @@ fails. These manual previews work with automatic image fetching disabled.
 `M-x zr-erc-link-download` saves either type. Downloads
 run asynchronously, and overwriting a file requires confirmation. Automatic
 image fetching is off by default; it can be enabled globally, per buffer, or
-per rule. Inline images need an Emacs display with image support; downloads
+per matching rule with `:auto-show t` in `zr-erc-link-rules`. Inline images
+need an Emacs display with image support; downloads
 also work in terminal Emacs.
 
-Set `zr-erc-link-max-age` to an age limit in seconds, globally or per buffer,
-to avoid requesting expired links. The default is nil (unlimited). A rule's
-`:max-age` overrides the option; an explicit `:max-age nil` disables the limit
-for that rule. For example, only request these image links for one hour:
+Set `:max-age` to an age limit in seconds in a default entry or matching rule
+to avoid requesting expired links. The default is nil (unlimited). An
+explicit `:max-age nil` disables an inherited limit for that rule. For
+example, only request these image links for one hour:
 
 ```elisp
 (setq-local zr-erc-link-rules
@@ -376,16 +408,16 @@ links remain buttons but skip automatic previews; manual previews and
 downloads report expiration before starting a request or asking for a save
 destination. Age is checked again for each request. Existing previews and
 requests already in progress are retained. This is separate from
-`zr-erc-link-timeout`, which limits how long a request may run.
+`:timeout`, which limits how long a request may run.
 
-Use `zr-erc-link-proxy` to select an HTTP proxy for both previews and
-downloads. It supports global and buffer-local settings, with per-rule
-overrides via `:proxy`:
+Use `:proxy` to select an HTTP proxy for both previews and downloads.
+For example, prepend a default for each media type:
 
 ```elisp
-(setq-local zr-erc-link-proxy "http://127.0.0.1:7890")
-;; Alternatively, add this to an existing media rule:
-;; :proxy "http://127.0.0.1:7890"
+(setq-local zr-erc-link-rules
+            (append '((:type image :proxy "http://127.0.0.1:7890")
+                      (:type file :proxy "http://127.0.0.1:7890"))
+                    zr-erc-link-rules))
 ```
 
 The default, `inherit`, uses Emacs's existing URL proxy settings. A nil
@@ -435,18 +467,31 @@ come from a tag rather than the body:
                :url-tag "+media-url" :regexp "\\`https://" :type image)))
 ```
 
-`zr-erc-link-use-ffmpeg` enables FFmpeg conversion by default; a rule's
-`:ffmpeg` overrides it. Conversion produces a single-frame PNG preview,
+`:ffmpeg t` enables FFmpeg conversion, `:ffmpeg nil` disables it, and a string
+such as `:ffmpeg "/usr/local/bin/ffmpeg"` selects the executable. Conversion
+produces a single-frame PNG preview,
 preserves aspect ratio and does not enlarge small images. Downloads always
-save the original data. `zr-erc-link-max-width` / `-max-height` accept integer
+save the original data. `:max-width` / `:max-height` accept integer
 pixels or floating-point fractions of the current window. Preview again to
-fit a changed window size. `zr-erc-link-ffmpeg-program` selects the executable.
+fit a changed window size.
 
-Requests and conversions use `zr-erc-link-timeout`; responses larger than
-`zr-erc-link-max-bytes` are rejected. Temporary previews and pending requests
+All media settings live in `zr-erc-link-rules`. Omitted settings use these defaults:
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `:auto-show` | nil | Automatically fetch and show images |
+| `:max-age` | nil | Maximum message age in seconds; nil means unlimited |
+| `:proxy` | `inherit` | Emacs proxy settings; nil connects directly |
+| `:ffmpeg` | nil | nil disables conversion, t uses `ffmpeg`, a string selects an executable |
+| `:max-width` | 0.85 | Integer pixels or fraction of the current window |
+| `:max-height` | 0.6 | Integer pixels or fraction of the current window |
+| `:timeout` | 30 | Maximum seconds for each HTTP request or FFmpeg conversion |
+| `:max-bytes` | 67108864 | Maximum response body size in bytes (64 MiB) |
+| `:dir` | `"~/Downloads/"` | Initial directory offered when downloading |
+
+Responses larger than `:max-bytes` are rejected. Temporary previews and pending requests
 are cleaned when the module is disabled or the buffer is killed; removing a
-link from scrollback also removes its preview. `zr-erc-link-download-directory`
-sets the initial save directory.
+link from scrollback also removes its preview.
 
 ## Configuration scope
 
