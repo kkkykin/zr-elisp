@@ -16,11 +16,12 @@ When a rule yields valid candidates, :break non-nil stops further rules
 for that message, even if its candidates duplicate earlier ones.
 The default :break nil continues matching; rules yielding no valid
 candidates never stop matching.
-Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
-body, text, or (:tag TAG)), :regexp, and :groups (capture numbers, default
-\=(0)).  Without :regexp, the entire source is group 0.  For example a
-tag-only rule is (:source (:tag \"+display-name\")).  Multiple groups let
-one relaymsg sender contribute both a display name and a numeric ID.
+Each rule supports :selector (a `zr-erc-selector-match-p' selector),
+:source (sender, body, text, or (:tag TAG)), :regexp, and :groups (capture
+numbers, default \=(0)).  Without :regexp, the entire source is group 0.
+For example a tag-only rule is (:source (:tag \"+display-name\")).  Multiple
+groups let one relaymsg sender contribute both a display name and a numeric
+ID.
 Nil rules disable relay completion."
   :type 'sexp :group 'zr-erc-completion)
 (defcustom zr-erc-completion-input-regexp
@@ -47,7 +48,8 @@ Only `zr-erc-completion-input-group' is replaced, so @ stays in the input."
                         (cdr (assoc (cadr source) (plist-get context :tags)))
                       (plist-get context (intern (concat ":" (symbol-name source)))))
         for names =
-        (when (and value (zr-erc-match-p (plist-get rule :match) context))
+        (when (and value
+                   (zr-erc-selector-match-p (plist-get rule :selector) context))
           (let ((regexp (plist-get rule :regexp)))
             (when (if regexp (string-match regexp value)
                     (set-match-data (list 0 (length value))) t)

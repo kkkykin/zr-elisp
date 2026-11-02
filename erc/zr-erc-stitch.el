@@ -13,9 +13,10 @@
 (defgroup zr-erc-stitch nil "Reassemble clipped messages." :group 'erc)
 (defcustom zr-erc-stitch-rules nil
   "Rules identifying split messages, evaluated in order.
-Each plist accepts :match (a `zr-erc-match-p' selector), :end (a suffix
-regexp removed when another fragment follows), :start (an optional prefix
-regexp removed from subsequent fragments), and :separator (default empty).
+Each plist accepts :selector (a `zr-erc-selector-match-p' selector),
+:end (a suffix regexp removed when another fragment follows), :start (an
+optional prefix regexp removed from subsequent fragments), and :separator
+(default empty).
 Instead of :end, :more-tag may be (TAG . REGEXP), matching a tag whose value
 indicates another fragment follows.  :group-tag optionally requires the
 same tag value across fragments.  Nil rules disable stitching locally."
@@ -47,7 +48,7 @@ same tag value across fragments.  Nil rules disable stitching locally."
 (defun zr-erc-stitch--more-p (rule context)
   "Whether RULE and CONTEXT indicate another fragment follows."
   (or (when-let* ((tag (plist-get rule :more-tag)))
-        (zr-erc-match-p (list :tags (list tag)) context))
+        (zr-erc-selector-match-p (list :tags (list tag)) context))
       (when-let* ((regexp (plist-get rule :end))
                   (text (plist-get context :body)))
         (let ((case-fold-search nil))
@@ -105,7 +106,7 @@ same tag value across fragments.  Nil rules disable stitching locally."
         (previous (zr-erc-stitch--pending-context pending)))
     (and (equal (erc-response.sender old) (erc-response.sender parsed))
          (equal (erc-response.command old) (erc-response.command parsed))
-         (zr-erc-match-p (plist-get rule :match) context)
+         (zr-erc-selector-match-p (plist-get rule :selector) context)
          (cl-every (lambda (tag)
                      (equal (assoc tag (plist-get previous :tags))
                             (assoc tag (plist-get context :tags))))
@@ -130,7 +131,8 @@ same tag value across fragments.  Nil rules disable stitching locally."
                    (with-current-buffer buffer
                      (cl-find-if
                       (lambda (candidate)
-                        (and (zr-erc-match-p (plist-get candidate :match) context)
+                        (and (zr-erc-selector-match-p
+                              (plist-get candidate :selector) context)
                              (zr-erc-stitch--more-p candidate context)))
                       zr-erc-stitch-rules)))))
       (when rule

@@ -108,7 +108,7 @@ Reject invalid tag names before constructing a protocol message."
         :network (let ((network (erc-network)))
                    (and network (format "%s" network)))))
 
-(defun zr-erc-match-p (selector context)
+(defun zr-erc-selector-match-p (selector context)
   "Return non-nil if every condition in SELECTOR matches CONTEXT.
 String fields use Emacs regexps.  :tags is an alist of tag names and
 regexps; nil requires only that the tag be present.  Nil SELECTOR matches

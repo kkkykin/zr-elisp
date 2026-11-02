@@ -18,9 +18,9 @@ evaluation stops if that rule specifies :break non-nil; otherwise
 subsequent rules continue to be evaluated.  The first effective rule
 specifying :replace-sender sets the displayed nickname.  Multiple rules
 yielding text replacements are applied in order, skipping overlapping ranges.
-Each rule supports :match (a `zr-erc-match-p' selector), :source (sender,
-body, text, or (:tag TAG), default text), :break (default nil), and an
-optional :regexp.
+Each rule supports :selector (a `zr-erc-selector-match-p' selector),
+:source (sender, body, text, or (:tag TAG), default text), :break (default nil),
+and an optional :regexp.
 :replace-sender and :replace-text are optional strings or functions.
 Strings use `replace-match' backreferences, with case preserved.  Functions
 receive the original context plus :source, :value and a :groups vector
@@ -67,7 +67,7 @@ continue matching.  The first effective rule specifying :replace-sender sets
        for value = (if (consp source)
                        (cdr (assoc (cadr source) (plist-get context :tags)))
                      (plist-get context (intern (concat ":" (symbol-name source)))))
-       when (and value (zr-erc-match-p (plist-get rule :match) context))
+       when (and value (zr-erc-selector-match-p (plist-get rule :selector) context))
        do
        (let ((regexp (plist-get rule :regexp)))
          (when (if regexp (string-match regexp value)

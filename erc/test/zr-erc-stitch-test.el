@@ -96,11 +96,12 @@
       (should (= 0 (hash-table-count zr-erc-stitch--pending))))))
 
 (ert-deftest zr-erc-stitch-rule-selectors ()
-  (should (zr-erc-match-p '(:sender "onebot$" :tags (("+relay" . "^yes$")))
-                          '(:sender "bridge-onebot" :tags (("+relay" . "yes")))))
-  (should-not (zr-erc-match-p '(:tags (("+relay"))) '(:tags nil)))
+  (should (zr-erc-selector-match-p
+           '(:sender "onebot$" :tags (("+relay" . "^yes$")))
+           '(:sender "bridge-onebot" :tags (("+relay" . "yes")))))
+  (should-not (zr-erc-selector-match-p '(:tags (("+relay"))) '(:tags nil)))
   (zr-erc-stitch-test--with-server
-    (let ((zr-erc-stitch-rules '((:match (:sender "^bridge$") :end " END\\'"))))
+    (let ((zr-erc-stitch-rules '((:selector (:sender "^bridge$") :end " END\\'"))))
       (should-not (zr-erc-stitch--receive erc-server-process
                                          (zr-erc-stitch-test--message "one END")))
       (zr-erc-stitch--receive erc-server-process

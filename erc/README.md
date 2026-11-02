@@ -51,14 +51,16 @@ also sends a Unicode `RELAYMSG`: configure the isolated Ergo with
 (erc-zr-stitch-mode 1)
 ;; These options also support setq-local in an ERC buffer.
 (setq zr-erc-stitch-rules
-      '((:match (:sender "bridge\\|onebot")
+      '((:selector (:sender "bridge\\|onebot")
          :end " <clipped message>\\'"
          :start "\\`<clipped message> " :separator "")))
 ```
 
-`zr-erc-stitch-rules` defaults to nil. Rules without `:match` work for any sender.
-`:match` optionally selects a sender, target, server, network, body, or tags.
-For example, `:match (:tags (("+bridge" . "^onebot$")))` requires that tag value.
+`zr-erc-stitch-rules` defaults to nil. Rules without `:selector` work for
+any sender.
+`:selector` optionally selects a sender, target, server, network, body, or tags.
+It is evaluated by `zr-erc-selector-match-p`.
+For example, `:selector (:tags (("+bridge" . "^onebot$")))` requires that tag value.
 `:more-tag ("+continued" . "^1$")` can replace `:end`; `:group-tag "+group"`
 prevents merging different groups from the same sender.
 
@@ -104,7 +106,7 @@ they duplicate earlier candidates. Rules yielding no valid candidates are skippe
 In the examples, `:break t` keeps a successful relay extraction from also adding
 the raw nickname through the fallback. The second example combines a tag display
 name with the sender's name and numeric ID. `:groups (2)` extracts only the ID.
-`:source body` extracts from the message body; `:match` accepts the same
+`:source body` extracts from the message body; `:selector` accepts the same
 selectors as stitching. `zr-erc-completion-input-regexp` and
 `zr-erc-completion-input-group` control the trigger and the portion replaced.
 `zr-erc-completion-history-limit` bounds the amount of history scanned.
@@ -126,7 +128,7 @@ the conversation buffer; no rejoin is needed:
 
 ```elisp
 (setq-local zr-erc-display-rules
-            '((:match (:sender "\\`nichi_bot\\'")
+            '((:selector (:sender "\\`nichi_bot\\'")
                :source body :regexp "\\[\\([^]]+\\)\\][ \t]*"
                :replace-sender "\\1" :replace-text "")))
 (erc-zr-display-mode 1)
@@ -151,7 +153,7 @@ Use captures to preserve or rearrange parts of that match:
 
 ```elisp
 (setq-local zr-erc-display-rules
-            '((:match (:sender "\\`nichi_bot\\'")
+            '((:selector (:sender "\\`nichi_bot\\'")
                :source body :regexp "\\`\\[\\([^]]+\\)\\] *\\(.*\\)"
                :replace-sender "\\1" :replace-text "\\2")))
 (zr-erc-display-refresh)
@@ -216,7 +218,7 @@ remapping, then builds rule contexts for all modules. A canonical tag in the
 message wins over its alias, even when empty. Remapping is applied once,
 without chaining, and does not modify the raw IRC message.
 
-The extraction sources are distinct; `:match` uses the same selectors as
+The extraction sources are distinct; `:selector` uses the same selectors as
 the other modules:
 
 | Source | Contents |
@@ -298,7 +300,7 @@ display replacements and do not get this alignment update.
 `zr-erc-link-rules` matches displayed message text with `:regexp` and turns
 matches into buttons. Rules run in order; earlier rules win overlapping
 ranges. A rule can match multiple occurrences. Empty matches are ignored,
-and nil rules disable recognition. `:match` uses the same message selectors
+and nil rules disable recognition. `:selector` uses the same message selectors
 as the other modules. `:replace` expands regexp backreferences with case
 preserved; without it, the matched text is the action target. The displayed
 text remains unchanged. There is no automatic punctuation trimming.
@@ -329,7 +331,7 @@ For a bridge's merged-forward message, put a command rule before the defaults:
 
 This turns `[查看合并转发：ircs://host:6697/#channel?key]` into a button
 that executes `/join #channel key`. It uses the current connection; the URL
-host does not select or establish a different connection. Use `:match` to
+host does not select or establish a different connection. Use `:selector` to
 scope a bridge rule to the appropriate server/channel. Command targets must
 start with a slash command and cannot contain newlines.
 
@@ -424,12 +426,12 @@ Bearer token. `:auth-header` changes the header name. Credentials are resolved
 at request time, not stored in the message button. Redirects are rejected;
 use a rewrite to the final resource URL.
 
-As with the other modules, `:match` accepts message selectors. A URL can also
+As with the other modules, `:selector` accepts message selectors. A URL can also
 come from a tag rather than the body:
 
 ```elisp
 (setq-local zr-erc-link-rules
-            '((:match (:tags (("+media-kind" . "^image$")))
+            '((:selector (:tags (("+media-kind" . "^image$")))
                :url-tag "+media-url" :regexp "\\`https://" :type image)))
 ```
 

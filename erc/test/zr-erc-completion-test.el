@@ -21,7 +21,7 @@
 
 (ert-deftest zr-erc-completion-tags-and-selectors ()
   (let ((zr-erc-completion-rules
-         '((:match (:tags (("+bridge" . "^onebot$")))
+         '((:selector (:tags (("+bridge" . "^onebot$")))
             :source (:tag "+name") :regexp "^\\([^/]+\\)/" :groups (1)))))
     (should (equal (zr-erc-completion--extract
                     '(:tags (("+bridge" . "onebot") ("+name" . "白雪/onebot"))))
@@ -57,7 +57,8 @@
 (ert-deftest zr-erc-completion-break-requires-valid-candidates ()
   (dolist (case '(((:source body :regexp "missing" :break t) (:body "hello"))
                   ((:source (:tag "+missing") :break t) nil)
-                  ((:match (:sender "^other$") :source body :break t) (:body "name"))
+                  ((:selector (:sender "^other$") :source body :break t)
+                   (:body "name"))
                   ((:source body :break t) (:body ""))
                   ((:source body :break t) (:body "   "))
                   ((:source body :break t) (:body "bad\nname"))

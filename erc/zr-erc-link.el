@@ -28,8 +28,9 @@ Regexps match displayed message text, case-sensitively.  Every nonempty
 match becomes a button; earlier rules win overlapping ranges.
 :replace is an optional string using `replace-match' backreferences,
 with case preserved.  Without it, the entire match is the target.
-:match is a `zr-erc-match-p' selector.  :url-tag reads a tag instead of
-message text and appends a button; without :replace its whole value is used.
+:selector is a `zr-erc-selector-match-p' selector.  :url-tag reads a tag
+instead of message text and appends a button; without :replace its whole
+value is used.
 Image/file targets must be HTTP(S) URLs.  Command targets must be single
 slash commands, executed in the clicked buffer by `erc-send-input'.
 Org targets are passed to `org-link-open-from-string' when clicked.
@@ -109,7 +110,7 @@ When ONLY-RULE is non-nil, only consider that rule."
     (let ((case-fold-search nil))
       (cl-loop
        for rule in (if only-rule (list only-rule) zr-erc-link-rules)
-       when (and (zr-erc-match-p (plist-get rule :match) context)
+       when (and (zr-erc-selector-match-p (plist-get rule :selector) context)
                  (string-match (or (plist-get rule :regexp) "\\`\\(?:.\\|\n\\)*\\'") value))
        thereis
        (zr-erc-link--make-item
@@ -524,7 +525,7 @@ Existing files require explicit OVERWRITE permission."
           ranges seen tagged)
       (save-excursion
         (dolist (rule zr-erc-link-rules)
-          (when (zr-erc-match-p (plist-get rule :match) context)
+          (when (zr-erc-selector-match-p (plist-get rule :selector) context)
             (if-let* ((tag (plist-get rule :url-tag)))
                 (when-let* ((value (cdr (assoc tag (plist-get context :tags))))
                             (item (zr-erc-link--item value context rule)))

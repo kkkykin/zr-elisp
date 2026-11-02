@@ -67,7 +67,8 @@
                        '("project:123" "project:456" "https://[::1]/a(b)]")))))))
 
 (ert-deftest zr-erc-link-nil-rules-and-selectors ()
-  (dolist (rules '(nil ((:regexp "https?://[^[:space:]]+" :type org :match (:sender "^other!")))))
+  (dolist (rules '(nil ((:regexp "https?://[^[:space:]]+" :type org
+                        :selector (:sender "^other!")))))
     (with-temp-buffer
       (let ((zr-erc-link-rules rules)
             (erc-message-parsed (make-erc-response :command "PRIVMSG" :sender "bot!u@h")))
@@ -160,7 +161,7 @@ TLS, when non-nil, is a list of certificate and key file names."
 (ert-deftest zr-erc-link-regex-rewrite-and-tag-button ()
   (let ((zr-erc-link-rules
          '((:regexp "https://cdn.test/\\(.+\\)" :replace "https://proxy.test/\\1"
-            :type image :match (:tags (("+bridge" . "^onebot$")))))))
+            :type image :selector (:tags (("+bridge" . "^onebot$")))))))
     (should-not (zr-erc-link--item "https://cdn.test/a" nil))
     (should (equal (plist-get (zr-erc-link--item "https://cdn.test/a"
                                                 '(:tags (("+bridge" . "onebot")))) :target)

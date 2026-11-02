@@ -8,7 +8,7 @@
 (require 'zr-erc-reply)
 
 (defconst zr-erc-display-test--rules
-  '((:match (:sender "^nichi_bot$")
+  '((:selector (:sender "^nichi_bot$")
      :source text :regexp "\\[\\([^]]+\\)\\]" :replace-sender "\\1")))
 
 (defun zr-erc-display-test--message (name)
@@ -21,7 +21,7 @@
 
 (ert-deftest zr-erc-display-extraction ()
   (let ((zr-erc-display-rules
-         '((:match (:sender "^bot$") :source body
+         '((:selector (:sender "^bot$") :source body
             :regexp "\\[\\([^]|]+\\)|\\([^]]+\\)\\]" :replace-sender "\\2")
            (:source (:tag "+display-name") :replace-sender "\\&"))))
     (should (equal (plist-get (zr-erc-display--match
@@ -74,7 +74,7 @@
 (ert-deftest zr-erc-display-incoming-metadata ()
   (let ((erc-modules nil)
         (zr-erc-display-rules
-         '((:match (:sender "^nichi_bot$") :source body
+         '((:selector (:sender "^nichi_bot$") :source body
             :regexp "\\[\\([^]]+\\)\\]" :replace-sender "\\1"))))
     (with-temp-buffer
       (erc-mode)
@@ -223,7 +223,8 @@
          (raw (erc-response.unparsed parsed))
          (context (zr-erc-context parsed)))
     (should (equal (plist-get (zr-erc-display--match context) :sender) "Sydney Dian"))
-    (should (zr-erc-match-p '(:tags (("+display-name" . "^Sydney Dian$"))) context))
+    (should (zr-erc-selector-match-p
+             '(:tags (("+display-name" . "^Sydney Dian$"))) context))
     (should-not (assoc "+draft/display-name" (plist-get context :tags)))
     (should (equal (erc-response.unparsed parsed) raw))
     (let ((zr-erc-message-tag-receive-remap nil))
@@ -918,9 +919,9 @@ Measure a separate buffer containing the literal rendered text."
   ;; Multiple rules without :break all apply (sender + multiple texts).
   (let ((zr-erc-display-rules
          '((:source sender :regexp "\\`\\(.+\\)-[0-9]+/onebot\\'" :replace-sender "\\1")
-           (:match (:body "\\[图片\\] ")
+           (:selector (:body "\\[图片\\] ")
             :source body :regexp "https?://[^[:space:]]+" :replace-text "[看看]")
-           (:match (:body "\\`\\[合并转发\\] ")
+           (:selector (:body "\\`\\[合并转发\\] ")
             :source body :regexp "\\[查看合并转发：\\(/join #[^]\n]+\\)\\]" :replace-text "[查看合并转发]"))))
     (let ((res (zr-erc-display--match
                 '(:sender "Alice-12345/onebot"
