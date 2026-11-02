@@ -18,6 +18,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'zr-terminal)
 
 (defvar org-id-method)
 (declare-function org-id-new "org-id")
@@ -25,19 +26,24 @@
 (defconst zr-wezterm-chunk-size (* 32 1024)
   "Maximum bytes in one OSC 1337 sequence, including Base64 and framing.")
 
-(defun zr-wezterm--encode-osc (json)
-  "Encode JSON as an OSC 1337 sequence for the user variable ZRTransport."
-  (format "\e]1337;SetUserVar=ZRTransport=%s\a"
+(defun zr-wezterm--osc-payload (json)
+  "Encode JSON as the OSC 1337 payload for the user variable ZRTransport."
+  (format "SetUserVar=ZRTransport=%s"
           (base64-encode-string
            (encode-coding-string json 'utf-8 t)
            t)))
 
-(defun zr-wezterm--osc (json)
-  "Send JSON to WezTerm, enforcing `zr-wezterm-chunk-size'."
-  (let ((sequence (zr-wezterm--encode-osc json)))
+(defun zr-wezterm--encode-osc (json)
+  "Encode JSON as an OSC 1337 sequence for the user variable ZRTransport."
+  (zr-terminal-encode-osc 1337 (zr-wezterm--osc-payload json)))
+
+(defun zr-wezterm--osc (json &optional frame)
+  "Send JSON to FRAME's WezTerm, enforcing `zr-wezterm-chunk-size'."
+  (let* ((payload (zr-wezterm--osc-payload json))
+         (sequence (zr-terminal-encode-osc 1337 payload)))
     (when (> (length sequence) zr-wezterm-chunk-size)
       (error "WezTerm OSC message exceeds `zr-wezterm-chunk-size'"))
-    (send-string-to-terminal sequence)))
+    (zr-terminal-send-osc 1337 payload frame)))
 
 (defun zr-wezterm--chunks (json id)
   "Split JSON into serialized chunk messages for transfer ID.
@@ -76,12 +82,15 @@ Keep character boundaries and fit each complete OSC sequence within
     (nreverse chunks)))
 
 ;;;###autoload
-(defun zr-wezterm-send-json (object)
-  "Send OBJECT to WezTerm as JSON.
+(defun zr-wezterm-send-json (object &optional frame)
+  "Send OBJECT to WezTerm as JSON through FRAME's terminal.
+FRAME defaults to the selected frame.  All messages use that terminal,
+even if the selected frame changes during the transfer.
 Return non-nil once the last message has been sent."
   (unless (fboundp 'org-id-new)
     (require 'org-id))
-  (let* ((raw-payload (json-serialize object))
+  (let* ((frame (or frame (selected-frame)))
+         (raw-payload (json-serialize object))
          (payload (if (multibyte-string-p raw-payload)
                       raw-payload
                     (decode-coding-string raw-payload 'utf-8)))
@@ -96,15 +105,17 @@ Return non-nil once the last message has been sent."
            (json-serialize
             `((op . "begin")
               (id . ,id)
-              (total . ,total))))
+              (total . ,total)))
+           frame)
 
           (dolist (chunk chunks)
-            (zr-wezterm--osc chunk))
+            (zr-wezterm--osc chunk frame))
 
           (zr-wezterm--osc
            (json-serialize
             `((op . "end")
-              (id . ,id))))
+              (id . ,id)))
+           frame)
 
           (setq ok t))
 
@@ -113,7 +124,8 @@ Return non-nil once the last message has been sent."
          (zr-wezterm--osc
           (json-serialize
            `((op . "abort")
-             (id . ,id)))))
+             (id . ,id)))
+          frame))
        (signal (car err) (cdr err))))
 
     ok))

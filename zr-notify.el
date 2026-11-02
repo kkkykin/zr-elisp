@@ -8,12 +8,14 @@
 
 ;; Set appt-disp-window-function to `zr-notify-appointment' to opt in.
 ;; Reminder schedules remain personal configuration.
+;; Set `zr-notify-function' to `zr-notify-terminal' for OSC 777 notifications.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'subr-x)
 (autoload 'zr-termux-notify "zr-termux")
+(autoload 'zr-terminal-notify "zr-terminal")
 (declare-function notifications-notify "notifications")
 (declare-function android-notifications-notify "androidselect.c")
 (declare-function w32-notification-notify "w32fns.c")
@@ -25,10 +27,21 @@
   :group 'applications)
 
 (defcustom zr-notify-function nil
-  "Optional notification function accepting TITLE, BODY and keyword arguments."
-  :type '(choice (const nil) function))
+  "Optional notification function accepting TITLE, BODY and keyword arguments.
+Use `zr-notify-terminal' to send OSC 777 notifications to a terminal frame."
+  :type '(choice (const :tag "Platform default" nil)
+                 (const :tag "Terminal (OSC 777)" zr-notify-terminal)
+                 function))
 
 (defvar zr-notify--windows-timers (make-hash-table :test #'equal))
+
+;;;###autoload
+(defun zr-notify-terminal (title body &rest options)
+  "Send TITLE and BODY through the OSC 777 terminal notification backend.
+The :frame option selects a terminal frame, defaulting to the selected
+frame.  Other OPTIONS are ignored; OSC 777 has no notification IDs,
+timeouts, urgency levels or actions.  Return t after sending."
+  (zr-terminal-notify title body (plist-get options :frame)))
 
 (defun zr-notify-send (title body &rest options)
   "Send TITLE and BODY with OPTIONS.  Timeout values are milliseconds."

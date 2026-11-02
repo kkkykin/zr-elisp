@@ -30,7 +30,7 @@
 (declare-function dired-get-marked-files "dired"
                   (&optional localp arg filter distinguish-one-marked error))
 (declare-function dired-current-directory "dired" (&optional localp))
-(declare-function zr-wezterm-send-json "zr-wezterm" (object))
+(declare-function zr-wezterm-send-json "zr-wezterm" (object &optional frame))
 
 (defvar savehist-additional-variables)
 

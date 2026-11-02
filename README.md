@@ -33,6 +33,25 @@
 Minor mode 用参数 `-1` 关闭。路径、快捷键及站点配置由个人初始化文件设置。
 各模块的配置与入口见对应文件的 Commentary 和 docstring；Org、ERC 的详细说明见目录中的 README。
 
+`zr-terminal` 提供公共 OSC 编码、发送和 OSC 777 通知，`zr-wezterm` 负责
+`ZRTransport` JSON 分块传输。发送接口默认使用当前终端 frame，也可传入明确的
+frame，适合 daemon 的多个终端连接。目标必须是存活的终端 frame。
+
+在支持 OSC 777 notify 扩展的终端（如 WezTerm）中，可以直接发送通知，
+或显式配置 `zr-notify` 使用终端通知后端：
+
+```elisp
+(require 'zr-terminal)
+(zr-terminal-notify "Emacs" "任务完成")
+
+(use-package zr-notify
+  :custom (zr-notify-function #'zr-notify-terminal))
+;; (zr-notify-send "Emacs" "任务完成" :frame terminal-frame)
+```
+
+通知文本里的分号和控制字符会替换为空格。终端通知后端仅使用 `:frame` 选项，
+不提供通知 ID、超时、优先级或操作按钮；加载库时不会自动更换通知后端。
+
 ## 验证
 
 ```sh

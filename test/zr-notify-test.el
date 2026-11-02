@@ -45,5 +45,18 @@
       (funcall callback)
       (should (= closed 10)))))
 
+(ert-deftest zr-notify-test-terminal-backend ()
+  "Opting in sends a terminal notification and forwards only its frame."
+  (let ((zr-notify-function #'zr-notify-terminal) seen)
+    (cl-letf (((symbol-function 'zr-terminal-notify)
+               (lambda (title body frame)
+                 (setq seen (list title body frame))
+                 t)))
+      (should (zr-notify-send "title" "body" :frame 'client-frame
+                              :timeout 500 :urgency 'critical :replaces-id 100))
+      (should (equal seen '("title" "body" client-frame)))
+      (zr-notify-appointment '("1" "3") nil '("first" "second"))
+      (should (equal seen '("In 1, 3 minutes" "first\nsecond" nil))))))
+
 (provide 'zr-notify-test)
 ;;; zr-notify-test.el ends here

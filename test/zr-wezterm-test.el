@@ -17,7 +17,10 @@
        (file-name-directory (or load-file-name buffer-file-name)))
       nil 'nomessage)
 
-(declare-function zr-wezterm-send-json "zr-wezterm")
+(declare-function zr-wezterm-send-json "zr-wezterm" (object &optional frame))
+(declare-function zr-wezterm--encode-osc "zr-wezterm" (json))
+(declare-function zr-wezterm--chunks "zr-wezterm" (json id))
+(declare-function zr-wezterm--osc "zr-wezterm" (json &optional frame))
 
 (defvar zr-wezterm-chunk-size)
 
@@ -31,7 +34,7 @@
   "The OSC payload is base64-encoded UTF-8, including non-ASCII text."
   (let ((json "{\"text\":\"中文😀\"}") sent)
     (cl-letf (((symbol-function 'send-string-to-terminal)
-               (lambda (string) (setq sent string))))
+               (lambda (string _frame) (setq sent string))))
       (zr-wezterm--osc json))
     (let* ((prefix "\e]1337;SetUserVar=ZRTransport=")
            (encoded (substring sent (length prefix) -1)))
@@ -53,14 +56,15 @@
     (dolist (chunk chunks)
       (should (<= (length (zr-wezterm--encode-osc chunk)) zr-wezterm-chunk-size)))))
 
-(defun zr-wezterm-test--send (object chunk-size &optional fail-p)
+(defun zr-wezterm-test--send (object chunk-size &optional fail-p frame)
   "Send OBJECT in chunks of CHUNK-SIZE, returning non-nil on success.
-With FAIL-P, fail while sending the second chunk."
+With FAIL-P, fail while sending the second chunk.  Use FRAME's terminal."
   (let ((chunks 0)
         sent)
     (setq zr-wezterm-test--payload (json-serialize object))
     (cl-letf (((symbol-function 'zr-wezterm--osc)
-               (lambda (json)
+               (lambda (json target)
+                 (should (eq target (or frame (selected-frame))))
                  (let ((message (json-parse-string json :object-type 'plist)))
                    (when (and fail-p
                               (equal "chunk" (plist-get message :op))
@@ -72,7 +76,7 @@ With FAIL-P, fail while sending the second chunk."
               ((symbol-function 'org-id-new) (lambda () "test-id"))
               (zr-wezterm-chunk-size chunk-size))
       (unwind-protect
-          (zr-wezterm-send-json object)
+          (zr-wezterm-send-json object frame)
         (setq zr-wezterm-test--messages
               (mapcar (lambda (json)
                         (json-parse-string json :object-type 'plist))
@@ -121,6 +125,25 @@ the underlying `json-serialize' returns a unibyte string (as in Emacs 30)."
     (should (equal "abort" (plist-get last :op)))
     (should (equal "test-id" (plist-get last :id)))))
 
+(ert-deftest zr-wezterm-test-send-json-keeps-explicit-target ()
+  "Every message, including an abort, uses the requested client terminal."
+  (let ((object `((text . ,(make-string 256 ?x)))))
+    (should (zr-wezterm-test--send object 128 nil 'client-frame))
+    (should-error (zr-wezterm-test--send object 128 t 'client-frame))))
+
+(ert-deftest zr-wezterm-test-send-json-keeps-original-selected-frame ()
+  "Changing the selected frame cannot redirect a transfer in progress."
+  (let ((selected 'first-frame) frames)
+    (cl-letf (((symbol-function 'selected-frame) (lambda () selected))
+              ((symbol-function 'org-id-new) (lambda () "test-id"))
+              ((symbol-function 'zr-wezterm--osc)
+               (lambda (_json frame)
+                 (push frame frames)
+                 (setq selected 'second-frame))))
+      (should (zr-wezterm-send-json '((text . "hello")))))
+    (should (>= (length frames) 3))
+    (should (seq-every-p (lambda (frame) (eq frame 'first-frame)) frames))))
+
 (ert-deftest zr-wezterm-test-wire-size-and-round-trip ()
   "Every actual OSC fits the limit and reassembles to the original object."
   (dolist (limit '(160 32768))
@@ -132,7 +155,8 @@ the underlying `json-serialize' returns a unibyte string (as in Emacs 30)."
       (cl-letf (((symbol-function 'org-id-new)
                  (lambda () "12345678-1234-1234-1234-123456789012"))
                 ((symbol-function 'send-string-to-terminal)
-                 (lambda (sequence)
+                 (lambda (sequence frame)
+                   (should (eq frame (selected-frame)))
                    (should (<= (string-bytes sequence) limit))
                    (push (json-parse-string
                           (decode-coding-string
@@ -160,7 +184,7 @@ the underlying `json-serialize' returns a unibyte string (as in Emacs 30)."
         sent)
     (cl-letf (((symbol-function 'org-id-new) (lambda () "test-id"))
               ((symbol-function 'send-string-to-terminal)
-               (lambda (_) (setq sent t))))
+               (lambda (&rest _) (setq sent t))))
       (should-error (zr-wezterm-send-json '((text . "中"))))
       (should-not sent))))
 
