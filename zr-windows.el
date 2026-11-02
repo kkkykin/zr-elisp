@@ -34,6 +34,16 @@
   "Normal shell to switch back to; nil captures the current setting on first use."
   :type '(choice (const nil) file))
 
+(defcustom zr-windows-powershell-program nil
+  "Windows PowerShell executable name or path, or nil to find it automatically.
+Automatic lookup searches for powershell.exe, including from WSL, then
+powershell on native Windows."
+  :type '(choice (const :tag "Automatic" nil) file))
+
+(defcustom zr-windows-powershell-arguments '("-NoProfile" "-NonInteractive")
+  "Common PowerShell startup arguments, preceding -EncodedCommand and its script."
+  :type '(repeat string))
+
 (defcustom zr-windows-tts-voice nil
   "Installed Windows System.Speech voice name, or nil for the default."
   :type '(choice (const :tag "System default" nil) string))
@@ -74,6 +84,21 @@
       (concat "& {\n" (buffer-string) "\n} "
               (mapconcat #'zr-windows--powershell-string arguments " ")))))
 
+(defun zr-windows--powershell-command (name &rest arguments)
+  "Build a PowerShell process command for script NAME with ARGUMENTS."
+  (let* ((program
+          (or (if zr-windows-powershell-program
+                  (executable-find zr-windows-powershell-program)
+                (or (executable-find "powershell.exe")
+                    (and (eq system-type 'windows-nt)
+                         (executable-find "powershell"))))
+              (user-error "Windows PowerShell executable not found: %s"
+                          (or zr-windows-powershell-program "powershell.exe"))))
+         (script (apply #'zr-windows--powershell-script name arguments)))
+    (append (list program) zr-windows-powershell-arguments
+            (list "-EncodedCommand"
+                  (base64-encode-string (encode-coding-string script 'utf-16le) t)))))
+
 ;;;###autoload
 (defun zr-windows-register-emacs-shortcut (&optional shortcut)
   "Create or repair the Emacs Start Menu SHORTCUT for Windows notifications.
@@ -87,22 +112,16 @@ the shortcut's absolute path.  Requires native Windows and PowerShell."
   (zr-windows--require)
   (let* ((shortcut (when shortcut (expand-file-name shortcut)))
          (default-directory invocation-directory)
-         (program (or (executable-find "powershell.exe")
-                      (executable-find "powershell")
-                      (user-error "Shortcut registration requires Windows PowerShell")))
          (launcher (expand-file-name "runemacs.exe" invocation-directory))
          (target (if (file-exists-p launcher) launcher
                    (expand-file-name invocation-name invocation-directory))))
     (when (and shortcut (file-remote-p shortcut))
       (user-error "The Emacs shortcut must be a local Windows file"))
     (with-temp-buffer
-      (let* ((script (zr-windows--powershell-script
-                      "register-emacs-shortcut.ps1" shortcut target))
+      (let* ((command (zr-windows--powershell-command
+                       "register-emacs-shortcut.ps1" shortcut target))
              (coding-system-for-read 'utf-8-unix)
-             (status
-              (call-process
-               program nil t nil "-NoProfile" "-NonInteractive" "-EncodedCommand"
-               (base64-encode-string (encode-coding-string script 'utf-16le) t))))
+             (status (apply #'call-process (car command) nil t nil (cdr command))))
         (unless (eq status 0)
           (error "Emacs shortcut registration failed (%s): %s"
                  status (string-trim (buffer-string))))
@@ -118,23 +137,16 @@ the shortcut's absolute path.  Requires native Windows and PowerShell."
   "Speak TEXT asynchronously using Windows System.Speech; return the process.
 Also supports powershell.exe accessible from WSL."
   (interactive "sText: ")
-  (let* ((program (or (executable-find "powershell.exe")
-                      (and (eq system-type 'windows-nt)
-                           (executable-find "powershell"))
-                      (user-error "Windows TTS requires Windows PowerShell")))
-         (script (zr-windows--powershell-script
-                  "tts-speak.ps1" text zr-windows-tts-voice)))
-    (make-process
-     :name "zr-windows-tts" :buffer "*zr-windows-tts*"
-     :command (list program "-NoProfile" "-NonInteractive" "-EncodedCommand"
-                    (base64-encode-string (encode-coding-string script 'utf-16le) t))
-     :connection-type 'pipe :coding 'utf-8-unix :noquery t
-     :sentinel
-     (lambda (process event)
-       (when (and (memq (process-status process) '(exit signal))
-                  (not (zerop (process-exit-status process))))
-         (message "Windows TTS failed: %s (see *zr-windows-tts*)"
-                  (string-trim event)))))))
+  (make-process
+   :name "zr-windows-tts" :buffer "*zr-windows-tts*"
+   :command (zr-windows--powershell-command "tts-speak.ps1" text zr-windows-tts-voice)
+   :connection-type 'pipe :coding 'utf-8-unix :noquery t
+   :sentinel
+   (lambda (process event)
+     (when (and (memq (process-status process) '(exit signal))
+                (not (zerop (process-exit-status process))))
+       (message "Windows TTS failed: %s (see *zr-windows-tts*)"
+                (string-trim event))))))
 
 (defun zr-windows-allow-loopback (package)
   "Allow the UWP PACKAGE to connect to localhost."

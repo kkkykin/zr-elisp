@@ -34,6 +34,8 @@
 Minor mode 用参数 `-1` 关闭。路径、快捷键及站点配置由个人初始化文件设置。
 各模块的配置与入口见对应文件的 Commentary 和 docstring；Org、ERC 的详细说明见目录中的 README。
 使用脚本的模块会按自身位置查找 `scripts/`；复制或安装时需一并保留该目录结构。
+`zr-windows-powershell-program` 可指定 PowerShell 的名称或路径，默认自动查找；
+`zr-windows-powershell-arguments` 可调整快捷方式注册和 TTS 共用的启动参数。
 
 `zr-terminal` 提供公共 OSC 编码、发送和 OSC 777 通知，`zr-wezterm` 负责
 `ZRTransport` JSON 分块传输。发送接口默认使用当前终端 frame，也可传入明确的
