@@ -88,6 +88,15 @@ Android 原生 ERC 已直接调用 Android 通知 API；Windows 和 SSH Linux
 Termux 后端不会转发此接口的操作按钮和 Lisp 回调，因为 Termux 的操作
 接口接受 shell 命令，语义不同。
 
+`zr-notify-send` 在 Android 原生后端接受 `:group`，默认按 urgency 使用
+`Emacs (normal)` 等分类；显式传入的 group 会保留。Android 会记住分类的
+重要性，建议同一个分类使用固定的 urgency。
+
+ERC 可额外启用 [zr-notifications](erc/README.md#notifications)，识别含 `/`
+或中文的 RELAYMSG 发送者、过滤自己的回显，并按 channel、nick、网络、正文
+或标签配置 `:notify`、`:urgency`、Android `:group` 和 `:replaces-id`。
+默认每个会话 buffer 保存自己的通知 ID，Android 分类包含网络、会话及 urgency。
+
 Windows 上执行 `M-x zr-windows-register-emacs-shortcut`，可创建或修复当前用户
 开始菜单中的 `Emacs.lnk`，并将通知应用标识设置为 `GNU.Emacs`。已有快捷方式
 保留目标和启动参数；也可通过 Lisp 调用传入其他 `.lnk` 路径。

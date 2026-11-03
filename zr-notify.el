@@ -60,13 +60,21 @@ session when skipping an unusable frame."
     nil))
 
 (defun zr-notify-send (title body &rest options)
-  "Send TITLE and BODY with OPTIONS.  Timeout values are milliseconds."
+  "Send TITLE and BODY with OPTIONS.  Timeout values are milliseconds.
+Native Android notifications accept :group.  When omitted, its default
+includes the urgency so each group has one fixed importance level."
   (if zr-notify-function
       (apply zr-notify-function title body options)
     (pcase system-type
       ('android
        (if (fboundp 'android-notifications-notify)
-           (apply #'android-notifications-notify :title title :body body options)
+           (let ((options (copy-sequence options))
+                 (urgency (or (plist-get options :urgency) 'normal)))
+             (unless (plist-member options :group)
+               (setq options (plist-put options :group (format "Emacs (%s)" urgency))))
+             (unless (plist-member options :urgency)
+               (setq options (plist-put options :urgency urgency)))
+             (apply #'android-notifications-notify :title title :body body options))
          (apply #'zr-termux-notify title body options)))
       ('windows-nt
        (unless (fboundp 'w32-notification-notify)

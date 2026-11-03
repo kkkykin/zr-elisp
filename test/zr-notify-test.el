@@ -15,7 +15,8 @@
                    (setq seen args)
                    7)))
         (should (= (zr-notify-send "title" "body" :timeout 500) 7))
-        (should (equal seen '(:title "title" :body "body" :timeout 500)))))
+        (should (equal seen '(:title "title" :body "body" :timeout 500
+                             :group "Emacs (normal)" :urgency normal)))))
     (let ((zr-notify-function (lambda (&rest args)
                                 (setq seen args))))
       (zr-notify-appointment '("1" "3") nil '("first" "second"))
@@ -199,8 +200,28 @@
               (should (= (notifications-notify :bus :session :title "title"
                                                :body "body" :urgency 'normal)
                          7))
-              (should (equal seen '(:title "title" :body "body" :urgency normal))))
+              (should (equal seen
+                             (append '(:title "title" :body "body" :urgency normal)
+                                     (when (eq platform 'android)
+                                       '(:group "Emacs (normal)"))))))
           (zr-notify-mode -1))))))
+
+(ert-deftest zr-notify-test-android-groups-and-explicit-overrides ()
+  "Default groups distinguish importance; explicit groups and IDs survive."
+  (let ((system-type 'android) (zr-notify-function nil) seen)
+    (cl-letf (((symbol-function 'android-notifications-notify)
+               (lambda (&rest options) (setq seen options) 7)))
+      (dolist (urgency '(low normal critical))
+        (zr-notify-send "title" "body" :urgency urgency :replaces-id 42)
+        (should (equal (plist-get seen :group) (format "Emacs (%s)" urgency)))
+        (should (eq (plist-get seen :urgency) urgency))
+        (should (= (plist-get seen :replaces-id) 42)))
+      (dolist (group '("Appointments" nil))
+        (let ((options (list :group group)))
+          (apply #'zr-notify-send "title" "body" options)
+          (should (equal (plist-get seen :group) group))
+          (should (eq (plist-get seen :urgency) 'normal))
+          (should (equal options (list :group group))))))))
 
 (ert-deftest zr-notify-test-global-termux-drops-incompatible-actions ()
   (require 'notifications)

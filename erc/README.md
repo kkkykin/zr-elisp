@@ -18,7 +18,8 @@ Alternatively, configure ERC's module list before connecting:
 (add-to-list 'erc-modules 'zr-reply)
 ```
 
-The other global module names are `zr-stitch`, `zr-completion` and `zr-link`.
+The other global module names are `zr-stitch`, `zr-completion`, `zr-link`
+and `zr-notifications`.
 After changing `erc-modules` in an existing session, run
 `M-x erc-update-modules` to enable listed global modules. If they are already
 enabled through this list or earlier configuration, changing rules takes
@@ -43,6 +44,71 @@ The reply test also exercises two ERC clients on an isolated local Ergo
 when `ZR_ERC_REPLY_TEST_PORT` names its listening port. The integration test
 also sends a Unicode `RELAYMSG`: configure the isolated Ergo with
 `server.casemapping: permissive` and `server.relaymsg.available-to-chanops: true`.
+
+## Notifications
+
+`zr-notifications` extends ERC's native `match` and `notifications` modules.
+It recognizes senders such as `张三-123/onebot` on messages tagged with
+`relaymsg`, and suppresses notifications for your own echoed messages.
+The default `zr-erc-message-tag-receive-remap` maps `draft/relaymsg` to
+`relaymsg`; tag selectors use the canonical name. Native mention/query
+detection and skip predicates remain in use. Channel messages without a
+mention do not start notifying merely
+because a rule sets `:notify t`.
+
+Enable all three in an existing session:
+
+```elisp
+(require 'zr-erc-notifications)
+(erc-match-mode 1)
+(erc-notifications-mode 1)
+(erc-zr-notifications-mode 1)
+```
+
+Alternatively, require the file and add `match`, `notifications` and
+`zr-notifications` to `erc-modules` before connecting.
+
+`zr-erc-notifications-rules` uses the same `:selector` as other zr-erc
+modules. Conditions in one selector must all match; string fields use
+case-sensitive Emacs regexps. Selectors can combine `:target` (channel or
+query), `:sender` (nickname), `:network`, `:server`, `:body`, `:text`, and
+`:tags`. Sender, body and tags come from the original IRC message, before
+display replacements; `:text` is the formatted notification body. Rules
+without a selector match every notification. Later matching rules override
+only fields they explicitly specify; `:break t` stops after a matching rule.
+The rules also support `setq-local` in a conversation buffer.
+
+```elisp
+(setq zr-erc-notifications-rules
+      '((:urgency normal)
+        (:selector (:target "\\`#quiet\\'") :urgency low)
+        (:selector (:target "\\`#catcat\\'" :sender "-1111111111/onebot\\'")
+         :urgency critical)
+        (:selector (:sender "\\`noisy-bot\\'") :notify nil :break t)
+        (:selector (:tags (("+kind" . "\\`urgent\\'")))
+         :urgency critical :group "ERC alerts" :replaces-id nil)))
+```
+
+| Setting | Default | Override |
+| --- | --- | --- |
+| `:notify` | `t` | `nil` suppresses matching notifications; own echoes are always suppressed. |
+| `:urgency` | `normal` | `low`, `normal` or `critical`; `nil` resets to `normal`. |
+| `:group` | Network/server, target and urgency | A fixed Android notification category; `nil` restores the generated name. |
+| `:replaces-id` | Last notification ID for this conversation buffer | A backend ID to replace, or `nil` to create a new notification each time. |
+
+Each conversation buffer saves the ID returned by its backend, so a later
+notification replaces that conversation's previous notification without
+replacing another channel's. A custom `:replaces-id` bypasses this cache and
+does not change the default saved ID. Integer and string IDs are supported;
+backends such as OSC that return no ID cannot replace notifications.
+
+On Android, groups appear as categories in system Settings. The generated
+name is, for example, `ERC MyNetwork #catcat (critical)`. Android retains
+a group's importance, so each explicit group should use one fixed urgency.
+Including urgency in the default name allows a rule's priority to change
+without reusing a category with a different importance. Groups and urgency
+reach both ERC's direct Android API and notifications routed through
+`zr-notify-mode`. Other notifications retain their own settings.
 
 ## Clipped messages
 

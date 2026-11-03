@@ -26,7 +26,8 @@ This does not rewrite arbitrary ERC traffic."
 
 (defcustom zr-erc-message-tag-receive-remap
   '(("+draft/reply" . "+reply")
-    ("+draft/display-name" . "+display-name"))
+    ("+draft/display-name" . "+display-name")
+    ("draft/relaymsg" . "relaymsg"))
   "Alist mapping received tag names to canonical names for zr-erc modules.
 Remapping happens after tag decoding, before rule contexts are constructed.
 Mappings are applied once, without chaining.  A canonical tag present
