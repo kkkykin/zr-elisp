@@ -35,14 +35,29 @@ Use `zr-notify-terminal' to send OSC 777 notifications to a terminal frame."
                  function))
 
 (defvar zr-notify--windows-timers (make-hash-table :test #'equal))
+(defvar zr-notify--terminal-warning-issued-p nil)
 
 ;;;###autoload
 (defun zr-notify-terminal (title body &rest options)
   "Send TITLE and BODY through the OSC 777 terminal notification backend.
 The :frame option selects a terminal frame, defaulting to the selected
 frame.  Other OPTIONS are ignored; OSC 777 has no notification IDs,
-timeouts, urgency levels or actions.  Return t after sending."
-  (zr-terminal-notify title body (plist-get options :frame)))
+timeouts, urgency levels or actions.  Return t after sending, or nil
+when the target is not a live terminal frame.  Warn once per Emacs
+session when skipping an unusable frame."
+  (if-let* ((frame (or (plist-get options :frame) (selected-frame)))
+            ((frame-live-p frame))
+            ((not (display-graphic-p frame))))
+      (zr-terminal-notify title body frame)
+    (unless zr-notify--terminal-warning-issued-p
+      (setq zr-notify--terminal-warning-issued-p t)
+      (display-warning
+       'zr-notify
+       (concat "Skipping OSC notification: the target is not a live terminal frame. "
+               "Set `zr-notify-function' to nil for platform notifications, "
+               "or supply a terminal frame with :frame.")
+       :warning))
+    nil))
 
 (defun zr-notify-send (title body &rest options)
   "Send TITLE and BODY with OPTIONS.  Timeout values are milliseconds."

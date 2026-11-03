@@ -54,7 +54,10 @@ frame，适合 daemon 的多个终端连接。目标必须是存活的终端 fra
 ```
 
 通知文本里的分号和控制字符会替换为空格。终端通知后端仅使用 `:frame` 选项，
-不提供通知 ID、超时、优先级或操作按钮；加载库时不会自动更换通知后端。
+不提供通知 ID、超时、优先级或操作按钮；没有有效的目标终端 frame 时跳过通知，
+并在每个 Emacs 会话中提示一次。图形界面可将 `zr-notify-function` 设为 nil，
+使用平台默认通知后端。
+加载库时不会自动更换通知后端。
 
 启用 `zr-notify-mode` 后，调用 `notifications-notify` 的包也会使用
 `zr-notify` 后端。Android、Windows 默认使用原生通知；其他平台未设置
