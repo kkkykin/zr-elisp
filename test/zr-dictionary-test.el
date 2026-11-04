@@ -259,7 +259,7 @@
        (should-not (cl-set-difference (buffer-list) before))))))
 
 (ert-deftest zr-dictionary-test-connect-failure-cleans-buffer ()
-  (let* ((server (make-network-process :name "zr-org-srs-x-test-closed-dict"
+  (let* ((server (make-network-process :name "zr-org-srs-capture-test-closed-dict"
                                        :server t :host "127.0.0.1" :service t :noquery t))
          (dictionary-server "127.0.0.1")
          (dictionary-port (process-contact server :service))

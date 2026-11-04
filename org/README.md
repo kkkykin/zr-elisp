@@ -11,13 +11,15 @@ Org 模块统一放在 `org/`，对应测试放在 `org/test/`。
 | `zr-org-export` | Pandoc OPTIONS 和 LaTeX 图片路径修正 |
 | `zr-org-link` | 词典链接和 WezTerm 链接打开 |
 | `zr-org-protocol` | Windows 协议注册和 Netscape Cookie 导入 |
-| `zr-org-srs-x` | AnkiConnect 制卡、Org-srs 复习和 TTS |
+| `zr-org-srs` | 制卡和复习共用的保存目录 |
+| `zr-org-srs-capture` | AnkiConnect、手动和协议制卡、词典更新 |
+| `zr-org-srs-review` | 复习入口、单键面板和 TTS |
 
-以下介绍 `zr-org-srs-x` 的配置与接口。
+以下介绍制卡与复习的配置及接口。
 
 让 LunaTranslator 通过 AnkiConnect v6 HTTP 接口，把词条保存为 Org-srs 卡片。
 需要 Emacs 31.1 及以上、带 libxml 支持，并已安装 `org-srs` 和它的依赖。
-只加载库不会启动服务；用 `M-x zr-org-srs-x-start` 开始接收制卡请求。
+只加载库不会启动服务；用 `M-x zr-org-srs-capture-start` 开始接收制卡请求。
 
 ## 启用
 
@@ -26,25 +28,25 @@ Org 模块统一放在 `org/`，对应测试放在 `org/test/`。
 ```elisp
 (add-to-list 'load-path "/path/to/zr-elisp")
 (add-to-list 'load-path "/path/to/zr-elisp/org")
-(require 'zr-org-srs-x)
+(require 'zr-org-srs-capture)
 (zr-org-link-mode 1)
-(setq zr-org-srs-x-directory "~/org/srs/"
-      zr-org-srs-x-host "127.0.0.1"
-      zr-org-srs-x-port 8765)
+(setq zr-org-srs-directory "~/org/srs/"
+      zr-org-srs-capture-host "127.0.0.1"
+      zr-org-srs-capture-port 8765)
 ```
 
 也可以延迟加载：
 
 ```elisp
-(use-package zr-org-srs-x
-  :commands (zr-org-srs-x-start zr-org-srs-x-stop zr-org-srs-x-review
-             zr-org-srs-x-update-dictionaries)
-  :custom (zr-org-srs-x-directory "~/org/srs/"))
+(use-package zr-org-srs-capture
+  :commands (zr-org-srs-capture-start zr-org-srs-capture-stop zr-org-srs-capture-create-card
+             zr-org-srs-capture-update-dictionaries)
+  :custom (zr-org-srs-directory "~/org/srs/"))
 ```
 
-执行 `M-x zr-org-srs-x-start` 后，将 LunaTranslator 的 AnkiConnect 主机和端口
+执行 `M-x zr-org-srs-capture-start` 后，将 LunaTranslator 的 AnkiConnect 主机和端口
 设为同样的地址。默认是 `127.0.0.1:8765`；如果该端口已被 Anki 占用，可以
-给两端配置另一个端口。修改服务地址或端口后，执行 `zr-org-srs-x-stop` 再启动。
+给两端配置另一个端口。修改服务地址或端口后，执行 `zr-org-srs-capture-stop` 再启动。
 此服务接收桌面客户端的请求，没有认证功能。
 
 ## Deck 与 Org 文件
@@ -258,7 +260,7 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 修改第一行或 `.dir-locals.el` 后，在已打开的 deck buffer 中执行
 `M-x normal-mode`，或关闭后重新打开文件，使设置生效。
 新配置会用于之后创建的卡片。要覆盖已有卡片的词典，在 deck buffer 中执行
-`M-x zr-org-srs-x-update-dictionaries`：无选区时更新光标所在卡片，光标可位于
+`M-x zr-org-srs-capture-update-dictionaries`：无选区时更新光标所在卡片，光标可位于
 正面、背面或释义中；有选区时更新与选区相交的所有卡片。
 命令以卡片标题查词，使用当前 buffer 的 `zr-dictionary-dictionaries` 和
 `zr-dictionary-strategy`、`zr-dictionary-name-function`，替换查询链接及
@@ -270,9 +272,6 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 查询超时或服务错误会让 `addNote` 返回错误，
 不保存新卡片；全部阶段共用一个超时，默认为 10 秒，可通过
 `zr-dictionary-timeout` 修改。
-原有 `zr-org-srs-x-dictionaries`、`zr-org-srs-x-dictionary-timeout`、
-`zr-org-srs-x-dictionary-name-function` 已移除，配置与文件局部变量需使用上述新名称。
-
 ## 手动制卡与 Org protocol
 
 从 `zr-dictionary-search` 的查询结果中制卡，可添加 capture 模板：
@@ -280,32 +279,32 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
 ```elisp
 (with-eval-after-load 'org-capture
   (add-to-list 'org-capture-templates
-               (zr-org-srs-x-capture-template "d" "词典制卡")))
+               (zr-org-srs-capture-template "d" "词典制卡")))
 ```
 
-加载 `zr-org-srs-x` 后，也可以在结果 buffer 中直接按 `c` 打开这个 capture，
+加载 `zr-org-srs-capture` 后，也可以在结果 buffer 中直接按 `c` 打开这个 capture，
 无需注册或选择模板。
 
 在结果 buffer 中执行 `org-capture` 并选择 `d`，默认取光标所在词典的完整释义；
 有 region 时取与选区相交的所有词典，合成一张卡。直接复用已显示的查询结果，
 不重新查词，保留词典标题，并将 `{词语或短语}` 转成 dict link。
-使用 `zr-org-srs-x-model-alist` 的 `t` 项渲染，`word` 是原查询词；
-目标为 `t` 项的 `deck`，未配置时使用 `zr-org-srs-x-default-deck`。
+使用 `zr-org-srs-capture-model-alist` 的 `t` 项渲染，`word` 是原查询词；
+目标为 `t` 项的 `deck`，未配置时使用 `zr-org-srs-capture-default-deck`。
 默认 Back 包含查询 dict link，链接保存原查询的词典阶段和匹配策略。
 可在 capture buffer 中编辑，`C-c C-c` 保存，`C-c C-k` 取消。
 候选词列表和没有释义的位置不能制卡。
 
-`M-x zr-org-srs-x-create-card` 输入一个词或短语即可制卡。选区或光标下的词作为
+`M-x zr-org-srs-capture-create-card` 输入一个词或短语即可制卡。选区或光标下的词作为
 输入默认值；在 deck buffer 中使用 `t` 项配置的 deck，未配置时使用当前 deck。
 在其他 buffer 中会提示选择 deck，允许输入新名称；`C-u` 始终提示选择 deck。
 命令保存卡片并定位到新卡，使用 Org-srs 的 ID 和复习记录。
 默认 Front 是输入的词，Back 是词典释义。
 
-手动与协议制卡没有 model name，使用 `zr-org-srs-x-model-alist` 的 `t` 项，
+手动与协议制卡没有 model name，使用 `zr-org-srs-capture-model-alist` 的 `t` 项，
 只提供 `word` 字段，可以自定义 `name/front/back`，例如：
 
 ```elisp
-(setq zr-org-srs-x-model-alist
+(setq zr-org-srs-capture-model-alist
       '((modelofluna
          . ((deck . "Luna")
             (dictionaries . ((:server t :port t :dictionary (edict local similar))))
@@ -317,14 +316,14 @@ Org 文件和子目录中的 deck，包括之后创建的文件：
               (back . ("%s" dictionary))))))
 
 ;; 程序调用返回卡片的整数 ID；显式 deck 优先于模型配置。
-(zr-org-srs-x-create-card "hamlet")
-(zr-org-srs-x-create-card "village" "Words::Other")
+(zr-org-srs-capture-create-card "hamlet")
+(zr-org-srs-capture-create-card "village" "Words::Other")
 ```
 
 启用协议入口：
 
 ```elisp
-(zr-org-srs-x-protocol-mode 1)
+(zr-org-srs-capture-protocol-mode 1)
 ```
 
 向运行中的 Emacs server 发送 URL：
@@ -334,7 +333,7 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 ```
 
 `word` 必填，`deck` 可省略，此时使用 `t` 项的 deck 或
-`zr-org-srs-x-default-deck`（默认 `"Default"`）。参数值使用 URL 编码。
+`zr-org-srs-capture-default-deck`（默认 `"Default"`）。参数值使用 URL 编码。
 协议入口自动保存卡片；加载模块时不会注册此入口，关闭 mode 会移除注册。
 两个入口都能创建新 deck，读取目标文件和目录的局部配置，按标题检查重复，
 查询或保存失败时不留下新卡。启用和关闭 HTTP 服务不影响协议入口。
@@ -352,7 +351,7 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 如果 LunaTranslator 在 Windows、Emacs 在 WSL，可以配置路径转换：
 
 ```elisp
-(setq zr-org-srs-x-media-path-function
+(setq zr-org-srs-capture-media-path-function
       (lambda (path)
         (let ((path (subst-char-in-string ?\\ ?/ path)))
           (if (string-match "\\`\\([A-Za-z]\\):/\\(.*\\)\\'" path)
@@ -366,12 +365,44 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 
 ## 复习与自定义显示
 
-执行 `M-x zr-org-srs-x-review` 复习保存目录中的卡片。
+执行 `M-x zr-org-srs-review-start` 复习保存目录中的卡片。
+制卡和复习共用 `zr-org-srs-directory`。
 在单个 deck 文件中也可以直接运行 `M-x org-srs-review-start`。
 
-加载 `zr-org-srs-x` 后，复习开始时会在当前 buffer 的 tool-bar 加入 TTS 播放按钮。
+PC 上可以使用独立的 `zr-org-srs-review.el` transient 面板。
+复习中执行 `M-x zr-org-srs-review-menu`，或启用
+`zr-org-srs-review-menu-mode`，在开始复习时自动打开：
+
+```elisp
+(use-package zr-org-srs-review
+  :if (not zr-sys-android-gui-p)
+  :after org-srs
+  :demand t
+  :bind (:map org-mode-map
+              ("<f5>" . zr-org-srs-review-menu))
+  :config
+  (zr-org-srs-review-menu-mode 1))
+```
+
+| 按键 | 操作 |
+| --- | --- |
+| `SPC` | 显示答案；cloze 按步骤继续 |
+| `1` / `2` / `3` / `4` | Again / Hard / Good / Easy |
+| `u` / `U` | 撤销 / 重做评分 |
+| `p` / `s` | 选择延期日期 / 暂停当前卡片（COMMENT） |
+| `t` / `T` | 朗读标题 / Front |
+| `v` / `V` | 向下 / 向上滚动卡片 |
+| `q` / `Q` | 收起面板以编辑 / 结束复习 |
+
+显示答案前评分键不可用；评分、撤销、延期和暂停后面板跟随下一张卡片，
+跨 deck buffer 也会重新打开。复习结束后关闭，不占用普通 Org 编辑按键。
+收起后用 `M-x zr-org-srs-review-menu` 重新打开。
+
+模式启用时自动设置 `org-srs-item-confirm` 为 `org-srs-item-confirm-command`。
+
+加载 `zr-org-srs-review` 后，复习开始时会在当前 buffer 的 tool-bar 加入 TTS 播放按钮。
 点击朗读卡片的 `name`（标题），先按 `C-u` 再点击则朗读 `Front` 正文；
-也可以运行 `M-x zr-org-srs-x-tts` / `C-u M-x zr-org-srs-x-tts`。
+也可以运行 `M-x zr-org-srs-review-tts` / `C-u M-x zr-org-srs-review-tts`。
 切换卡片、退出或完成复习时恢复原工具栏；工具栏的显示仍由 `tool-bar-mode` 控制。
 正文链接使用描述文本，没有描述的 `file:` / `attachment:` 链接会跳过。
 
@@ -388,18 +419,18 @@ Windows 由 `zr-windows-tts-speak` 使用 `powershell.exe` 调用 `System.Speech
 ```
 
 `zr-windows-tts-voice` 默认为 `nil`，使用系统默认 voice。
-需要其他后端时，将 `zr-org-srs-x-tts-function` 设为接收一个文本参数的函数。
+需要其他后端时，将 `zr-org-srs-review-tts-function` 设为接收一个文本参数的函数。
 
-用 `zr-org-srs-x-model-alist` 按 Anki 的 `modelName` 配置卡片内容。
+用 `zr-org-srs-capture-model-alist` 按 Anki 的 `modelName` 配置卡片内容。
 模型名可以是 symbol 或字符串；每项的 cdr 是 `name/front/back` 模板 alist：
 
 ```elisp
-(setq zr-org-srs-x-model-alist
+(setq zr-org-srs-capture-model-alist
       '((modelofluna
          . ((name . ("%s" .word))
             (front . ("%s\n\n%s\n\n%s" .example_sentence picture audio))
             (back . ("%s\n\n%s" .remarks dictionary))))
-        (t . zr-org-srs-x-render-default-note)))
+        (t . zr-org-srs-capture-render-default-note)))
 ```
 
 `name` 是 Org 卡片标题，`front` 和 `back` 是正反面的 Org 文本。三项都必须提供，
@@ -452,9 +483,9 @@ Back 格式列表的参数包含 `dictionary` 才查词；省略该参数即可�
                     (alist-get 'dictionary variables) "\n\n"
                     (alist-get 'audio variables)))))
 
-(setq zr-org-srs-x-model-alist
+(setq zr-org-srs-capture-model-alist
       '((modelofluna . my-srs-card)
-        (t . zr-org-srs-x-render-default-note)))
+        (t . zr-org-srs-capture-render-default-note)))
 ```
 
 `fields` 是按模型声明顺序排列的 `((字段名字符串 . Org 文本) ...)` alist，已移除
