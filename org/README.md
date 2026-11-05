@@ -387,7 +387,7 @@ PC 上可以使用独立的 `zr-org-srs-review.el` transient 面板。
 | 按键 | 操作 |
 | --- | --- |
 | `SPC` | 显示答案；cloze 按步骤继续 |
-| `1` / `2` / `3` / `4` | Again / Hard / Good / Easy |
+| `1` / `2` / `3` / `4` | Easy / Good / Hard / Again |
 | `u` / `U` | 撤销 / 重做评分 |
 | `p` / `s` | 选择延期日期 / 暂停当前卡片（COMMENT） |
 | `t` / `T` | 朗读标题 / Front |

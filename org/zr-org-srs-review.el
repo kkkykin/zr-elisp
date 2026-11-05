@@ -7,7 +7,7 @@
 
 ;; Run `zr-org-srs-review-menu' during an Org-srs review to open a
 ;; persistent keyboard panel.  SPC reveals the answer; 1/2/3/4 rate it
-;; Again/Hard/Good/Easy.  Rating is disabled while confirmation is pending,
+;; Easy/Good/Hard/Again.  Rating is disabled while confirmation is pending,
 ;; including intermediate steps of cloze items.  Review actions reopen
 ;; the panel on the next item, even when it belongs to another buffer.
 ;; q hides the panel for ordinary Org editing; Q ends the review.
@@ -247,17 +247,17 @@ review, an error, or a switch of deck buffers cannot leave a stale panel."
 ;;;###autoload (autoload 'zr-org-srs-review-menu "zr-org-srs-review" "Open the Org-srs keyboard review panel." t)
 (transient-define-prefix zr-org-srs-review-menu ()
   "Open the single-key command panel for the current Org-srs review.
-SPC reveals the answer; 1/2/3/4 rate it Again/Hard/Good/Easy.
+SPC reveals the answer; 1/2/3/4 rate it Easy/Good/Hard/Again.
 q hides the panel so the card can be edited; Q quits the review."
   :transient-suffix 'transient--do-exit
   :refresh-suffixes t
   [["Answer / rating"
     ("SPC" "Reveal / continue" zr-org-srs-review-confirm
      :inapt-if-not zr-org-srs-review--confirm-pending-p)
-    ("1" "Again" zr-org-srs-review-rate-again :inapt-if zr-org-srs-review--confirm-pending-p)
-    ("2" "Hard" zr-org-srs-review-rate-hard :inapt-if zr-org-srs-review--confirm-pending-p)
-    ("3" "Good" zr-org-srs-review-rate-good :inapt-if zr-org-srs-review--confirm-pending-p)
-    ("4" "Easy" zr-org-srs-review-rate-easy :inapt-if zr-org-srs-review--confirm-pending-p)]
+    ("1" "Easy" zr-org-srs-review-rate-easy :inapt-if zr-org-srs-review--confirm-pending-p)
+    ("2" "Good" zr-org-srs-review-rate-good :inapt-if zr-org-srs-review--confirm-pending-p)
+    ("3" "Hard" zr-org-srs-review-rate-hard :inapt-if zr-org-srs-review--confirm-pending-p)
+    ("4" "Again" zr-org-srs-review-rate-again :inapt-if zr-org-srs-review--confirm-pending-p)]
    ["Review"
     ("u" "Undo rating" zr-org-srs-review-undo :inapt-if zr-org-srs-review--undo-empty-p)
     ("U" "Redo rating" zr-org-srs-review-redo :inapt-if zr-org-srs-review--redo-empty-p)
