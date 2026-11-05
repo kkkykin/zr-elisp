@@ -15,7 +15,9 @@
 ;; The mode sets command-based confirmation automatically.
 ;; `zr-org-srs-review-start' reviews `zr-org-srs-directory'.
 ;; TTS speaks the title or Front through Termux or Windows, with a
-;; buffer-local tool-bar button during review.
+;; buffer-local context menu during review.  Enable
+;; `zr-org-srs-review-auto-tts-mode' in a deck buffer to speak card text
+;; automatically after confirming review items (titles by default).
 ;; Loading this library does not load Org-srs or change its configuration.
 
 ;;; Code:
@@ -47,12 +49,12 @@
 (declare-function org-srs-review-add-hook-once "org-srs-review"
                   (hook function &optional depth local))
 (declare-function org-srs-item-card-regions "org-srs-item-card" ())
-(declare-function tool-bar-local-item "tool-bar" (icon def key map &rest props))
 
 (defvar org-srs-review-item)
 (defvar org-srs-review-undo-history)
 (defvar org-srs-review-start-hook)
 (defvar org-srs-item-confirm)
+(defvar org-srs-item-after-confirm-hook)
 
 (defgroup zr-org-srs-review nil
   "Review commands, TTS and keyboard panel for Org-srs items."
@@ -65,7 +67,14 @@ The default calls `zr-termux-tts-speak' when termux-tts-speak is available,
 otherwise `zr-windows-tts-speak', which also supports WSL."
   :type 'function)
 
-(defvar-local zr-org-srs-review--tool-bar nil)
+(defcustom zr-org-srs-review-auto-tts-function #'zr-org-srs-review-tts
+  "Function called without arguments after confirming a review item.
+Used by `zr-org-srs-review-auto-tts-mode'.  The default speaks the title;
+use `zr-org-srs-review-tts-front' to speak Front instead.
+Can be set buffer-locally to select a different action for each deck."
+  :type '(choice (function-item :tag "Title" zr-org-srs-review-tts)
+                 (function-item :tag "Front" zr-org-srs-review-tts-front)
+                 (function :tag "Custom function")))
 
 ;;;###autoload
 (defun zr-org-srs-review-start ()
@@ -117,36 +126,60 @@ review item even if point has moved within the buffer."
       (user-error "Card %s has no text to speak" (if front "Front" "name")))
     (funcall zr-org-srs-review-tts-function text)))
 
-(defun zr-org-srs-review--tool-bar-remove ()
-  "Restore the current buffer's tool bar after review."
-  (when zr-org-srs-review--tool-bar
-    (if (car zr-org-srs-review--tool-bar)
-        (setq-local tool-bar-map (cdr zr-org-srs-review--tool-bar))
-      (kill-local-variable 'tool-bar-map))
-    (setq zr-org-srs-review--tool-bar nil)
-    (force-mode-line-update)))
+(defun zr-org-srs-review--context-menu (menu _click)
+  "Add the Org-srs TTS submenu to context MENU."
+  (when (bound-and-true-p org-srs-review-item)
+    (define-key-after menu [org-srs]
+      '(menu-item "org-srs"
+                  (keymap
+                   (tts-title menu-item "TTS title" zr-org-srs-review-tts)
+                   (tts-front menu-item "TTS front" zr-org-srs-review-tts-front)
+                   (auto-tts menu-item "Auto TTS" zr-org-srs-review-auto-tts-mode
+                             :button (toggle . zr-org-srs-review-auto-tts-mode))))))
+  menu)
 
-(defun zr-org-srs-review--tool-bar-add (&rest _)
-  "Add the TTS button to the current review buffer's tool bar."
+(defun zr-org-srs-review--context-menu-remove ()
+  "Remove the Org-srs context menu from the current review buffer."
+  (remove-hook 'context-menu-functions #'zr-org-srs-review--context-menu t))
+
+(defun zr-org-srs-review--context-menu-add (&rest _)
+  "Add the TTS context menu to the current review buffer."
   (when (and (bound-and-true-p org-srs-review-item)
-             (not zr-org-srs-review--tool-bar))
-    (require 'tool-bar)
-    (setq zr-org-srs-review--tool-bar
-          (cons (local-variable-p 'tool-bar-map) tool-bar-map))
-    (setq-local tool-bar-map
-                (if (keymapp tool-bar-map) (copy-keymap tool-bar-map)
-                  (make-sparse-keymap)))
-    (tool-bar-local-item
-     "mpc/play" #'zr-org-srs-review-tts 'zr-org-srs-review-tts tool-bar-map
-     :label "TTS" :help "Speak card name (C-u: Front)")
+             (not (memq #'zr-org-srs-review--context-menu context-menu-functions)))
+    (add-hook 'context-menu-functions #'zr-org-srs-review--context-menu nil t)
     ;; A session can move between deck buffers; quitting skips finish-hook.
     (org-srs-review-add-hook-once
-     'org-srs-review-continue-hook #'zr-org-srs-review--tool-bar-remove 30)))
+     'org-srs-review-continue-hook #'zr-org-srs-review--context-menu-remove 30)))
 
 (with-eval-after-load 'org-srs-review
-  (add-hook 'org-srs-review-start-hook #'zr-org-srs-review--tool-bar-add)
-  (add-hook 'org-srs-item-before-review-hook #'zr-org-srs-review--tool-bar-add)
-  (add-hook 'org-srs-review-finish-hook #'zr-org-srs-review--tool-bar-remove))
+  (add-hook 'org-srs-review-start-hook #'zr-org-srs-review--context-menu-add)
+  (add-hook 'org-srs-item-before-review-hook #'zr-org-srs-review--context-menu-add)
+  (add-hook 'org-srs-review-finish-hook #'zr-org-srs-review--context-menu-remove))
+
+;;;###autoload
+(define-minor-mode zr-org-srs-review-auto-tts-mode
+  "Speak the current card after confirmation in this buffer.
+`zr-org-srs-review-auto-tts-function' selects what to speak (default: title).
+Only this buffer's `org-srs-item-after-confirm-hook' is changed.
+Playback errors are reported without interrupting the review."
+  :lighter " SRS-TTS"
+  :group 'zr-org-srs-review
+  (if zr-org-srs-review-auto-tts-mode
+      (add-hook 'org-srs-item-after-confirm-hook #'zr-org-srs-review--auto-tts nil t)
+    (remove-hook 'org-srs-item-after-confirm-hook #'zr-org-srs-review--auto-tts t)))
+
+;;;###autoload
+(put 'zr-org-srs-review-auto-tts-mode 'safe-local-variable #'booleanp)
+
+(defun zr-org-srs-review--auto-tts (&rest _)
+  "Speak the current review card without interrupting confirmation."
+  (when (and zr-org-srs-review-auto-tts-mode
+             (derived-mode-p 'org-mode)
+             (bound-and-true-p org-srs-review-item)
+             (org-srs-reviewing-p))
+    (condition-case err
+        (funcall zr-org-srs-review-auto-tts-function)
+      (error (message "Org-srs TTS: %s" (error-message-string err))))))
 
 (defun zr-org-srs-review--ensure-review ()
   "Load Org-srs and require an active review in the current Org buffer."

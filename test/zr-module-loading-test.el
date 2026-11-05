@@ -160,7 +160,8 @@
                          (featurep 'zr-org-srs-review))
                  (error "Review panel autoloads loaded dependencies"))
                (dolist (command '(zr-org-srs-review-start zr-org-srs-review-tts
-                                   zr-org-srs-review-menu zr-org-srs-review-menu-mode))
+                                   zr-org-srs-review-menu zr-org-srs-review-menu-mode
+                                   zr-org-srs-review-auto-tts-mode))
                  (unless (and (autoloadp (symbol-function command)) (commandp command))
                    (error "Missing review panel autoload: %s" command)))))
            (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"

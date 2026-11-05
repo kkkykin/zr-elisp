@@ -400,11 +400,24 @@ PC 上可以使用独立的 `zr-org-srs-review.el` transient 面板。
 
 模式启用时自动设置 `org-srs-item-confirm` 为 `org-srs-item-confirm-command`。
 
-加载 `zr-org-srs-review` 后，复习开始时会在当前 buffer 的 tool-bar 加入 TTS 播放按钮。
-点击朗读卡片的 `name`（标题），先按 `C-u` 再点击则朗读 `Front` 正文；
+加载 `zr-org-srs-review` 后，复习期间当前 buffer 的上下文菜单中会出现 `org-srs` 子菜单，
+其中 `TTS title` 朗读卡片的 `name`（标题），`TTS front` 朗读 `Front` 正文。
+通过 `M-x context-menu-open` 打开，或启用 `context-menu-mode` 后使用右键；
 也可以运行 `M-x zr-org-srs-review-tts` / `C-u M-x zr-org-srs-review-tts`。
-切换卡片、退出或完成复习时恢复原工具栏；工具栏的显示仍由 `tool-bar-mode` 控制。
+切换卡片、退出或完成复习时移除本模块的菜单，保留其他上下文菜单配置。
 正文链接使用描述文本，没有描述的 `file:` / `attachment:` 链接会跳过。
+
+在上下文菜单 `org-srs` 中勾选 `Auto TTS`，或在 deck buffer 中执行
+`M-x zr-org-srs-review-auto-tts-mode`，确认卡片后自动朗读，默认读标题。
+该模式和 `org-srs-item-after-confirm-hook` 注册都只影响当前 buffer，默认关闭；
+自动播放失败会显示提示，复习可以继续。模式变量接受安全的 boolean buffer-local 值。
+`zr-org-srs-review-auto-tts-function` 可配置为不接收参数的函数，也可按 deck buffer 设置。
+例如，在当前 buffer 改为自动朗读 Front：
+
+```elisp
+(setq-local zr-org-srs-review-auto-tts-function #'zr-org-srs-review-tts-front)
+(zr-org-srs-review-auto-tts-mode 1)
+```
 
 Android 由 `zr-termux-tts-speak` 调用 PATH 中的 `termux-tts-speak`，
 文本通过 UTF-8 stdin 传入，默认使用 `MUSIC` 音频流；需有可用的 Termux:API。
