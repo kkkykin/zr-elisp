@@ -106,6 +106,13 @@
   (interactive)
   (popup-menu (mouse-menu-bar-map) (posn-at-point)))
 
+(defun zr-android--context-menu-open ()
+  "Open the context menu at point from the toolbar."
+  (interactive)
+  ;; Let `event-start' use point instead of the toolbar click position.
+  (let ((last-input-event nil))
+    (context-menu-open)))
+
 (defun zr-android--toolbar ()
   "Install this module's toolbar entries once per modifier bar rebuild."
   (when (and modifier-bar-mode secondary-tool-bar-map)
@@ -115,7 +122,7 @@
                             (zr-help "Help" "C-h" "symbols/heart_16")
                             (zr-cu "C-u" "C-u" "symbols/star_16")))
           (command-entries '((zr-menu-bar "Menu bar" zr-android--popup-menu-bar "index")
-                             (zr-context-menu "Context menu" context-menu-open "preferences")
+                             (zr-context-menu "Context menu" zr-android--context-menu-open "preferences")
                              (zr-repeat "Repeat" repeat "symbols/dot_small_16")
                              (zr-keyboard "Keyboard" zr-android-toggle-keyboard "conceal")
                              (zr-read-only "Read only" read-only-mode "reveal"))))
