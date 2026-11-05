@@ -28,7 +28,7 @@
           (zr-android-toolbar-mode 1)
           (let ((map (tool-bar-make-keymap-1 secondary-tool-bar-map)))
             (dolist (key '(zr-quit zr-cx zr-cc zr-help zr-cu
-                          zr-repeat zr-keyboard zr-read-only))
+                          zr-menu-bar zr-context-menu zr-repeat zr-keyboard zr-read-only))
               (ert-info ((symbol-name key))
                 (let* ((binding (cdr (assq key (cdr map))))
                        (image (plist-get (nthcdr 3 binding) :image))
@@ -38,7 +38,7 @@
                   (should (stringp file))
                   (should (file-exists-p file))
                   (push file images)))))
-          (should (= (length (delete-dups images)) 8)))
+          (should (= (length (delete-dups images)) 10)))
       (zr-android-toolbar-mode -1))))
 
 (ert-deftest zr-android-test-toolbar-survives-modifier-bar-rebuilds ()
@@ -66,9 +66,9 @@
           (modifier-bar-mode 1)
           (should (= (length (cdr secondary-tool-bar-map)) 14))
           (should (equal (mapcar #'car (cdr secondary-tool-bar-map))
-                         '(control shift meta alt super hyper
+                         '(control shift meta hyper
                            zr-quit zr-cx zr-cc zr-help zr-cu
-                           zr-repeat zr-keyboard zr-read-only)))
+                           zr-menu-bar zr-context-menu zr-repeat zr-keyboard zr-read-only)))
           (dolist (entry '((zr-quit "C-g") (meta "ESC") (zr-cx "C-x")
                            (zr-cc "C-c") (zr-help "C-h") (zr-cu "C-u")))
             (let (keyboard-calls)
@@ -82,6 +82,12 @@
                                (unless (eq (car entry) 'zr-quit) '((nil nil))))))))
           (should (eq (lookup-key secondary-tool-bar-map [control])
                       'event-apply-control-modifier))
+          (should-not (lookup-key secondary-tool-bar-map [alt]))
+          (should-not (lookup-key secondary-tool-bar-map [super]))
+          (should (eq (lookup-key secondary-tool-bar-map [zr-menu-bar])
+                      'zr-android--popup-menu-bar))
+          (should (eq (lookup-key secondary-tool-bar-map [zr-context-menu])
+                      'context-menu-open))
           (should (eq (lookup-key secondary-tool-bar-map [zr-keyboard])
                       'zr-android-toggle-keyboard))
           (should (eq (lookup-key secondary-tool-bar-map [zr-repeat]) 'repeat))

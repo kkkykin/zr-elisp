@@ -101,6 +101,11 @@
   (frame-toggle-on-screen-keyboard nil nil)
   (vector meta-prefix-char))
 
+(defun zr-android--popup-menu-bar ()
+  "Pop up the current menu bar at point."
+  (interactive)
+  (popup-menu (mouse-menu-bar-map) (posn-at-point)))
+
 (defun zr-android--toolbar ()
   "Install this module's toolbar entries once per modifier bar rebuild."
   (when (and modifier-bar-mode secondary-tool-bar-map)
@@ -109,7 +114,9 @@
                             (zr-cc "C-c" "C-c" "symbols/menu_16")
                             (zr-help "Help" "C-h" "symbols/heart_16")
                             (zr-cu "C-u" "C-u" "symbols/star_16")))
-          (command-entries '((zr-repeat "Repeat" repeat "symbols/dot_small_16")
+          (command-entries '((zr-menu-bar "Menu bar" zr-android--popup-menu-bar "index")
+                             (zr-context-menu "Context menu" context-menu-open "preferences")
+                             (zr-repeat "Repeat" repeat "symbols/dot_small_16")
                              (zr-keyboard "Keyboard" zr-android-toggle-keyboard "conceal")
                              (zr-read-only "Read only" read-only-mode "reveal"))))
       (define-key input-decode-map [tool-bar meta] #'zr-android--meta-prefix)
@@ -125,7 +132,7 @@
                                `(,(car entry) menu-item ,(cadr entry) ,(nth 2 entry) :help ,(cadr entry)
                                  :image ,(tool-bar--image-expression (nth 3 entry))))
                              command-entries)))
-             (keys (mapcar #'car items)))
+             (keys (append '(alt super) (mapcar #'car items))))
         (setcdr secondary-tool-bar-map
                 (append (cl-remove-if (lambda (item) (memq (car-safe item) keys))
                                       (cdr secondary-tool-bar-map))
