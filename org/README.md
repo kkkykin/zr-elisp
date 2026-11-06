@@ -369,19 +369,28 @@ emacsclient 'org-protocol://srs-card?word=hamlet&deck=Words%3A%3AEnglish'
 制卡和复习共用 `zr-org-srs-directory`。
 在单个 deck 文件中也可以直接运行 `M-x org-srs-review-start`。
 
-PC 上可以使用独立的 `zr-org-srs-review.el` transient 面板。
-复习中执行 `M-x zr-org-srs-review-menu`，或启用
-`zr-org-srs-review-menu-mode`，在开始复习时自动打开：
+加载独立的 `zr-org-srs-review.el` 后，Org buffer 的上下文菜单中会出现
+`SRS review mode` 开关。在当前 deck buffer 启用 `zr-org-srs-review-mode`，
+再开始复习，mode 会随同一 session 的当前卡片切换 buffer。
+目录复习入口 `zr-org-srs-review-start` 会把已启用的 mode 交给第一张卡所在的 buffer。
+mode-line 显示可点击的 `SRS` lighter；点击后打开系统原生菜单，提供撤销、重做、
+延期、暂停、TTS、自动朗读、滚动、编辑和退出功能。
+这些动作复用 transient 的定义，直接放在菜单中；显示答案和评分由
+`org-srs-ui-mode` 的按钮处理，也可以手动打开 transient 面板。
+
+mode 默认把当前 buffer 设为只读，并在该 buffer 中设置
+`org-srs-item-confirm` 为 `org-srs-item-confirm-command`。
+评分时临时允许写入，Org-srs UI 按钮和键盘评分均可使用；
+离开 buffer、结束复习或关闭 mode 时恢复原来的只读状态和确认设置。
+mode 不会自动弹出 transient。复习中执行 `M-x zr-org-srs-review-menu`，
+或从 lighter 的原生菜单选择 `Keyboard panel`，打开键盘面板：
 
 ```elisp
 (use-package zr-org-srs-review
-  :if (not zr-sys-android-gui-p)
-  :after org-srs
+  :after org
   :demand t
   :bind (:map org-mode-map
-              ("<f5>" . zr-org-srs-review-menu))
-  :config
-  (zr-org-srs-review-menu-mode 1))
+              ("<f5>" . zr-org-srs-review-menu)))
 ```
 
 | 按键 | 操作 |
@@ -391,25 +400,22 @@ PC 上可以使用独立的 `zr-org-srs-review.el` transient 面板。
 | `u` / `U` | 撤销 / 重做评分 |
 | `p` / `s` | 选择延期日期 / 暂停当前卡片（COMMENT） |
 | `t` / `T` | 朗读标题 / Front |
+| `a` | 切换自动朗读 |
 | `v` / `V` | 向下 / 向上滚动卡片 |
 | `q` / `Q` | 收起面板以编辑 / 结束复习 |
 
 显示答案前评分键不可用；评分、撤销、延期和暂停后面板跟随下一张卡片，
 跨 deck buffer 也会重新打开。复习结束后关闭，不占用普通 Org 编辑按键。
-收起后用 `M-x zr-org-srs-review-menu` 重新打开。
+`q` 收起面板并把卡片设为可写；用 `M-x zr-org-srs-review-menu` 重新打开时恢复只读保护。
 
-模式启用时自动设置 `org-srs-item-confirm` 为 `org-srs-item-confirm-command`。
-
-加载 `zr-org-srs-review` 后，复习期间当前 buffer 的上下文菜单中会出现 `org-srs` 子菜单，
-其中 `TTS title` 朗读卡片的 `name`（标题），`TTS front` 朗读 `Front` 正文。
-通过 `M-x context-menu-open` 打开，或启用 `context-menu-mode` 后使用右键；
+原生菜单中的 `Speak title` 朗读卡片的 `name`（标题），`Speak Front` 朗读 `Front` 正文。
 也可以运行 `M-x zr-org-srs-review-tts` / `C-u M-x zr-org-srs-review-tts`。
-切换卡片、退出或完成复习时移除本模块的菜单，保留其他上下文菜单配置。
+上下文菜单只保留 review mode 开关，其他上下文菜单配置保持不变。
 正文链接使用描述文本，没有描述的 `file:` / `attachment:` 链接会跳过。
 
-在上下文菜单 `org-srs` 中勾选 `Auto TTS`，或在 deck buffer 中执行
+在 lighter 的原生菜单中勾选 `Auto TTS`，或在 deck buffer 中执行
 `M-x zr-org-srs-review-auto-tts-mode`，确认卡片后自动朗读，默认读标题。
-该模式和 `org-srs-item-after-confirm-hook` 注册都只影响当前 buffer，默认关闭；
+该模式不显示 lighter，和 `org-srs-item-after-confirm-hook` 注册都只影响当前 buffer，默认关闭；
 自动播放失败会显示提示，复习可以继续。模式变量接受安全的 boolean buffer-local 值。
 `zr-org-srs-review-auto-tts-function` 可配置为不接收参数的函数，也可按 deck buffer 设置。
 例如，在当前 buffer 改为自动朗读 Front：

@@ -44,7 +44,6 @@ confirmation, scheduling, undo history and transient key dispatch are real."
              (second (generate-new-buffer " *srs-second*"))
              (org-srs-item-confirm #'org-srs-item-confirm-read-key)
              (org-srs-review-start-hook (copy-sequence org-srs-review-start-hook))
-             (zr-org-srs-review-menu-mode nil)
              (transient-show-popup t)
              pending)
          (cl-letf (((symbol-function 'org-srs-review-pending-items)
@@ -58,14 +57,14 @@ confirmation, scheduling, undo history and transient key dispatch are real."
                  (setq pending (list (list '(card back) "first" first)
                                      (list '(card back) "second" second)))
                  (switch-to-buffer first)
-                 (zr-org-srs-review-menu-mode 1)
+                 (zr-org-srs-review-mode 1)
                  ,@body)
-             (zr-org-srs-review-menu-mode -1)
              (when transient--prefix (transient--emergency-exit))
              (dolist (buffer (list first second))
                (when (buffer-live-p buffer)
                  (with-current-buffer buffer
                    (when (org-srs-reviewing-p) (org-srs-review-quit))
+                   (zr-org-srs-review-mode -1)
                    (set-buffer-modified-p nil))
                  (kill-buffer buffer)))))))))
 
@@ -74,15 +73,223 @@ confirmation, scheduling, undo history and transient key dispatch are real."
   (and transient--prefix
        (eq (oref transient--prefix command) 'zr-org-srs-review-menu)))
 
+(defun zr-org-srs-review-test--start ()
+  "Start the fixture review and explicitly open its keyboard panel."
+  (zr-org-srs-review-mode 1)
+  (zr-org-srs-review-start)
+  (when (org-srs-reviewing-p) (zr-org-srs-review-menu)))
+
 (defun zr-org-srs-review-test--context-menu ()
   "Build the real context menu at point in the selected window."
   (context-menu-map
    (list 'mouse-3 (list (selected-window) (point) '(0 . 0) 0))))
 
+(ert-deftest zr-org-srs-review-test-directory-start-in-another-buffer ()
+  (zr-org-srs-review-test--with-review
+    (setq pending (list (list '(card back) "second" second)))
+    (zr-org-srs-review-start)
+    (should (eq (current-buffer) second))
+    (should zr-org-srs-review-mode)
+    (should buffer-read-only)
+    (should (org-srs-item-confirm-pending-p))
+    (should-not (zr-org-srs-review-test--panel-p))
+    (with-current-buffer first
+      (should-not zr-org-srs-review-mode)
+      (should-not buffer-read-only)
+      (should-not (local-variable-p 'org-srs-item-confirm)))
+    (org-srs-review-quit)
+    (should-not zr-org-srs-review-mode)
+    (should-not buffer-read-only)))
+
+(ert-deftest zr-org-srs-review-test-same-buffer-continuation ()
+  (zr-org-srs-review-test--with-review
+    (zr-org-srs-review-mode -1)
+    (setq buffer-read-only t)
+    (zr-org-srs-review-mode 1)
+    (setq pending (list (list '(card back) "first" first)
+                        (list '(card back) "first" first)))
+    (org-srs-review-start 'fixture)
+    (org-srs-item-confirm-command)
+    (org-srs-review-rate :good)
+    (should (eq (current-buffer) first))
+    (should zr-org-srs-review-mode)
+    (should buffer-read-only)
+    (should (org-srs-item-confirm-pending-p))
+    (org-srs-review-quit)
+    (should-not zr-org-srs-review-mode)
+    (should buffer-read-only)))
+
+(ert-deftest zr-org-srs-review-test-empty-session-restores-buffer ()
+  (zr-org-srs-review-test--with-review
+    (setq pending nil)
+    (org-srs-review-start 'fixture)
+    (should-not zr-org-srs-review-mode)
+    (should-not buffer-read-only)
+    (should-not (local-variable-p 'org-srs-item-confirm))
+    (should-not zr-org-srs-review--following)))
+
+(ert-deftest zr-org-srs-review-test-continuation-error-clears-transfer ()
+  (zr-org-srs-review-test--with-review
+    (org-srs-review-start 'fixture)
+    (let ((map (make-sparse-keymap)))
+      (define-key map [f6] 'zr-org-srs-review-test--next)
+      (cl-letf (((symbol-function 'zr-org-srs-review-test--next)
+                 (lambda () (interactive) (org-srs-review-next)))
+                ((symbol-function 'org-srs-review-pending-items)
+                 (lambda (&optional _source) (error "Queue selection failed"))))
+        (let ((overriding-local-map map))
+          (should-error (execute-kbd-macro [f6])))))
+    (should-not zr-org-srs-review-mode)
+    (should-not buffer-read-only)
+    ;; Error exits a keyboard macro before its post-command hooks run.
+    ;; A new session in the very next command must remain unprotected.
+    (let ((org-srs-item-confirm #'org-srs-item-confirm-command)
+          (map (make-sparse-keymap)))
+      (setq pending (list (list '(card back) "second" second)))
+      (define-key map [f7] 'zr-org-srs-review-test--restart)
+      (cl-letf (((symbol-function 'zr-org-srs-review-test--restart)
+                 (lambda () (interactive) (org-srs-review-start 'fixture))))
+        (let ((overriding-local-map map))
+          (execute-kbd-macro [f7])))
+      (should (eq (current-buffer) second))
+      (should-not zr-org-srs-review-mode)
+      (should-not buffer-read-only))
+    (should-not zr-org-srs-review--following)
+    (should-not (memq #'zr-org-srs-review--clear-following pre-command-hook))
+    (should-not (memq #'zr-org-srs-review--clear-following post-command-hook))))
+
+(ert-deftest zr-org-srs-review-test-ui-rating-follows-read-only-mode ()
+  (zr-org-srs-review-test--with-review
+    (let ((org-srs-ui-mouse-mode t)
+          (original (buffer-string))
+          callback)
+      ;; Exercise the real callbacks used by org-srs-ui-mode, replacing
+      ;; only the graphical panel that presents those buttons.
+      (cl-letf (((symbol-function 'org-srs-ui-mouse-bottom-panel-show)
+                 (lambda (_buttons &rest args)
+                   (setq callback (plist-get args :callback)))))
+        (org-srs-review-start 'fixture)
+        (should zr-org-srs-review-mode)
+        (should buffer-read-only)
+        (should-error (insert "Accidental edit") :type 'buffer-read-only)
+        (should-not (zr-org-srs-review-test--panel-p))
+        (org-srs-ui-mouse-mode-update-panels-1)
+        (funcall callback 'continue)
+        (should-not (org-srs-item-confirm-pending-p))
+        (org-srs-ui-mouse-mode-update-panels-1)
+        (funcall callback :good)
+        (should (eq (current-buffer) second))
+        (should zr-org-srs-review-mode)
+        (should buffer-read-only)
+        (should-not (zr-org-srs-review-test--panel-p))
+        (with-current-buffer first
+          (should-not zr-org-srs-review-mode)
+          (should-not buffer-read-only)
+          (should-not (local-variable-p 'org-srs-item-confirm))
+          (should-not (equal original (buffer-string))))
+        (org-srs-ui-mouse-mode-update-panels-1)
+        (funcall callback 'continue)
+        (org-srs-ui-mouse-mode-update-panels-1)
+        (funcall callback :easy)
+        (should-not zr-org-srs-review-mode)
+        (should-not buffer-read-only)
+        (should-not (org-srs-reviewing-p))
+        (should-not (zr-org-srs-review-test--panel-p))))))
+
+(ert-deftest zr-org-srs-review-test-native-actions-and-undo ()
+  (zr-org-srs-review-test--with-review
+    ;; Undo must also be able to write a deck that was already read-only
+    ;; before review mode protected it.
+    (zr-org-srs-review-mode -1)
+    (setq buffer-read-only t)
+    (zr-org-srs-review-mode 1)
+    (org-srs-review-start 'fixture)
+    (let ((menu (zr-org-srs-review--popup-menu-map))
+          (original (buffer-string)))
+      (dolist (command '(zr-org-srs-review-undo zr-org-srs-review-redo
+                         zr-org-srs-review-postpone zr-org-srs-review-suspend
+                         zr-org-srs-review-tts zr-org-srs-review-tts-front
+                         zr-org-srs-review-auto-tts-mode scroll-up-command
+                         scroll-down-command zr-org-srs-review-edit
+                         zr-org-srs-review-quit))
+        (should (eq (lookup-key menu (vector command)) command)))
+      (dolist (command '(zr-org-srs-review-confirm zr-org-srs-review-rate-easy
+                         zr-org-srs-review-rate-good zr-org-srs-review-rate-hard
+                         zr-org-srs-review-rate-again))
+        (should-not (lookup-key menu (vector command))))
+      (should-not (plist-get (nthcdr 4 (assq 'zr-org-srs-review-undo menu)) :enable))
+      (org-srs-item-confirm-command)
+      (org-srs-review-rate :good)
+      (should (eq (current-buffer) second))
+      (with-current-buffer first (should buffer-read-only))
+      (setq menu (zr-org-srs-review--popup-menu-map))
+      (should (plist-get (nthcdr 4 (assq 'zr-org-srs-review-undo menu)) :enable))
+      (setq pending (list (list '(card back) "first" first)))
+      (call-interactively (lookup-key menu [zr-org-srs-review-undo]))
+      (should (eq (current-buffer) first))
+      (should (equal (buffer-string) original))
+      (should zr-org-srs-review-mode)
+      (should buffer-read-only)
+      (should-not (zr-org-srs-review-test--panel-p))
+      (call-interactively
+       (lookup-key (zr-org-srs-review--popup-menu-map) [zr-org-srs-review-edit]))
+      (should-not buffer-read-only)
+      (call-interactively
+       (lookup-key (zr-org-srs-review--popup-menu-map) [zr-org-srs-review-quit]))
+      (should-not zr-org-srs-review-mode)
+      (should buffer-read-only)
+      (should-not (org-srs-reviewing-p)))))
+
+(ert-deftest zr-org-srs-review-test-lighter-click-selects-its-buffer ()
+  (zr-org-srs-review-test--with-review
+    (org-srs-review-start 'fixture)
+    (let* ((review-window (selected-window))
+           (other-window (split-window-right))
+           (event (list 'down-mouse-1 (list review-window 'mode-line '(0 . 0) 0)))
+           (map (get-text-property 0 'local-map zr-org-srs-review--lighter))
+           (command (lookup-key map [mode-line down-mouse-1]))
+           spoken)
+      (should (eq command #'zr-org-srs-review-popup-menu))
+      (should-not (assq 'zr-org-srs-review-auto-tts-mode minor-mode-alist))
+      (set-window-buffer other-window second)
+      (select-window other-window)
+      (let ((zr-org-srs-review-tts-function (lambda (text) (setq spoken text))))
+        (cl-letf (((symbol-function 'popup-menu)
+                   (lambda (menu position &rest _)
+                     (should (eq position event))
+                     (should (eq (current-buffer) first))
+                     (call-interactively (lookup-key menu [zr-org-srs-review-tts])))))
+          (funcall command event)))
+      (should (eq (selected-window) review-window))
+      (should (equal spoken "first"))
+      (should-not (zr-org-srs-review-test--panel-p)))))
+
+(ert-deftest zr-org-srs-review-test-rating-error-and-setting-restoration ()
+  (zr-org-srs-review-test--with-review
+    (zr-org-srs-review-mode -1)
+    (setq-local org-srs-item-confirm #'ignore)
+    (setq buffer-read-only t)
+    (zr-org-srs-review-mode 1)
+    (zr-org-srs-review-mode 1)
+    (org-srs-review-start 'fixture)
+    (org-srs-item-confirm-command)
+    (cl-letf (((symbol-function 'org-srs-item-repeat)
+               (lambda (&rest _) (error "Rating failed"))))
+      (should-error (org-srs-review-rate :good)))
+    (should zr-org-srs-review-mode)
+    (should buffer-read-only)
+    (should (org-srs-reviewing-p))
+    (org-srs-review-quit)
+    (should-not zr-org-srs-review-mode)
+    (should buffer-read-only)
+    (should (local-variable-p 'org-srs-item-confirm))
+    (should (eq org-srs-item-confirm #'ignore))))
+
 (ert-deftest zr-org-srs-review-test-reveal-rate-switch-and-finish ()
   (zr-org-srs-review-test--with-review
     (should (eq org-srs-item-confirm #'org-srs-item-confirm-command))
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-test--start)
+    (should buffer-read-only)
     (should (zr-org-srs-review-test--panel-p))
     (should (eq (window-buffer) first))
     (should (org-srs-item-confirm-pending-p))
@@ -99,6 +306,8 @@ confirmation, scheduling, undo history and transient key dispatch are real."
     (should (zr-org-srs-review-test--panel-p))
     (should (org-srs-item-confirm-pending-p))
     (with-current-buffer first
+      (should-not zr-org-srs-review-mode)
+      (should-not buffer-read-only)
       (should-not (org-srs-reviewing-p))
       (should-not (buffer-narrowed-p)))
     ;; The user's finish hook opens history; the panel must let that buffer
@@ -108,26 +317,34 @@ confirmation, scheduling, undo history and transient key dispatch are real."
       (execute-kbd-macro (kbd "SPC 4")))
     (should (eq (current-buffer) first))
     (should-not (org-srs-reviewing-p))
+    (should-not zr-org-srs-review-mode)
+    (should-not buffer-read-only)
     (should-not (zr-org-srs-review-test--panel-p))
     (should-not overriding-terminal-local-map)))
 
 (ert-deftest zr-org-srs-review-test-hide-edit-reopen-and-quit ()
   (zr-org-srs-review-test--with-review
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-test--start)
     (execute-kbd-macro (kbd "q"))
+    (should zr-org-srs-review-mode)
+    (should-not buffer-read-only)
+    (insert "Edited ")
     (should (org-srs-reviewing-p))
     (should-not (zr-org-srs-review-test--panel-p))
     (should-not overriding-terminal-local-map)
     (zr-org-srs-review-menu)
+    (should buffer-read-only)
     (execute-kbd-macro (kbd "Q"))
     (should-not (org-srs-reviewing-p))
+    (should-not zr-org-srs-review-mode)
+    (should-not buffer-read-only)
     (should-not (buffer-narrowed-p))
     (should-not (zr-org-srs-review-test--panel-p))
     (should-error (zr-org-srs-review-menu) :type 'user-error)))
 
 (ert-deftest zr-org-srs-review-test-undo-redo-across-decks ()
   (zr-org-srs-review-test--with-review
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-test--start)
     (should (oref (transient-suffix-object 'zr-org-srs-review-undo) inapt))
     (let ((original (buffer-string)))
       (execute-kbd-macro (kbd "SPC 3"))
@@ -149,7 +366,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
 
 (ert-deftest zr-org-srs-review-test-postpone-cancel-and-suspend-at-subheading ()
   (zr-org-srs-review-test--with-review
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-test--start)
     (let ((contents (buffer-string)))
       (cl-letf (((symbol-function 'org-read-date) (lambda (&rest _) (signal 'quit nil))))
         (condition-case nil (execute-kbd-macro (kbd "p")) (quit nil)))
@@ -173,7 +390,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
   (zr-org-srs-review-test--with-review
     ;; A pending confirmation may register another step before rating is
     ;; allowed, as with custom review methods.
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-test--start)
     (org-srs-item-add-hook-once
      'org-srs-item-after-confirm-hook
      (lambda (&rest args) (apply #'org-srs-item-confirm-command args)) 80)
@@ -186,12 +403,14 @@ confirmation, scheduling, undo history and transient key dispatch are real."
 
 (ert-deftest zr-org-srs-review-test-cloze-reveal-and-rate ()
   (zr-org-srs-review-test--with-review
+    (zr-org-srs-review-mode -1)
     (erase-buffer)
     (insert "* Cloze\n:PROPERTIES:\n:ID: cloze\n:END:\n{{1}{answer}{hint}}\n")
     (goto-char (point-min))
     (org-srs-item-new '(cloze 1))
     (setq pending (list (list '(cloze 1) "cloze" first)))
-    (org-srs-review-start 'fixture)
+    (zr-org-srs-review-mode 1)
+    (zr-org-srs-review-test--start)
     (let ((overlay (cl-find 'org-srs-item-cloze (overlays-in (point-min) (point-max))
                             :key (lambda (it) (overlay-get it 'category)))))
       (should overlay)
@@ -270,7 +489,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
 (ert-deftest zr-org-srs-review-test-panel-tts-keeps-review-active ()
   (zr-org-srs-review-test--with-review
     (let* (spoken (zr-org-srs-review-tts-function (lambda (text) (push text spoken))))
-      (org-srs-review-start 'fixture)
+      (zr-org-srs-review-test--start)
       (execute-kbd-macro (kbd "t T"))
       (should (equal spoken '("Question" "first")))
       (should (org-srs-item-confirm-pending-p))
@@ -284,48 +503,92 @@ confirmation, scheduling, undo history and transient key dispatch are real."
                  (should (equal source (expand-file-name zr-org-srs-directory))))))
       (zr-org-srs-review-start))))
 
-(ert-deftest zr-org-srs-review-test-context-menu-switch-quit-and-finish ()
-  (zr-org-srs-review-test--with-review
-    (zr-org-srs-review-menu-mode -1)
-    (let ((global-menu-functions (default-value 'context-menu-functions))
-          (first-menu-functions (copy-sequence context-menu-functions))
-          (local-menu-functions
-           (list (lambda (menu _click)
-                   (define-key-after menu [existing] '(menu-item "Existing" ignore))
-                   menu)))
-          finished)
-      (with-current-buffer second
-        (setq-local context-menu-functions local-menu-functions))
-      (let ((org-srs-review-finish-hook
-             (cons (lambda () (setq finished t)) org-srs-review-finish-hook)))
-        (org-srs-review-start 'fixture)
+(ert-deftest zr-org-srs-review-test-context-menu-load-after-org-mode ()
+  (let ((org-mode-hook (remq #'zr-org-srs-review--context-menu-setup org-mode-hook)))
+    (save-window-excursion
+      (with-temp-buffer
+        (org-mode)
+        (should-not (memq #'zr-org-srs-review--context-menu context-menu-functions))
+        (setq-local context-menu-functions
+                    (list (lambda (menu _click)
+                            (define-key-after menu [existing]
+                              '(menu-item "Existing" ignore))
+                            menu)))
+        (load "zr-org-srs-review" nil t)
         (should (local-variable-p 'context-menu-functions))
         (should (= (cl-count #'zr-org-srs-review--context-menu context-menu-functions) 1))
-        (let* ((menu (zr-org-srs-review-test--context-menu))
-               spoken
-               (zr-org-srs-review-tts-function (lambda (text) (push text spoken))))
-          (should (eq (lookup-key menu [org-srs tts-title]) #'zr-org-srs-review-tts))
-          (should (eq (lookup-key menu [org-srs tts-front]) #'zr-org-srs-review-tts-front))
-          (call-interactively (lookup-key menu [org-srs tts-title]))
-          (call-interactively (lookup-key menu [org-srs tts-front]))
-          (should (equal spoken '("Question" "first"))))
+        (switch-to-buffer (current-buffer))
+        (let ((menu (zr-org-srs-review-test--context-menu)))
+          (should (eq (lookup-key menu [existing]) #'ignore))
+          (should (eq (lookup-key menu [zr-org-srs-review-mode]) #'zr-org-srs-review-mode))
+          (should-not (lookup-key menu [org-srs])))))))
+
+(ert-deftest zr-org-srs-review-test-context-menu-switch-quit-and-finish ()
+  (zr-org-srs-review-test--with-review
+    (zr-org-srs-review-mode -1)
+    (let ((global-menu-functions (default-value 'context-menu-functions))
+          (first-menu-functions (copy-sequence context-menu-functions))
+          (existing-menu-function
+           (lambda (menu _click)
+             (define-key-after menu [existing] '(menu-item "Existing" ignore))
+             menu))
+          (menu-filter
+           (lambda (menu _click)
+             (define-key-after menu [filtered] '(menu-item "Filtered" ignore))
+             menu))
+          second-menu-functions
+          finished)
+      (with-current-buffer second
+        (add-hook 'context-menu-functions existing-menu-function nil t)
+        (setq second-menu-functions (copy-sequence context-menu-functions))
+        (setq-local context-menu-filter-function menu-filter))
+      (let ((org-srs-review-finish-hook
+             (cons (lambda () (setq finished t)) org-srs-review-finish-hook)))
+        (dolist (buffer (list first second))
+          (with-current-buffer buffer
+            (should (local-variable-p 'context-menu-functions))
+            (should (= (cl-count #'zr-org-srs-review--context-menu context-menu-functions) 1))))
+        (should-not (lookup-key (zr-org-srs-review-test--context-menu) [org-srs]))
+        (call-interactively
+         (lookup-key (zr-org-srs-review-test--context-menu) [zr-org-srs-review-mode]))
+        (should zr-org-srs-review-mode)
+        (should buffer-read-only)
+        (org-srs-review-start 'fixture)
+        (should-not (zr-org-srs-review-test--panel-p))
+        (save-window-excursion
+          (switch-to-buffer second)
+          (should-not (lookup-key (zr-org-srs-review-test--context-menu) [org-srs])))
         (should (eq (default-value 'context-menu-functions) global-menu-functions))
         (org-srs-review-next)
         (should (eq (current-buffer) second))
         (let ((menu (zr-org-srs-review-test--context-menu)))
           (should (eq (lookup-key menu [existing]) #'ignore))
-          (should (eq (lookup-key menu [org-srs tts-title]) #'zr-org-srs-review-tts)))
-        (with-current-buffer first
-          (should (equal context-menu-functions first-menu-functions)))
+          (should (eq (lookup-key menu [filtered]) #'ignore))
+          (should (eq (lookup-key menu [zr-org-srs-review-mode]) #'zr-org-srs-review-mode))
+          (should-not (lookup-key menu [org-srs])))
+        (should zr-org-srs-review-mode)
+        (should buffer-read-only)
+        (save-window-excursion
+          (switch-to-buffer first)
+          (should (equal context-menu-functions first-menu-functions))
+          (should-not (lookup-key (zr-org-srs-review-test--context-menu) [org-srs])))
         (org-srs-review-quit)
-        (should (equal context-menu-functions local-menu-functions))
-        (should-not (lookup-key (zr-org-srs-review-test--context-menu) [org-srs]))
+        (should-not zr-org-srs-review-mode)
+        (should-not buffer-read-only)
+        (should (equal context-menu-functions second-menu-functions))
+        (should (eq context-menu-filter-function menu-filter))
+        (let ((menu (zr-org-srs-review-test--context-menu)))
+          (should (eq (lookup-key menu [existing]) #'ignore))
+          (should (eq (lookup-key menu [filtered]) #'ignore))
+          (should-not (lookup-key menu [org-srs])))
         (should-not finished)
         (setq pending (list (list '(card back) "first" first)))
-        (org-srs-review-start 'fixture)
+        (zr-org-srs-review-mode 1)
+        (zr-org-srs-review-start)
         (org-srs-review-next)
         (should finished)
         (should (equal context-menu-functions first-menu-functions))
+        (should-not (lookup-key (zr-org-srs-review-test--context-menu) [org-srs]))
         (should (eq (default-value 'context-menu-functions) global-menu-functions))))))
 
 (ert-deftest zr-org-srs-review-test-auto-tts-is-local-and-configurable ()
@@ -335,9 +598,9 @@ confirmation, scheduling, undo history and transient key dispatch are real."
            spoken
            (zr-org-srs-review-tts-function (lambda (text) (push text spoken))))
       (add-hook 'org-srs-item-after-confirm-hook #'ignore nil t)
-      (org-srs-review-start 'fixture)
+      (zr-org-srs-review-test--start)
       (setq toggle-command
-            (lookup-key (zr-org-srs-review-test--context-menu) [org-srs auto-tts]))
+            (lookup-key (zr-org-srs-review--popup-menu-map) [zr-org-srs-review-auto-tts-mode]))
       (call-interactively toggle-command)
       (zr-org-srs-review-auto-tts-mode 1)
       (should (local-variable-p 'zr-org-srs-review-auto-tts-mode))
@@ -360,7 +623,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
       (zr-org-srs-review-auto-tts-mode 1)
       (setq pending (list (list '(card back) "first" first)
                           (list '(card back) "second" second)))
-      (org-srs-review-start 'fixture)
+      (zr-org-srs-review-test--start)
       (execute-kbd-macro (kbd "SPC"))
       (should (equal spoken '("first")))
       (org-srs-review-next)
@@ -369,7 +632,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
       (org-srs-review-quit)
       ;; Quitting cleans up pending confirmations; this must not start TTS.
       (setq pending (list (list '(card back) "second" second)))
-      (org-srs-review-start 'fixture)
+      (zr-org-srs-review-test--start)
       (org-srs-review-quit)
       (should (equal spoken '("Question" "first")))
       (should (eq (default-value 'org-srs-item-after-confirm-hook) global-confirm-hook))
@@ -382,7 +645,7 @@ confirmation, scheduling, undo history and transient key dispatch are real."
     (let ((zr-org-srs-review-auto-tts-function
            (lambda () (error "TTS backend unavailable"))))
       (zr-org-srs-review-auto-tts-mode 1)
-      (org-srs-review-start 'fixture)
+      (zr-org-srs-review-test--start)
       (execute-kbd-macro (kbd "SPC"))
       (should-not (org-srs-item-confirm-pending-p))
       (should (org-srs-reviewing-p))

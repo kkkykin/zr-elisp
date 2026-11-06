@@ -50,12 +50,21 @@
                (dolist (module ',(reverse zr-module-loading-test--modules))
                  (require module))
                (dolist (mode '(zr-pcmpl-mode zr-org-link-mode zr-org-export-mode
-                               zr-org-protocol-mode zr-org-srs-capture-protocol-mode zr-org-srs-review-menu-mode zr-org-tangle-id-mode
+                               zr-org-protocol-mode zr-org-srs-capture-protocol-mode zr-org-tangle-id-mode
                                zr-org-babel-bat-mode))
                  (funcall mode 1)
                  (funcall mode 1)
                  (funcall mode -1)
                  (funcall mode -1))
+               (with-temp-buffer
+                 (org-mode)
+                 (zr-org-srs-review-mode 1)
+                 (zr-org-srs-review-mode 1)
+                 (zr-org-srs-review-mode -1)
+                 (zr-org-srs-review-mode -1)
+                 (when (or buffer-read-only zr-org-srs-review-mode
+                           (local-variable-p 'org-srs-item-confirm))
+                   (error "Review mode left buffer settings installed")))
                (unless (and (not (advice-member-p #'zr-org-tangle--link-id
                                                   'org-babel-tangle--unbracketed-link))
                             (not (assoc "dict" org-link-parameters))
@@ -160,7 +169,7 @@
                          (featurep 'zr-org-srs-review))
                  (error "Review panel autoloads loaded dependencies"))
                (dolist (command '(zr-org-srs-review-start zr-org-srs-review-tts
-                                   zr-org-srs-review-menu zr-org-srs-review-menu-mode
+                                   zr-org-srs-review-menu zr-org-srs-review-popup-menu zr-org-srs-review-mode
                                    zr-org-srs-review-auto-tts-mode))
                  (unless (and (autoloadp (symbol-function command)) (commandp command))
                    (error "Missing review panel autoload: %s" command)))))

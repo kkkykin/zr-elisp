@@ -1,4 +1,4 @@
-;;; zr-org-srs-review.el --- Review commands and keyboard panel for Org-srs -*- lexical-binding: t; -*-
+;;; zr-org-srs-review.el --- Review mode and menus for Org-srs -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "31.1") (org-srs "0.1") (transient "0.7"))
 ;; SPDX-License-Identifier: GPL-3.0-or-later
@@ -10,12 +10,15 @@
 ;; Easy/Good/Hard/Again.  Rating is disabled while confirmation is pending,
 ;; including intermediate steps of cloze items.  Review actions reopen
 ;; the panel on the next item, even when it belongs to another buffer.
-;; q hides the panel for ordinary Org editing; Q ends the review.
-;; Enable `zr-org-srs-review-menu-mode' to open it when a review starts.
-;; The mode sets command-based confirmation automatically.
+;; q hides the panel and makes the card writable; Q ends the review.
+;; Enable `zr-org-srs-review-mode' to protect the buffer from edits and
+;; show a clickable SRS lighter.  Its native popup menu shares the panel's
+;; review, card and panel actions.  The mode follows the current card
+;; across deck buffers, without opening the keyboard panel automatically.
+;; It selects command-based confirmation buffer-locally.
 ;; `zr-org-srs-review-start' reviews `zr-org-srs-directory'.
-;; TTS speaks the title or Front through Termux or Windows, with a
-;; buffer-local context menu during review.  Enable
+;; Org buffers have a context menu toggle for the review mode.
+;; TTS speaks the title or Front through Termux or Windows.  Enable
 ;; `zr-org-srs-review-auto-tts-mode' in a deck buffer to speak card text
 ;; automatically after confirming review items (titles by default).
 ;; Loading this library does not load Org-srs or change its configuration.
@@ -55,9 +58,18 @@
 (defvar org-srs-review-start-hook)
 (defvar org-srs-item-confirm)
 (defvar org-srs-item-after-confirm-hook)
+(defvar zr-org-srs-review-mode)
+(defvar zr-org-srs-review--following nil
+  "Non-nil while a review operation or continuation carries review mode.")
+
+(defvar-local zr-org-srs-review--saved-state nil
+  "Read-only state and local confirmation setting before review mode.")
+
+(defvar-local zr-org-srs-review--continue-hook nil
+  "One-shot hook that leaves this card and prepares to follow the next.")
 
 (defgroup zr-org-srs-review nil
-  "Review commands, TTS and keyboard panel for Org-srs items."
+  "Review mode, commands, TTS and menus for Org-srs items."
   :group 'zr-org-srs
   :prefix "zr-org-srs-review-")
 
@@ -81,7 +93,12 @@ Can be set buffer-locally to select a different action for each deck."
   "Review Org-srs cards in `zr-org-srs-directory'."
   (interactive)
   (require 'org-srs)
-  (org-srs-review-start (expand-file-name zr-org-srs-directory)))
+  ;; A directory review can start in a different deck from this buffer.
+  (let ((zr-org-srs-review--following zr-org-srs-review-mode))
+    (when zr-org-srs-review-mode (zr-org-srs-review-mode -1))
+    (unwind-protect
+        (org-srs-review-start (expand-file-name zr-org-srs-directory))
+      (zr-org-srs-review--clear-following))))
 
 (defun zr-org-srs-review--tts-speak (text)
   "Speak TEXT through the available platform TTS backend."
@@ -127,34 +144,23 @@ review item even if point has moved within the buffer."
     (funcall zr-org-srs-review-tts-function text)))
 
 (defun zr-org-srs-review--context-menu (menu _click)
-  "Add the Org-srs TTS submenu to context MENU."
-  (when (bound-and-true-p org-srs-review-item)
-    (define-key-after menu [org-srs]
-      '(menu-item "org-srs"
-                  (keymap
-                   (tts-title menu-item "TTS title" zr-org-srs-review-tts)
-                   (tts-front menu-item "TTS front" zr-org-srs-review-tts-front)
-                   (auto-tts menu-item "Auto TTS" zr-org-srs-review-auto-tts-mode
-                             :button (toggle . zr-org-srs-review-auto-tts-mode))))))
+  "Add a review mode toggle to context MENU."
+  (define-key-after menu [zr-org-srs-review-mode]
+    '(menu-item "SRS review mode" zr-org-srs-review-mode
+                :button (toggle . zr-org-srs-review-mode)))
   menu)
 
-(defun zr-org-srs-review--context-menu-remove ()
-  "Remove the Org-srs context menu from the current review buffer."
-  (remove-hook 'context-menu-functions #'zr-org-srs-review--context-menu t))
+(defun zr-org-srs-review--context-menu-setup ()
+  "Register the review context menu callback in the current Org buffer."
+  (add-hook 'context-menu-functions #'zr-org-srs-review--context-menu nil t))
 
-(defun zr-org-srs-review--context-menu-add (&rest _)
-  "Add the TTS context menu to the current review buffer."
-  (when (and (bound-and-true-p org-srs-review-item)
-             (not (memq #'zr-org-srs-review--context-menu context-menu-functions)))
-    (add-hook 'context-menu-functions #'zr-org-srs-review--context-menu nil t)
-    ;; A session can move between deck buffers; quitting skips finish-hook.
-    (org-srs-review-add-hook-once
-     'org-srs-review-continue-hook #'zr-org-srs-review--context-menu-remove 30)))
+(add-hook 'org-mode-hook #'zr-org-srs-review--context-menu-setup)
 
-(with-eval-after-load 'org-srs-review
-  (add-hook 'org-srs-review-start-hook #'zr-org-srs-review--context-menu-add)
-  (add-hook 'org-srs-item-before-review-hook #'zr-org-srs-review--context-menu-add)
-  (add-hook 'org-srs-review-finish-hook #'zr-org-srs-review--context-menu-remove))
+;; The library may be loaded after deck buffers have entered Org mode.
+(dolist (buffer (buffer-list))
+  (with-current-buffer buffer
+    (when (derived-mode-p 'org-mode)
+      (zr-org-srs-review--context-menu-setup))))
 
 ;;;###autoload
 (define-minor-mode zr-org-srs-review-auto-tts-mode
@@ -162,7 +168,7 @@ review item even if point has moved within the buffer."
 `zr-org-srs-review-auto-tts-function' selects what to speak (default: title).
 Only this buffer's `org-srs-item-after-confirm-hook' is changed.
 Playback errors are reported without interrupting the review."
-  :lighter " SRS-TTS"
+  :lighter nil
   :group 'zr-org-srs-review
   (if zr-org-srs-review-auto-tts-mode
       (add-hook 'org-srs-item-after-confirm-hook #'zr-org-srs-review--auto-tts nil t)
@@ -203,25 +209,80 @@ Playback errors are reported without interrupting the review."
   (not (and (bound-and-true-p org-srs-review-undo-history)
             (org-srs-review-undo-history-redo org-srs-review-undo-history))))
 
+(defun zr-org-srs-review--active-p ()
+  "Return non-nil while this buffer has an active review item."
+  (and (bound-and-true-p org-srs-review-item) (org-srs-reviewing-p)))
+
+(defun zr-org-srs-review--call-writable (function &rest args)
+  "Call FUNCTION with ARGS allowing review writes, then restore protection.
+Undo and redo can also write a previous deck, so allow those writes with
+`inhibit-read-only'.  Restore the origin after the dynamic binding ends:
+the command may have disabled or transferred its review mode meanwhile."
+  (let ((buffer (current-buffer))
+        (read-only (if zr-org-srs-review-mode
+                       (car zr-org-srs-review--saved-state)
+                     buffer-read-only)))
+    (unwind-protect
+        (let ((buffer-read-only nil)
+              (inhibit-read-only t)
+              (zr-org-srs-review--following
+               (or zr-org-srs-review--following zr-org-srs-review-mode)))
+          (apply function args))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (if zr-org-srs-review-mode
+              (progn
+                (setcar zr-org-srs-review--saved-state read-only)
+                (setq buffer-read-only t))
+            (setq buffer-read-only read-only))))
+      (zr-org-srs-review--clear-following))))
+
+(defun zr-org-srs-review--rate (function &rest args)
+  "Allow Org-srs rating FUNCTION with ARGS to write in review mode.
+This also covers Org-srs mouse buttons and its own rating commands."
+  (if zr-org-srs-review-mode
+      (apply #'zr-org-srs-review--call-writable function args)
+    (apply function args)))
+
+(with-eval-after-load 'org-srs-review-rate
+  (advice-add 'org-srs-review-rate :around #'zr-org-srs-review--rate))
+
+(defun zr-org-srs-review--clear-following ()
+  "Clear pending review mode transfer, including after command errors."
+  (setq zr-org-srs-review--following nil)
+  (remove-hook 'pre-command-hook #'zr-org-srs-review--clear-following)
+  (remove-hook 'post-command-hook #'zr-org-srs-review--clear-following))
+
+(defun zr-org-srs-review--finish ()
+  "Clear transfer state and restore an empty review buffer."
+  (zr-org-srs-review--clear-following)
+  (when (and zr-org-srs-review-mode
+             (not (bound-and-true-p org-srs-review-item)))
+    (zr-org-srs-review-mode -1)))
+
+(with-eval-after-load 'org-srs-review
+  (add-hook 'org-srs-item-before-review-hook #'zr-org-srs-review--prepare -90)
+  (add-hook 'org-srs-review-finish-hook #'zr-org-srs-review--finish -90))
+
 (defun zr-org-srs-review--call (command &optional rating)
-  "Call review COMMAND and reopen the panel if review remains active.
+  "Call review COMMAND, reopening the panel when invoked from it.
 When RATING is non-nil, require the answer to have been revealed first.
 Suffixes exit the old transient before calling this function so a finished
 review, an error, or a switch of deck buffers cannot leave a stale panel."
   (zr-org-srs-review--ensure-review)
-  (unwind-protect
-      (progn
-        (when (and rating (zr-org-srs-review--confirm-pending-p))
-          (user-error "Reveal the answer before rating"))
-        ;; Suspending comments the heading at point, unlike rating commands
-        ;; which locate the item themselves.  Point may be on a subheading.
-        (when (eq command #'org-srs-review-suspend)
-          (goto-char (apply #'org-srs-item-marker org-srs-review-item))
-          (org-back-to-heading t))
-        (call-interactively command))
-    (when (and (bound-and-true-p org-srs-review-item)
-               (org-srs-reviewing-p))
-      (zr-org-srs-review-menu))))
+  (let ((panel (eq transient-current-command 'zr-org-srs-review-menu)))
+    (unwind-protect
+        (progn
+          (when (and rating (zr-org-srs-review--confirm-pending-p))
+            (user-error "Reveal the answer before rating"))
+          ;; Suspending comments the heading at point, unlike rating commands
+          ;; which locate the item themselves.  Point may be on a subheading.
+          (when (eq command #'org-srs-review-suspend)
+            (goto-char (apply #'org-srs-item-marker org-srs-review-item))
+            (org-back-to-heading t))
+          (zr-org-srs-review--call-writable #'call-interactively command))
+      (when (and panel (zr-org-srs-review--active-p))
+        (zr-org-srs-review-menu)))))
 
 (transient-define-suffix zr-org-srs-review-confirm ()
   "Reveal the answer or advance one step of the current review item."
@@ -277,6 +338,18 @@ review, an error, or a switch of deck buffers cannot leave a stale panel."
   (interactive)
   (zr-org-srs-review-tts t))
 
+(transient-define-suffix zr-org-srs-review-edit ()
+  "Hide the keyboard panel and make the current card writable."
+  :transient 'transient--do-quit-one
+  (interactive)
+  (setq buffer-read-only nil))
+
+(transient-define-suffix zr-org-srs-review-quit ()
+  "End the current Org-srs review, allowing pending cleanup writes."
+  (interactive)
+  (zr-org-srs-review--ensure-review)
+  (zr-org-srs-review--call-writable #'org-srs-review-quit))
+
 ;;;###autoload (autoload 'zr-org-srs-review-menu "zr-org-srs-review" "Open the Org-srs keyboard review panel." t)
 (transient-define-prefix zr-org-srs-review-menu ()
   "Open the single-key command panel for the current Org-srs review.
@@ -299,27 +372,122 @@ q hides the panel so the card can be edited; Q quits the review."
    ["Card"
     ("t" "Speak title" zr-org-srs-review-tts :transient t)
     ("T" "Speak Front" zr-org-srs-review-tts-front)
+    ("a" "Auto TTS" zr-org-srs-review-auto-tts-mode :transient t)
     ("v" "Scroll down" scroll-up-command :transient t)
     ("V" "Scroll up" scroll-down-command :transient t)]
    ["Panel"
-    ("q" "Hide / edit card" transient-quit-one)
-    ("Q" "Quit review" org-srs-review-quit)]]
+    ("q" "Hide / edit card" zr-org-srs-review-edit)
+    ("Q" "Quit review" zr-org-srs-review-quit)]]
   (interactive)
   (zr-org-srs-review--ensure-review)
+  (when zr-org-srs-review-mode (setq buffer-read-only t))
   (transient-setup 'zr-org-srs-review-menu))
 
+(defun zr-org-srs-review--popup-menu-map ()
+  "Build a native menu from the keyboard panel's non-rating groups."
+  (let ((menu (make-sparse-keymap "Org-srs"))
+        (active (zr-org-srs-review--active-p)))
+    (define-key-after menu [keyboard]
+      `(menu-item "Keyboard panel" zr-org-srs-review-menu :enable ,active))
+    (define-key-after menu [start]
+      `(menu-item "Start review" zr-org-srs-review-start :enable ,(not active)))
+    (dolist (group (cdr (aref (transient-get-suffix 'zr-org-srs-review-menu '(0)) 2)))
+      (define-key-after menu (vector (make-symbol "separator")) '(menu-item "--"))
+      (dolist (suffix (aref group 2))
+        (let* ((args (cdr suffix))
+               (command (plist-get args :command))
+               (inapt (plist-get args :inapt-if))
+               (enabled (and active (not (and inapt (funcall inapt))))))
+          (define-key-after menu (vector command)
+            `(menu-item ,(plist-get args :description) ,command
+                        :enable ,enabled
+                        ,@(when (eq command 'zr-org-srs-review-auto-tts-mode)
+                            '(:button (toggle . zr-org-srs-review-auto-tts-mode))))))))
+    menu))
+
 ;;;###autoload
-(define-minor-mode zr-org-srs-review-menu-mode
-  "Open the keyboard panel automatically when an Org-srs review starts.
-This global mode sets `org-srs-item-confirm' to
-`org-srs-item-confirm-command' and installs a review hook."
-  :global t
+(defun zr-org-srs-review-popup-menu (&optional event)
+  "Open the native review menu at EVENT, or at point.
+For a mode-line click, operate on the clicked window's buffer."
+  (interactive (list last-input-event))
+  (when (mouse-event-p event)
+    (let ((window (posn-window (event-start event))))
+      (when (windowp window) (select-window window))))
+  (popup-menu (zr-org-srs-review--popup-menu-map)
+              (if (mouse-event-p event) event (posn-at-point))))
+
+(defconst zr-org-srs-review--lighter
+  (propertize
+   " SRS"
+   'mouse-face 'mode-line-highlight
+   'help-echo "mouse-1: Org-srs review menu"
+   'local-map (let ((map (make-sparse-keymap)))
+                (define-key map [mode-line down-mouse-1] #'zr-org-srs-review-popup-menu)
+                (define-key map [mode-line mouse-1] #'ignore)
+                map))
+  "Clickable review mode lighter.")
+
+;; Mode-line symbol values otherwise discard the lighter's mouse properties.
+(put 'zr-org-srs-review--lighter 'risky-local-variable t)
+
+(defun zr-org-srs-review--continue ()
+  "Leave this card before Org-srs starts the next item at depth 50."
+  (let ((following (and zr-org-srs-review-mode (org-srs-reviewing-p))))
+    (setq zr-org-srs-review--continue-hook nil)
+    (when zr-org-srs-review-mode (zr-org-srs-review-mode -1))
+    (when following
+      (setq zr-org-srs-review--following t)
+      ;; Normally the next item or finish hook clears this immediately.
+      ;; Command boundaries also clear it if queue selection signals.
+      (add-hook 'pre-command-hook #'zr-org-srs-review--clear-following)
+      (add-hook 'post-command-hook #'zr-org-srs-review--clear-following))))
+
+(defun zr-org-srs-review--prepare (&rest _)
+  "Protect this review item and arrange to follow the next card."
+  (when (and (or zr-org-srs-review-mode zr-org-srs-review--following)
+             (bound-and-true-p org-srs-review-item))
+    (zr-org-srs-review--clear-following)
+    (unless zr-org-srs-review-mode (zr-org-srs-review-mode 1))
+    (setq buffer-read-only t)
+    (unless zr-org-srs-review--continue-hook
+      (setq zr-org-srs-review--continue-hook
+            (org-srs-review-add-hook-once
+             'org-srs-review-continue-hook #'zr-org-srs-review--continue 30)))))
+
+;;;###autoload
+(define-minor-mode zr-org-srs-review-mode
+  "Protect the current Org review buffer and show a clickable SRS lighter.
+The lighter opens a native menu; the keyboard panel remains available
+through `zr-org-srs-review-menu'.  Cards are read-only until the panel's
+Hide / edit card action is used.  Rating commands allow temporary writes.
+The mode follows the current card across buffers within a review session,
+restoring each buffer's previous settings when leaving it or disabling.
+Command-based confirmation is selected only in this buffer."
+  :lighter zr-org-srs-review--lighter
   :group 'zr-org-srs-review
-  (if zr-org-srs-review-menu-mode
+  (if zr-org-srs-review-mode
       (progn
-        (setq org-srs-item-confirm #'org-srs-item-confirm-command)
-        (add-hook 'org-srs-review-start-hook #'zr-org-srs-review-menu 90))
-    (remove-hook 'org-srs-review-start-hook #'zr-org-srs-review-menu)))
+        (unless (derived-mode-p 'org-mode)
+          (setq zr-org-srs-review-mode nil)
+          (user-error "This mode requires an Org buffer"))
+        (unless zr-org-srs-review--saved-state
+          (setq zr-org-srs-review--saved-state
+                (list buffer-read-only
+                      (local-variable-p 'org-srs-item-confirm)
+                      (bound-and-true-p org-srs-item-confirm))))
+        (setq buffer-read-only t)
+        (setq-local org-srs-item-confirm #'org-srs-item-confirm-command)
+        (zr-org-srs-review--prepare))
+    (when (and zr-org-srs-review--continue-hook
+               (local-variable-p 'org-srs-review-continue-hook))
+      (remove-hook 'org-srs-review-continue-hook zr-org-srs-review--continue-hook t))
+    (setq zr-org-srs-review--continue-hook nil)
+    (when zr-org-srs-review--saved-state
+      (setq buffer-read-only (nth 0 zr-org-srs-review--saved-state))
+      (if (nth 1 zr-org-srs-review--saved-state)
+          (setq-local org-srs-item-confirm (nth 2 zr-org-srs-review--saved-state))
+        (kill-local-variable 'org-srs-item-confirm))
+      (setq zr-org-srs-review--saved-state nil))))
 
 (provide 'zr-org-srs-review)
 ;;; zr-org-srs-review.el ends here
