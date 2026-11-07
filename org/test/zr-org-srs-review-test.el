@@ -240,13 +240,33 @@ confirmation, scheduling, undo history and transient key dispatch are real."
       (should buffer-read-only)
       (should-not (org-srs-reviewing-p)))))
 
+(ert-deftest zr-org-srs-review-test-lighter-survives-mode-line-rendering ()
+  ;; Batch frames cannot render mode lines.  Run this test in a terminal
+  ;; or graphical Emacs to exercise the default minor-mode wrapper.
+  (when noninteractive (ert-skip "Mode-line rendering requires a display"))
+  (save-window-excursion
+    (with-temp-buffer
+      (org-mode)
+      (switch-to-buffer (current-buffer))
+      (zr-org-srs-review-mode 1)
+      (let* ((rendered (format-mode-line mode-line-format))
+             (position (string-match "SRS" rendered)))
+        (should position)
+        (let ((posn (list (selected-window) 'mode-line '(0 . 0) 0
+                          (cons rendered position))))
+          (should (eq (key-binding [mode-line down-mouse-1] nil nil posn)
+                      #'zr-org-srs-review-popup-menu))
+          (should (eq (key-binding [mode-line mouse-1] nil nil posn) #'ignore)))
+        (should (equal (get-text-property position 'help-echo rendered)
+                       "mouse-1: Org-srs review menu"))))))
+
 (ert-deftest zr-org-srs-review-test-lighter-click-selects-its-buffer ()
   (zr-org-srs-review-test--with-review
     (org-srs-review-start 'fixture)
     (let* ((review-window (selected-window))
            (other-window (split-window-right))
            (event (list 'down-mouse-1 (list review-window 'mode-line '(0 . 0) 0)))
-           (map (get-text-property 0 'local-map zr-org-srs-review--lighter))
+           (map (plist-get (cddr zr-org-srs-review--lighter) 'local-map))
            (command (lookup-key map [mode-line down-mouse-1]))
            spoken)
       (should (eq command #'zr-org-srs-review-popup-menu))

@@ -416,16 +416,17 @@ For a mode-line click, operate on the clicked window's buffer."
   (popup-menu (zr-org-srs-review--popup-menu-map)
               (if (mouse-event-p event) event (posn-at-point))))
 
+;; Apply properties during rendering to override the enclosing minor-mode
+;; defaults, which would overwrite properties on a pre-propertized string.
 (defconst zr-org-srs-review--lighter
-  (propertize
-   " SRS"
-   'mouse-face 'mode-line-highlight
-   'help-echo "mouse-1: Org-srs review menu"
-   'local-map (let ((map (make-sparse-keymap)))
-                (define-key map [mode-line down-mouse-1] #'zr-org-srs-review-popup-menu)
-                (define-key map [mode-line mouse-1] #'ignore)
-                map))
-  "Clickable review mode lighter.")
+  (list :propertize " SRS"
+        'mouse-face 'mode-line-highlight
+        'help-echo "mouse-1: Org-srs review menu"
+        'local-map (let ((map (make-sparse-keymap)))
+                     (define-key map [mode-line down-mouse-1] #'zr-org-srs-review-popup-menu)
+                     (define-key map [mode-line mouse-1] #'ignore)
+                     map))
+  "Clickable review mode lighter construct.")
 
 ;; Mode-line symbol values otherwise discard the lighter's mouse properties.
 (put 'zr-org-srs-review--lighter 'risky-local-variable t)
