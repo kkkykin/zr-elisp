@@ -372,9 +372,7 @@ q hides the panel so the card can be edited; Q quits the review."
    ["Card"
     ("t" "Speak title" zr-org-srs-review-tts :transient t)
     ("T" "Speak Front" zr-org-srs-review-tts-front)
-    ("a" "Auto TTS" zr-org-srs-review-auto-tts-mode :transient t)
-    ("v" "Scroll down" scroll-up-command :transient t)
-    ("V" "Scroll up" scroll-down-command :transient t)]
+    ("a" "Auto TTS" zr-org-srs-review-auto-tts-mode :transient t)]
    ["Panel"
     ("q" "Hide / edit card" zr-org-srs-review-edit)
     ("Q" "Quit review" zr-org-srs-review-quit)]]
@@ -387,12 +385,7 @@ q hides the panel so the card can be edited; Q quits the review."
   "Build a native menu from the keyboard panel's non-rating groups."
   (let ((menu (make-sparse-keymap "Org-srs"))
         (active (zr-org-srs-review--active-p)))
-    (define-key-after menu [keyboard]
-      `(menu-item "Keyboard panel" zr-org-srs-review-menu :enable ,active))
-    (define-key-after menu [start]
-      `(menu-item "Start review" zr-org-srs-review-start :enable ,(not active)))
     (dolist (group (cdr (aref (transient-get-suffix 'zr-org-srs-review-menu '(0)) 2)))
-      (define-key-after menu (vector (make-symbol "separator")) '(menu-item "--"))
       (dolist (suffix (aref group 2))
         (let* ((args (cdr suffix))
                (command (plist-get args :command))
