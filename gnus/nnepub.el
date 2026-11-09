@@ -53,7 +53,7 @@ Defaults to the virtual server name.  Only this directory is scanned.")
 (defvoo nnepub--group nil)
 
 (cl-defstruct (nnepub--book (:constructor nnepub--make-book))
-  file signature root key group title author date chapters resources)
+  file signature root key group title author date chapters resources spine)
 
 (nnoo-define-basics nnepub)
 
@@ -217,7 +217,7 @@ Return an alist of resource paths and their first navigation title."
                  (fingerprint (nnepub--fingerprint file))
                  (key (secure-hash 'sha256 file))
                  (group (concat "book." key "." fingerprint))
-                 resources chapters)
+                 resources chapters reading-order)
             (dolist (item (nnepub--elements (nnepub--child package 'manifest) 'item))
               (let ((href (nnepub--attr item 'href)))
                 (when (and href (not (nnepub--external-url-p href)))
@@ -232,6 +232,7 @@ Return an alist of resource paths and their first navigation title."
                      (resource (cl-find id resources :test #'equal
                                         :key (lambda (entry) (plist-get entry :id)))))
                 (unless resource (error "Missing EPUB spine resource: %s" id))
+                (push (plist-get resource :path) reading-order)
                 (unless (or (member (plist-get resource :type)
                                     '("application/xhtml+xml" "text/html"))
                             (string-prefix-p "image/" (or (plist-get resource :type) "")))
@@ -239,6 +240,7 @@ Return an alist of resource paths and their first navigation title."
                 (unless (member resource chapters) (push resource chapters))))
             (setq chapters (nreverse chapters))
             (unless chapters (error "EPUB has an empty spine"))
+            (setq reading-order (nreverse reading-order))
             ;; Footnotes and navigation documents can be outside the spine.
             (dolist (resource resources)
               (when (and (member (plist-get resource :type)
@@ -274,7 +276,7 @@ Return an alist of resource paths and their first navigation title."
                                                (nnepub--elements metadata 'creator))))
                            (if authors (string-join authors ", ") "Unknown"))
                  :date (format-time-string "%a, %d %b %Y %T %z" (car signature) t)
-                 :chapters chapters :resources resources)
+                 :chapters chapters :resources resources :spine reading-order)
               (setq success t))))
       (unless success (delete-directory root t)))))
 
