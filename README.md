@@ -10,16 +10,18 @@
 | 仓库根目录 | 编辑、词典、进程、网络、媒体和平台工具 | `test/` |
 | [`org/`](org/README.md) | Org 编辑、Babel、Tangle、导出、链接、协议和 Org-srs | `org/test/` |
 | [`erc/`](erc/README.md) | ERC 消息显示、补全、链接和回复 | `erc/test/` |
+| [`gnus/`](gnus/README.md) | Gnus 后端和本地 EPUB 阅读 | `gnus/test/` |
 | [`scripts/`](scripts/) | 按模块存放的 PowerShell 等辅助脚本 | 随对应模块测试 |
 
 ## 加载
 
-将仓库根目录加入 `load-path`，使用 Org 或 ERC 模块时加入对应目录：
+将仓库根目录加入 `load-path`，使用 Org、ERC 或 Gnus 模块时加入对应目录：
 
 ```elisp
 (add-to-list 'load-path "/path/to/zr-elisp")
 (add-to-list 'load-path "/path/to/zr-elisp/org")
 (add-to-list 'load-path "/path/to/zr-elisp/erc")
+(add-to-list 'load-path "/path/to/zr-elisp/gnus")
 
 (use-package zr-bookmark
   :custom (zr-bookmark-shared-file "~/shared/bookmarks")
@@ -32,7 +34,7 @@
 ```
 
 Minor mode 用参数 `-1` 关闭。路径、快捷键及站点配置由个人初始化文件设置。
-各模块的配置与入口见对应文件的 Commentary 和 docstring；Org、ERC 的详细说明见目录中的 README。
+各模块的配置与入口见对应文件的 Commentary 和 docstring；Org、ERC、Gnus 的详细说明见目录中的 README。
 使用脚本的模块会按自身位置查找 `scripts/`；复制或安装时需一并保留该目录结构。
 `zr-windows-powershell-program` 可指定 PowerShell 的名称或路径，默认自动查找；
 `zr-windows-powershell-arguments` 可调整快捷方式注册和 TTS 共用的启动参数。
@@ -114,7 +116,7 @@ make test TEST_FILE='$(wildcard org/test/*-test.el)'
 make check-parens byte-compile FILE='$(wildcard org/*.el)'
 ```
 
-Makefile 自动发现根目录、`org/`、`erc/` 下的业务文件和对应测试，
+Makefile 自动发现根目录、`org/`、`erc/`、`gnus/` 下的业务文件和对应测试，
 并将 `test/` 加入测试加载路径，供各测试复用公共辅助宏。
 跨模块加载与生命周期检查位于 `test/zr-module-loading-test.el`。
 集成测试使用临时目录和本机服务；涉及 Org-srs 的测试在未安装该包时跳过。
