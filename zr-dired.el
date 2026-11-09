@@ -106,11 +106,18 @@
     (condition-case err
         (progn
           (with-current-buffer buffer
-            (let ((status (apply #'process-file zr-dired-pandoc-program nil t nil
-                                 file "-t" format (when from
-                                                    (list "-f" from)))))
-              (unless (eq status 0)
-                (error "Pandoc failed (%s): %s" status (buffer-string))))
+            (let ((stderr-file (make-temp-file "zr-pandoc-stderr-")))
+              (unwind-protect
+                  (let ((status (apply #'process-file zr-dired-pandoc-program nil
+                                       (list t stderr-file) nil
+                                       file "-t" format (when from
+                                                          (list "-f" from)))))
+                    (unless (eq status 0)
+                      (goto-char (point-max))
+                      (insert "\n")
+                      (insert-file-contents stderr-file)
+                      (error "Pandoc failed (%s): %s" status (buffer-string))))
+                (delete-file stderr-file)))
             (let ((buffer-file-name (concat "preview." format)))
               (set-auto-mode))
             (goto-char (point-min))

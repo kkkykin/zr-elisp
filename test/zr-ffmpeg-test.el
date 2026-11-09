@@ -9,6 +9,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'zr-test-helpers)
 
 (defconst zr-ffmpeg-test--directory
   (file-name-directory (or load-file-name buffer-file-name)))
@@ -122,6 +123,14 @@
                          (3 subtitle 1) (4 data 0)))))
       (should (zr-ffmpeg--probe-streams "/tmp/video.mkv"))
       (should-not (zr-ffmpeg--probe-streams "-")))))
+
+(ert-deftest zr-ffmpeg-test-probe-keeps-stderr-out-of-json ()
+  (cl-letf (((symbol-function 'executable-find) #'identity))
+    (zr-test-with-process-output
+        "{\"streams\":[{\"index\":3,\"codec_type\":\"audio\",\"codec_name\":\"flac\"}]}"
+        "ffprobe warning\n" 0
+      (should (equal (zr-ffmpeg--probe-streams "https://example.com/video.mkv")
+                     '((:index 3 :ordinal 0 :type audio :codec "flac" :language nil)))))))
 
 (ert-deftest zr-ffmpeg-test-probe-failure-returns-nil ()
   "Probe failures and malformed JSON should be reported as unavailable."

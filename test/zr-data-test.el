@@ -48,5 +48,13 @@
     (should (equal id (zr-data-uuid '(example "中文"))))
     (should (string-match-p "\\`[0-9a-f-]\\{14\\}3[0-9a-f]\\{3\\}-[89ab]" id))))
 
+(ert-deftest zr-data-test-password-keeps-stderr-out-of-random-output ()
+  (let ((zr-data-password-length 8)
+        (kill-ring nil))
+    (cl-letf (((symbol-function 'executable-find) #'identity))
+      (zr-test-with-process-output "/abC+defGhij==\r\n" "OpenSSL warning\n" 0
+        (should (equal (zr-data-generate-password) "/abC+def"))
+        (should (equal (car kill-ring) "/abC+def"))))))
+
 (provide 'zr-data-test)
 ;;; zr-data-test.el ends here

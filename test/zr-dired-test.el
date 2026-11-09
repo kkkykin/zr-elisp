@@ -35,5 +35,31 @@
                         (should-error (zr-dired-random-file) :type 'user-error))
         (kill-buffer buffer)))))
 
+(ert-deftest zr-dired-test-pandoc-keeps-stderr-out-of-preview ()
+  (let (preview)
+    (unwind-protect
+        (cl-letf (((symbol-function 'executable-find) #'identity)
+                  ((symbol-function 'dired-get-file-for-visit) (lambda () "source.md"))
+                  ((symbol-function 'pop-to-buffer)
+                   (lambda (buffer &rest _) (setq preview buffer))))
+          (zr-test-with-process-output "* Converted\nBody\n" "[WARNING] Pandoc warning\n" 0
+            (zr-dired-pandoc))
+          (with-current-buffer preview
+            (should (equal (buffer-string) "* Converted\nBody\n"))
+            (should (derived-mode-p 'org-mode))
+            (should buffer-read-only)
+            (should-not (buffer-modified-p))))
+      (when (buffer-live-p preview) (kill-buffer preview)))))
+
+(ert-deftest zr-dired-test-pandoc-retains-stderr-on-failure ()
+  (zr-test-with-temp-directory
+    (let ((temporary-file-directory default-directory))
+      (cl-letf (((symbol-function 'executable-find) #'identity)
+                ((symbol-function 'dired-get-file-for-visit) (lambda () "source.md")))
+        (zr-test-with-process-output "partial output\n" "Pandoc conversion failed\n" 1
+          (let ((failure (should-error (zr-dired-pandoc))))
+            (should (string-match-p "Pandoc conversion failed" (error-message-string failure)))))
+        (should-not (directory-files temporary-file-directory nil "zr-pandoc-stderr-"))))))
+
 (provide 'zr-dired-test)
 ;;; zr-dired-test.el ends here

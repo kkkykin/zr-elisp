@@ -456,7 +456,7 @@ Each result includes the global ffprobe `:index' and type-relative `:ordinal'."
   (when (and (or (zr-ffmpeg--file-p source) (zr-ffmpeg--url-p source))
              (executable-find zr-ffmpeg-ffprobe-program))
     (with-temp-buffer
-      (when (zerop (apply #'call-process zr-ffmpeg-ffprobe-program nil t nil
+      (when (zerop (apply #'call-process zr-ffmpeg-ffprobe-program nil (list t nil) nil
                           "-v" "quiet" "-print_format" "json" "-show_streams"
                           (zr-ffmpeg--input-argv source)))
         (goto-char (point-min))

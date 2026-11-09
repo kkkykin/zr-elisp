@@ -105,7 +105,7 @@ Requires OpenSSL.  There is deliberately no pseudorandom fallback."
     (user-error "A positive password length and OpenSSL are required"))
   (let ((password
          (with-temp-buffer
-           (unless (eq 0 (call-process "openssl" nil t nil "rand" "-base64"
+           (unless (eq 0 (call-process "openssl" nil (list t nil) nil "rand" "-base64"
                                        (number-to-string zr-data-password-length)))
              (error "Password generation failed"))
            (substring (replace-regexp-in-string "[\r\n]" "" (buffer-string)) 0
