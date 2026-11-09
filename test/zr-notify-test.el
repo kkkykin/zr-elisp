@@ -6,6 +6,49 @@
 (require 'cl-lib)
 (require 'zr-notify)
 (declare-function notifications-notify "notifications")
+(declare-function gnus-notifications-notify "gnus-notifications")
+(defvar gnus-notifications-timeout)
+
+(defmacro zr-notify-test--with-windows (&rest body)
+  "Run BODY with two simulated frames and the native notification contract."
+  (declare (indent 0) (debug t))
+  `(let ((system-type 'windows-nt)
+         (zr-notify-function nil)
+         (zr-notify--windows-notifications (make-hash-table :test #'eq))
+         (delete-frame-functions nil)
+         (frame 'first-frame)
+         (live-frames '(first-frame second-frame))
+         (active (make-hash-table :test #'eq))
+         (next-id 0)
+         (fail-next nil)
+         events timers)
+     (cl-letf (((symbol-function 'selected-frame) (lambda () frame))
+               ((symbol-function 'select-frame)
+                (lambda (target &rest _)
+                  (should (memq target live-frames))
+                  (setq frame target)))
+               ((symbol-function 'frame-live-p)
+                (lambda (target) (memq target live-frames)))
+               ((symbol-function 'w32-notification-notify)
+                (lambda (&rest _)
+                  (should-not (gethash frame active))
+                  (unless fail-next
+                    (puthash frame (cl-incf next-id) active)
+                    (push (list 'notify frame next-id) events)
+                    next-id)))
+               ((symbol-function 'w32-notification-close)
+                (lambda (id)
+                  (should (eql id (gethash frame active)))
+                  (remhash frame active)
+                  (push (list 'close frame id) events)))
+               ((symbol-function 'run-at-time)
+                (lambda (seconds _repeat function &rest args)
+                  (let ((timer (make-symbol "timer")))
+                    (push (list timer seconds function args) timers)
+                    timer)))
+               ((symbol-function 'cancel-timer)
+                (lambda (timer) (push (list 'cancel timer) events))))
+       ,@body)))
 
 (ert-deftest zr-notify-test-dispatch-and-appointment ()
   (let (seen)
@@ -23,29 +66,86 @@
       (should (equal (seq-take seen 2) '("In 1, 3 minutes" "first\nsecond"))))))
 
 (ert-deftest zr-notify-test-windows-notification-native-api ()
-  (let ((system-type 'windows-nt)
-        called
-        closed
-        delay
-        callback
-        (zr-notify--windows-timers (make-hash-table :test #'equal)))
-    (cl-letf (((symbol-function 'w32-notification-notify)
-               (lambda (&rest _)
-                 (setq called t)
-                 10))
-              ((symbol-function 'w32-notification-close)
-               (lambda (id)
-                 (setq closed id)))
-              ((symbol-function 'run-at-time)
-               (lambda (seconds _repeat function &rest _)
-                 (setq delay seconds
-                       callback function)
-                 'timer)))
-      (zr-notify-send "a" "b" :timeout 3000)
-      (should called)
-      (should (= delay 3.0))
-      (funcall callback)
-      (should (= closed 10)))))
+  "Timeouts close on the originating frame and restore the selected frame."
+  (zr-notify-test--with-windows
+    (should (= (zr-notify-send "a" "b" :timeout 3000) 1))
+    (let ((timer (car timers)))
+      (should (= (nth 1 timer) 3.0))
+      (setq frame 'second-frame)
+      (apply (nth 2 timer) (nth 3 timer))
+      (should (equal (car events) '(close first-frame 1)))
+      (should (eq frame 'second-frame))
+      (should (zerop (hash-table-count active)))
+      (should (zerop (hash-table-count zr-notify--windows-notifications)))
+      (should-not (memq #'zr-notify--windows-close delete-frame-functions)))))
+
+(ert-deftest zr-notify-test-windows-gnus-consecutive-notifications ()
+  "Gnus sends consecutive notifications without replacement IDs or timeouts."
+  (require 'gnus-notifications)
+  (zr-notify-test--with-windows
+    (let ((gnus-notifications-timeout nil))
+      (cl-letf (((symbol-value 'features) (remq 'android features)))
+        (unwind-protect
+            (progn
+              (zr-notify-mode 1)
+              (should (= (gnus-notifications-notify "Alice" "First mail" nil) 1))
+              (should (= (gnus-notifications-notify "Bob" "Second mail" nil) 2))
+              (should (equal (reverse events)
+                             '((notify first-frame 1)
+                               (close first-frame 1)
+                               (notify first-frame 2))))
+              (should (= (gethash 'first-frame active) 2))
+              (should-not timers))
+          (zr-notify-mode -1))))))
+
+(ert-deftest zr-notify-test-windows-consecutive-timeouts ()
+  "Replacement cancels the old timer; a stale callback cannot close new mail."
+  (zr-notify-test--with-windows
+    (zr-notify-send "a" "first" :timeout 500)
+    (let ((old-timer (car timers)))
+      (should (= (zr-notify-send "b" "second" :timeout 1000) 2))
+      (should (member (list 'cancel (car old-timer)) events))
+      (let ((before events))
+        (apply (nth 2 old-timer) (nth 3 old-timer))
+        (should (equal events before)))
+      (should (= (gethash 'first-frame active) 2))
+      (let ((new-timer (car timers)))
+        (apply (nth 2 new-timer) (nth 3 new-timer)))
+      (should (equal (car events) '(close first-frame 2)))
+      (should (zerop (hash-table-count active))))))
+
+(ert-deftest zr-notify-test-windows-frame-deletion ()
+  "Deleting a frame closes even an untimed notification and cancels its timer."
+  (dolist (timeout '(nil 0 500))
+    (zr-notify-test--with-windows
+      (zr-notify-send "a" "b" :timeout timeout)
+      (setq frame 'second-frame)
+      (run-hook-with-args 'delete-frame-functions 'first-frame)
+      (should (equal (car events) '(close first-frame 1)))
+      (should (eq frame 'second-frame))
+      (when timers
+        (should (member (list 'cancel (caar timers)) events)))
+      (should (zerop (hash-table-count zr-notify--windows-notifications)))
+      (should-not delete-frame-functions))))
+
+(ert-deftest zr-notify-test-windows-failure-and-dead-frame ()
+  "Failed sends create no state; timeouts tolerate an already deleted frame."
+  (zr-notify-test--with-windows
+    (setq fail-next t)
+    (should-not (zr-notify-send "a" "b" :timeout 500))
+    (should-not timers)
+    (should-not delete-frame-functions)
+    (should (zerop (hash-table-count zr-notify--windows-notifications)))
+    (setq fail-next nil)
+    (zr-notify-send "a" "b" :timeout 500)
+    (setq frame 'second-frame
+          live-frames '(second-frame))
+    (let ((timer (car timers)))
+      (apply (nth 2 timer) (nth 3 timer)))
+    (should-not (seq-find (lambda (event) (eq (car event) 'close)) events))
+    (should (eq frame 'second-frame))
+    (should (zerop (hash-table-count zr-notify--windows-notifications)))
+    (should-not delete-frame-functions)))
 
 (ert-deftest zr-notify-test-terminal-backend ()
   "Opting in sends a terminal notification and forwards only its frame."
@@ -187,7 +287,9 @@
 (ert-deftest zr-notify-test-global-native-backends ()
   (require 'notifications)
   (dolist (platform '(android windows-nt))
-    (let ((system-type platform) (zr-notify-function nil) seen)
+    (let ((system-type platform) (zr-notify-function nil)
+          (zr-notify--windows-notifications (make-hash-table :test #'eq))
+          (delete-frame-functions nil) seen)
       (cl-letf (((symbol-function 'notifications-notify)
                  (lambda (&rest _) (ert-fail "Called D-Bus notification API")))
                 ((symbol-function 'android-notifications-notify)
@@ -243,18 +345,24 @@
         (zr-notify-mode -1)))))
 
 (ert-deftest zr-notify-test-windows-replacement-closes-old-notification ()
-  (let ((system-type 'windows-nt) (zr-notify-function nil) events
-        (zr-notify--windows-timers (make-hash-table :test #'equal)))
-    (puthash 7 'previous-timer zr-notify--windows-timers)
-    (cl-letf (((symbol-function 'w32-notification-notify)
-               (lambda (&rest _) (push 'notify events) 8))
-              ((symbol-function 'w32-notification-close)
-               (lambda (id) (push (list 'close id) events)))
-              ((symbol-function 'cancel-timer)
-               (lambda (timer) (push (list 'cancel timer) events))))
-      (should (= (zr-notify-send "title" "body" :replaces-id 7) 8))
-      (should (equal (reverse events) '((cancel previous-timer) (close 7) notify)))
-      (should-not (gethash 7 zr-notify--windows-timers)))))
+  "Explicit replacement closes its owning frame and the target's prior ID."
+  (zr-notify-test--with-windows
+    (zr-notify-send "a" "first" :timeout 500)
+    (setq frame 'second-frame)
+    (zr-notify-send "b" "second" :timeout 500)
+    (should (= (hash-table-count active) 2))
+    (should (= (zr-notify-send "c" "replacement" :replaces-id 1) 3))
+    (should (equal (seq-filter (lambda (event) (eq (car event) 'close))
+                               (reverse events))
+                   '((close first-frame 1) (close second-frame 2))))
+    (dolist (timer timers)
+      (should (member (list 'cancel (car timer)) events)))
+    (should-not (gethash 'first-frame active))
+    (should (= (gethash 'second-frame active) 3))
+    (should (eq frame 'second-frame))
+    ;; Unknown IDs cannot identify a frame; replace only the target's notification.
+    (should (= (zr-notify-send "d" "unknown ID" :replaces-id 999) 4))
+    (should (equal (cadr events) '(close second-frame 3)))))
 
 (ert-deftest zr-notify-test-global-advice-before-notifications-load ()
   (with-temp-buffer

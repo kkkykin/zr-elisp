@@ -90,6 +90,10 @@ Android 原生 ERC 已直接调用 Android 通知 API；Windows 和 SSH Linux
 Termux 后端不会转发此接口的操作按钮和 Lisp 回调，因为 Termux 的操作
 接口接受 shell 命令，语义不同。
 
+Windows 每个 frame 只保留一条活动托盘通知，发送新通知前会关闭旧通知。
+正数 `:timeout` 会在指定毫秒数后关闭通知；超时、替换和删除 frame 时的
+关闭操作都使用创建通知的 frame。Windows 原生后端不支持操作按钮和 Lisp 回调。
+
 `zr-notify-send` 在 Android 原生后端接受 `:group`，默认按 urgency 使用
 `Emacs (normal)` 等分类；显式传入的 group 会保留。Android 会记住分类的
 重要性，建议同一个分类使用固定的 urgency。

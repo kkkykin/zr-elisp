@@ -34,7 +34,8 @@ Use `zr-notify-terminal' to send OSC 777 notifications to a terminal frame."
                  (const :tag "Terminal (OSC 777)" zr-notify-terminal)
                  function))
 
-(defvar zr-notify--windows-timers (make-hash-table :test #'equal))
+(defvar zr-notify--windows-notifications (make-hash-table :test #'eq)
+  "Map frames to their active Windows notification's (ID . TIMER).")
 (defvar zr-notify--terminal-warning-issued-p nil)
 
 ;;;###autoload
@@ -59,8 +60,47 @@ session when skipping an unusable frame."
        :warning))
     nil))
 
+(defun zr-notify--windows-close (frame &optional id)
+  "Close FRAME's Windows notification, optionally only if it has ID."
+  (when-let* ((notification (gethash frame zr-notify--windows-notifications))
+              ((or (null id) (eql id (car notification)))))
+    (when (cdr notification)
+      (cancel-timer (cdr notification)))
+    (remhash frame zr-notify--windows-notifications)
+    (when (zerop (hash-table-count zr-notify--windows-notifications))
+      (remove-hook 'delete-frame-functions #'zr-notify--windows-close))
+    (when (frame-live-p frame)
+      (with-selected-frame frame
+        (w32-notification-close (car notification))))))
+
+(defun zr-notify--windows-send (title body &rest options)
+  "Send TITLE and BODY with OPTIONS, replacing the frame's tray notification."
+  (unless (fboundp 'w32-notification-notify)
+    (user-error "This Emacs build has no Windows notification support"))
+  (let ((frame (selected-frame)))
+    (when-let* ((id (plist-get options :replaces-id))
+                (old-frame
+                 (cl-loop for frame being the hash-keys of zr-notify--windows-notifications
+                          using (hash-values notification)
+                          when (eql id (car notification)) return frame)))
+      (zr-notify--windows-close old-frame id))
+    ;; The native API permits only one active notification per frame.
+    (zr-notify--windows-close frame)
+    (when-let* ((id (apply #'w32-notification-notify :title title :body body options)))
+      (let ((notification (cons id nil))
+            (timeout (plist-get options :timeout)))
+        (puthash frame notification zr-notify--windows-notifications)
+        (add-hook 'delete-frame-functions #'zr-notify--windows-close)
+        (when (and (numberp timeout) (> timeout 0))
+          (setcdr notification
+                  (run-at-time (/ timeout 1000.0) nil
+                               #'zr-notify--windows-close frame id)))
+        id))))
+
 (defun zr-notify-send (title body &rest options)
   "Send TITLE and BODY with OPTIONS.  Timeout values are milliseconds.
+Windows keeps one tray notification per frame, closing the previous one
+before sending another.  Notifications close on their originating frame.
 Native Android notifications accept :group.  When omitted, its default
 includes the urgency so each group has one fixed importance level."
   (if zr-notify-function
@@ -77,26 +117,7 @@ includes the urgency so each group has one fixed importance level."
              (apply #'android-notifications-notify :title title :body body options))
          (apply #'zr-termux-notify title body options)))
       ('windows-nt
-       (unless (fboundp 'w32-notification-notify)
-         (user-error "This Emacs build has no Windows notification support"))
-       ;; The native API requires closing the active notification first.
-       (when-let* ((id (plist-get options :replaces-id)))
-         (when-let* ((timer (gethash id zr-notify--windows-timers)))
-           (cancel-timer timer))
-         (remhash id zr-notify--windows-timers)
-         (w32-notification-close id))
-       (let* ((id (apply #'w32-notification-notify :title title :body body options))
-              (timeout (plist-get options :timeout)))
-         (when-let* ((timer (gethash id zr-notify--windows-timers)))
-           (cancel-timer timer))
-         (remhash id zr-notify--windows-timers)
-         (when (and (numberp timeout) (> timeout 0))
-           (puthash id (run-at-time (/ timeout 1000.0) nil
-                                    (lambda ()
-                                      (remhash id zr-notify--windows-timers)
-                                      (w32-notification-close id)))
-                    zr-notify--windows-timers))
-         id))
+       (apply #'zr-notify--windows-send title body options))
       (_
        (require 'notifications)
        (apply #'notifications-notify :title title :body body options)))))
