@@ -121,16 +121,24 @@ the shortcut's absolute path.  Requires native Windows and PowerShell."
       (let* ((command (zr-windows--powershell-command
                        "register-emacs-shortcut.ps1" shortcut target))
              (coding-system-for-read 'utf-8-unix)
-             (status (apply #'call-process (car command) nil t nil (cdr command))))
-        (unless (eq status 0)
-          (error "Emacs shortcut registration failed (%s): %s"
-                 status (string-trim (buffer-string))))
-        (let* ((result (json-parse-string (buffer-string) :object-type 'plist
-                                         :false-object nil))
-               (path (expand-file-name (plist-get result :shortcut))))
-          (message "%s Emacs shortcut: %s"
-                   (if (plist-get result :created) "Created" "Repaired") path)
-          path)))))
+             (stderr-file (make-temp-file "zr-windows-shortcut-stderr-")))
+        (unwind-protect
+            ;; PowerShell can write CLIXML progress records to stderr.
+            (let ((status (apply #'call-process (car command) nil
+                                 (list t stderr-file) nil (cdr command))))
+              (unless (eq status 0)
+                (goto-char (point-max))
+                (insert "\n")
+                (insert-file-contents stderr-file)
+                (error "Emacs shortcut registration failed (%s): %s"
+                       status (string-trim (buffer-string))))
+              (let* ((result (json-parse-string (buffer-string) :object-type 'plist
+                                               :false-object nil))
+                     (path (expand-file-name (plist-get result :shortcut))))
+                (message "%s Emacs shortcut: %s"
+                         (if (plist-get result :created) "Created" "Repaired") path)
+                path))
+          (delete-file stderr-file))))))
 
 ;;;###autoload
 (defun zr-windows-tts-speak (text)

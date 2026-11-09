@@ -9,6 +9,7 @@ param(
 
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $appId = 'GNU.Emacs'
 if (!$shortcutPath) {
     $shortcutPath = Join-Path ([Environment]::GetFolderPath('Programs')) 'Emacs.lnk'

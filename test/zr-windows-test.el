@@ -94,19 +94,45 @@
                      repair))))
       (delete-directory directory t))))
 
+(ert-deftest zr-windows-test-shortcut-keeps-powershell-stderr-out-of-json ()
+  (let* ((program (expand-file-name invocation-name invocation-directory))
+         (shortcut (expand-file-name "Emacs.lnk" temporary-file-directory))
+         (json (json-serialize (list :shortcut shortcut :created :false)))
+         (progress (concat "#< CLIXML\n<Objs><Obj S=\"progress\"><S>"
+                           "Preparing modules for first use.</S></Obj></Objs>\n"))
+         (system-type 'windows-nt))
+    ;; Use a real subprocess so stdout/stderr routing is exercised by Emacs.
+    (cl-letf (((symbol-function 'zr-windows--powershell-command)
+               (lambda (&rest _)
+                 (list program "--batch" "-Q" "--eval"
+                       (prin1-to-string
+                        `(progn
+                           (princ ,progress 'external-debugging-output)
+                           (princ ,json)))))))
+      (should (equal (zr-windows-register-emacs-shortcut) shortcut)))))
+
 (ert-deftest zr-windows-test-shortcut-reports-process-errors-and-rejects-remote-paths ()
-  (let ((system-type 'windows-nt))
-    (cl-letf (((symbol-function 'executable-find) (lambda (_) "/windows/powershell.exe")))
-      (dolist (status '(1 "terminated"))
-        (cl-letf (((symbol-function 'call-process)
-                   (lambda (&rest _) (insert "AppID verification failed") status)))
-          (let ((failure (should-error (zr-windows-register-emacs-shortcut))))
-            (should (string-match-p "AppID verification failed"
-                                    (error-message-string failure))))))
-      (cl-letf (((symbol-function 'call-process)
-                 (lambda (&rest _) (ert-fail "Launched PowerShell for a remote shortcut"))))
-        (should-error (zr-windows-register-emacs-shortcut "/ssh:example.org:/tmp/Emacs.lnk")
-                      :type 'user-error)))))
+  (cl-letf (((symbol-function 'zr-windows--require) #'ignore)
+            ((symbol-function 'executable-find) (lambda (_) "/windows/powershell.exe")))
+    (dolist (status '(1 "terminated"))
+      (dolist (stream '(stdout stderr))
+        (let (stderr-file)
+          (cl-letf (((symbol-function 'call-process)
+                     (lambda (_program _infile destination _display &rest _args)
+                       (setq stderr-file (cadr destination))
+                       (if (eq stream 'stdout)
+                           (insert "AppID verification failed")
+                         (let ((coding-system-for-write 'utf-8-unix))
+                           (write-region "AppID verification failed" nil stderr-file nil 'silent)))
+                       status)))
+            (let ((failure (should-error (zr-windows-register-emacs-shortcut))))
+              (should (string-match-p "AppID verification failed"
+                                      (error-message-string failure)))))
+          (should-not (file-exists-p stderr-file)))))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest _) (ert-fail "Launched PowerShell for a remote shortcut"))))
+      (should-error (zr-windows-register-emacs-shortcut "/ssh:example.org:/tmp/Emacs.lnk")
+                    :type 'user-error))))
 
 (ert-deftest zr-windows-test-shortcut-native-creation-and-repair ()
   (skip-unless (eq system-type 'windows-nt))
@@ -126,7 +152,8 @@
                         (base64-encode-string
                          (encode-coding-string
                           (concat "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)\n"
-                                  "$ErrorActionPreference = 'Stop'\n" script)
+                                  "$ErrorActionPreference = 'Stop'\n"
+                                  "$ProgressPreference = 'SilentlyContinue'\n" script)
                           'utf-16le) t))))
                  (ert-info ((buffer-string)) (should (eq status 0)))
                  (json-parse-string (buffer-string) :object-type 'plist)))))
