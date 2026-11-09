@@ -209,13 +209,13 @@ confirmation, scheduling, undo history and transient key dispatch are real."
       (dolist (command '(zr-org-srs-review-undo zr-org-srs-review-redo
                          zr-org-srs-review-postpone zr-org-srs-review-suspend
                          zr-org-srs-review-tts zr-org-srs-review-tts-front
-                         zr-org-srs-review-auto-tts-mode scroll-up-command
-                         scroll-down-command zr-org-srs-review-edit
+                         zr-org-srs-review-auto-tts-mode zr-org-srs-review-edit
                          zr-org-srs-review-quit))
         (should (eq (lookup-key menu (vector command)) command)))
       (dolist (command '(zr-org-srs-review-confirm zr-org-srs-review-rate-easy
                          zr-org-srs-review-rate-good zr-org-srs-review-rate-hard
-                         zr-org-srs-review-rate-again))
+                         zr-org-srs-review-rate-again scroll-up-command
+                         scroll-down-command))
         (should-not (lookup-key menu (vector command))))
       (should-not (plist-get (nthcdr 4 (assq 'zr-org-srs-review-undo menu)) :enable))
       (org-srs-item-confirm-command)
