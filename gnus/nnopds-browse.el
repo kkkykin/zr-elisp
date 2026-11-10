@@ -63,7 +63,7 @@
     (let* ((url (nnopds--url (plist-get link :href) base))
            (label (nnepub--header-text (or title (plist-get link :title) url)))
            (start (point)))
-      (insert "  [directory] " label "\n")
+      (insert "  " label "\n")
       (add-text-properties start (point) (list 'nnopds-browse-link url 'face 'font-lock-type-face)))))
 
 (defun nnopds-browse--book (entry)
