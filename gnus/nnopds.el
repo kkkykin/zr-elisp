@@ -7,7 +7,8 @@
 
 ;; An OPDS 2 catalog is a server, a publication is a group, and its reading
 ;; resources are articles.  EPUB files are downloaded on first group entry
-;; and read using nnepub.  Catalog directories and pagination are browsed
+;; and read using nnepub; Divina comics stream images page by page.
+;; Catalog directories and pagination are browsed
 ;; on demand, with visited pages cached locally.  Reading formats and
 ;; progress protocols have separate interfaces for future extensions.
 
@@ -273,8 +274,9 @@ are bounded and credentials are only sent to the configured origin."
         (setf (plist-get link :href) (nnopds--url href base)))))
   document)
 
-(defvar nnopds--formats '((epub "application/epub+zip"))
-  "Reading formats and their supported direct acquisition media types.")
+(defvar nnopds--formats '((comic "application/divina+json")
+                         (epub "application/epub+zip"))
+  "Reading formats in preference order and their link media types.")
 
 (cl-defgeneric nnopds--load-publication (format connection publication)
   "Load PUBLICATION's reading data for FORMAT using CONNECTION.")
@@ -284,20 +286,32 @@ are bounded and credentials are only sent to the configured origin."
 (cl-defgeneric nnopds--dispose (format data) "Free temporary reading DATA for FORMAT.")
 (cl-defgeneric nnopds--locator (format data chapter) "Return CHAPTER's portable locator, or nil.")
 (cl-defgeneric nnopds--locate (format data locator) "Return (NUMBER . FRAGMENT) for LOCATOR, or nil.")
+(cl-defgeneric nnopds--prepare-reader (format data) "Prepare FORMAT DATA's current Gnus summary.")
+(cl-defgeneric nnopds--close-reader (format data) "Close FORMAT DATA's reading sessions.")
+(cl-defmethod nnopds--close-reader (_format _data) nil)
 
 (defun nnopds--publication (document base &optional connection)
   "Convert an OPDS publication DOCUMENT at BASE into a reading entry.
 With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
   (let* ((document (if base (nnopds--normalize document base) document))
          (links (plist-get document :links))
-         (acquisition (cl-find-if
-                       (lambda (link)
-                         (and (cl-some (lambda (format) (member (nnopds--media-type link) (cdr format)))
-                                       nnopds--formats)
-                              (cl-some (lambda (rel) (nnopds--rel-p link rel))
-                                       '("http://opds-spec.org/acquisition" "http://opds-spec.org/acquisition/open-access"
-                                         "acquisition" "download")))) links))
+         (acquisition
+          (cl-loop for format in nnopds--formats
+                   thereis
+                   (cl-find-if
+                    (lambda (link)
+                      (and (plist-get link :href)
+                           (not (eq t (plist-get link :templated)))
+                           (member (nnopds--media-type link) (cdr format))
+                           ;; Komga's Divina manifest is a self link; calibre's
+                           ;; is an acquisition link.  Komga also offers some
+                           ;; alternate Divina manifests without a relation.
+                           (or (eq (car format) 'comic)
+                               (cl-some (lambda (rel) (nnopds--rel-p link rel))
+                                        '("http://opds-spec.org/acquisition" "http://opds-spec.org/acquisition/open-access"
+                                          "acquisition" "download"))))) links)))
          (self (cl-find-if (lambda (link) (nnopds--rel-p link "self")) links))
+         (format (car (cl-find-if (lambda (entry) (member (nnopds--media-type acquisition) (cdr entry))) nnopds--formats)))
          (metadata (plist-get document :metadata)))
     (when acquisition
       (let* ((source (or (plist-get self :href) (plist-get acquisition :href)))
@@ -312,9 +326,10 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
                   (if (stringp author) author
                     (string-join (mapcar (lambda (entry) (if (stringp entry) entry (or (plist-get entry :name) "")))
                                          (if (and (listp author) (plist-get author :name)) (list author) author)) ", ")))
-         :format (car (cl-find-if (lambda (format) (member (nnopds--media-type acquisition) (cdr format))) nnopds--formats))
+         :format format
          :acquisition (plist-get acquisition :href)
-         :progress (when connection (copy-sequence (nnopds--connection-progress connection))))))))
+         :progress (when (and connection (eq format 'epub))
+                     (copy-sequence (nnopds--connection-progress connection))))))))
 
 (defun nnopds--cache-file (connection name)
   "Return cache NAME in CONNECTION's account directory."
@@ -491,6 +506,8 @@ SERVER defaults to the current OPDS server."
          (publication (or (gethash (or group nnopds--group) (nnopds--connection-publications connection))
                           (error "OPDS publication unavailable; browse its catalog directory: %s" group))))
     (when (and load (not (nnopds--publication-data publication)))
+      (when (eq (nnopds--publication-format publication) 'comic)
+        (require 'nnopds-comic))
       (setf (nnopds--publication-data publication)
             (nnopds--load-publication (nnopds--publication-format publication) connection publication)
             (nnopds--publication-count publication)
@@ -551,6 +568,7 @@ SERVER defaults to the current OPDS server."
 (cl-defmethod nnopds--header ((_format (eql epub)) data chapter) (nnepub--header data chapter))
 (cl-defmethod nnopds--article ((_format (eql epub)) data chapter group) (nnepub--mime data chapter group t))
 (cl-defmethod nnopds--dispose ((_format (eql epub)) data) (nnepub--dispose-book data))
+(cl-defmethod nnopds--prepare-reader ((_format (eql epub)) _data) (nnopds-progress-prepare))
 
 (cl-defmethod nnopds--locator ((_format (eql epub)) data chapter)
   ;; Supplementary footnotes must not replace the main reading position.
@@ -614,6 +632,10 @@ SERVER defaults to the current OPDS server."
     (when-let* ((connection nnopds--connection))
       (dolist (reader (copy-sequence (nnopds--connection-readers connection)))
         (nnopds-progress-close (cdr reader)))
+      (maphash (lambda (_group publication)
+                 (when-let* ((data (nnopds--publication-data publication)))
+                   (nnopds--close-reader (nnopds--publication-format publication) data)))
+               (nnopds--connection-publications connection))
       (setf (nnopds--connection-closed connection) t)
       (dolist (process (copy-sequence (nnopds--connection-processes connection)))
         (when (process-live-p process) (delete-process process)))
@@ -655,7 +677,10 @@ SERVER defaults to the current OPDS server."
   (nnopds--report-errors
     (let ((connection (nnopds--change-server server)))
       (when-let* ((reader (cdr (assoc group (nnopds--connection-readers connection)))))
-        (nnopds-progress-close reader)))
+        (nnopds-progress-close reader))
+      (when-let* ((publication (gethash group (nnopds--connection-publications connection)))
+                  (data (nnopds--publication-data publication)))
+        (nnopds--close-reader (nnopds--publication-format publication) data)))
     (setq nnopds--group nil)
     t))
 
@@ -717,6 +742,15 @@ SERVER defaults to the current OPDS server."
 (with-eval-after-load 'gnus-srvr
   (advice-add 'gnus-browse-foreign-server :around #'nnopds--browse-server))
 
+(defun nnopds--prepare-summary ()
+  "Prepare the reading format of this OPDS summary."
+  (when (string-match-p "\\`nnopds[+:]" gnus-newsgroup-name)
+    (let* ((method (gnus-find-method-for-group gnus-newsgroup-name))
+           (publication (nnopds--get-publication (gnus-group-real-name gnus-newsgroup-name)
+                                                (nth 1 method) t)))
+      (nnopds--prepare-reader (nnopds--publication-format publication)
+                             (nnopds--publication-data publication)))))
+
 (with-eval-after-load 'gnus-sum
   (add-to-list 'gnus-parameters
                '("\\`nnopds[+:]"
@@ -726,7 +760,7 @@ SERVER defaults to the current OPDS server."
                  (gnus-show-threads nil)
                  (gnus-article-sort-functions '(gnus-article-sort-by-number))
                  (gnus-thread-sort-functions '(gnus-thread-sort-by-number))))
-  (add-hook 'gnus-summary-prepared-hook #'nnopds-progress-prepare))
+  (add-hook 'gnus-summary-prepared-hook #'nnopds--prepare-summary))
 
 (provide 'nnopds)
 ;;; nnopds.el ends here

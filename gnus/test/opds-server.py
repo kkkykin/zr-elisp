@@ -5,12 +5,14 @@ import datetime
 import email.utils
 import hashlib
 import json
+import struct
 import sys
 import threading
 import time
 import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -70,6 +72,49 @@ def publication(name):
     return {"metadata": {"title": "测试书籍 " + name, "modified": modified,
                          "identifier": "urn:isbn:duplicate", "author": [{"name": "作者甲"}, "作者乙"]},
             "links": links}
+
+
+def comic_publication(kind):
+    manifest = ("/komga/opds/v2/books/comic/manifest" if kind == "komga"
+                else "/calibre/comic-manifest/2?library_id=main")
+    links = [{"rel": "http://opds-spec.org/acquisition", "href": "/comic.cbz",
+              "type": "application/vnd.comicbook+zip"}]
+    if kind == "calibre":
+        # A streamable comic must win even if an EPUB link precedes it.
+        links.insert(0, {"rel": "http://opds-spec.org/acquisition", "href": "/content/one.epub",
+                         "type": "application/epub+zip"})
+    links.append({"rel": ["self"] if kind == "komga" else "http://opds-spec.org/acquisition",
+                  "href": manifest, "type": "application/divina+json"})
+    return {"metadata": {"title": "流式漫画", "author": "漫画作者", "modified": "2026-11-06T00:00:00Z"},
+            "links": links}
+
+
+def comic_image(number):
+    width, height = (40, 20) if number == 4 and (root / "comic-landscape.txt").exists() else (20, 30)
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+
+    pixels = b"".join(b"\0" + bytes((number * 30, 80, 120)) * width for _ in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+def comic_manifest(kind):
+    order = []
+    for number in range(1, 8):
+        href = (f"pages/{number}?contentNegotiation=false" if kind == "komga"
+                else f"../comic-page/2/{number - 1}?library_id=main&v=edition-1")
+        resource = {"href": href, "type": "image/png"}
+        if kind == "komga":
+            resource.update(width=40 if number == 4 and (root / "comic-landscape.txt").exists() else 20,
+                            height=20 if number == 4 and (root / "comic-landscape.txt").exists() else 30)
+        if number == 2:
+            resource["type"] = "image/avif"
+            resource["alternate"] = [{"href": href + "&format=png", "type": "image/png"}]
+        order.append(resource)
+    return {"metadata": {"title": "流式漫画", "conformsTo": "https://readium.org/webpub-manifest/profiles/divina",
+                         "numberOfPages": 7, "readingProgression": "rtl"}, "readingOrder": order}
 
 
 def partial_md5(path):
@@ -264,6 +309,11 @@ class Handler(BaseHTTPRequestHandler):
             if path != "/catalog" and self.headers.get("Accept") != "application/opds+json":
                 self.respond(200, b"<feed>OPDS 1</feed>", "application/atom+xml")
                 return
+            if (root / "comic-catalog.txt").exists():
+                kind = (root / "comic-catalog.txt").read_text().strip()
+                self.json_response({"metadata": {"title": "Comic Library"},
+                                    "publications": [comic_publication(kind), publication("one")]})
+                return
             if path == "/calibre/opds":
                 book = publication("one")
                 book["links"] = [{"rel": "http://opds-spec.org/acquisition", "href": "/calibre/get/epub/1/main",
@@ -306,6 +356,22 @@ class Handler(BaseHTTPRequestHandler):
                                 "navigation": [{"href": "/catalog", "type": "application/opds+json", "title": "Home"}]})
         elif path.startswith("/publication/"):
             self.json_response(publication(path.rsplit("/", 1)[-1]), content_type="application/opds-publication+json")
+        elif path == "/komga/opds/v2/books/comic/manifest":
+            self.json_response(comic_manifest("komga"), content_type="application/opds-publication+json")
+        elif path == "/calibre/comic-manifest/2":
+            self.json_response(comic_manifest("calibre"), content_type="application/divina+json")
+        elif path.startswith(("/komga/opds/v2/books/comic/pages/", "/calibre/comic-page/2/")):
+            number = int(path.rsplit("/", 1)[-1]) + (1 if path.startswith("/calibre/") else 0)
+            delay = root / "comic-page-delay.txt"
+            delayed_page = root / "comic-delay-page.txt"
+            if delay.exists() and (not delayed_page.exists() or delayed_page.read_text().strip() == str(number)):
+                time.sleep(float(delay.read_text()))
+            if (root / "comic-failure-page.txt").exists() and (root / "comic-failure-page.txt").read_text().strip() == str(number):
+                self.respond(503)
+            elif (root / "comic-invalid-page.txt").exists() and (root / "comic-invalid-page.txt").read_text().strip() == str(number):
+                self.respond(200, b"<html>Not an image</html>", "text/html")
+            else:
+                self.respond(200, comic_image(number), "image/png")
         elif path.startswith("/content/"):
             self.download(root / path.rsplit("/", 1)[-1])
         elif path == "/calibre/get/epub/1/main":

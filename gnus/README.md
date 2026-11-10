@@ -4,15 +4,17 @@
 
 ## nnopds
 
-`nnopds` 将 OPDS 2 目录作为 Gnus server，每本 EPUB 是一个 group，正文资源
-是 articles。首次进入书籍时下载 EPUB，章节、图片及脚注处理复用 `nnepub`。
-需要支持 libxml 的 Emacs、`curl` 和 `7zz`/`7z`。
+`nnopds` 将 OPDS 2 目录作为 Gnus server，每本书是一个 group，正文资源
+是 articles。首次进入 EPUB 时下载整本，章节、图片及脚注处理复用 `nnepub`。
+漫画通过 Divina manifest 按页取图，一张原始图片对应一篇 article。
+HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`，漫画阅读需要支持
+相应图片格式的图形 Emacs。
 
 更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译这些
 模块；它们共享的结构体访问器会在编译时内联：
 
 ```sh
-make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
+make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-comic.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
 ```
 
 ```elisp
@@ -53,14 +55,64 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 书籍始终显示完整章节列表，包括已读章节，并保留 Gnus 的已读标记。
 `gnus-large-newsgroup` 不限制书籍章节；目录按服务器提供的分页逐页加载。
 
-首次列出书籍时只取书目，章节数在首次打开后更新。当前支持带直接 EPUB
-取书链接的 publication；不提供 EPUB 下载的条目暂不列出。阅读使用 Gnus
-原有命令，图片、跨章链接和脚注沿用 `nnepub`。
+首次列出书籍时只取书目，章节数或漫画页数在首次打开后更新。支持直接 EPUB
+取书链接以及 `application/divina+json` 漫画 manifest 链接；两者都有时优先
+使用漫画流式入口。EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注沿用
+`nnepub`。
+
+Komga 的 OPDS 2 目录在 `self` 链接提供漫画 manifest，用户需要页面流式阅读
+权限。calibre 9.18 及以上在 `/opds` 的 acquisition 链接提供 CBZ 漫画 manifest；
+CBR/CB7 的整包下载链接不会作为流式漫画列出。后端沿 manifest 的 `readingOrder`
+读取图片，保留页 URL 的库名、版本等参数，并从原始和 alternate 链接中选择
+Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest 和 API key。
+
+漫画在 summary 和 article buffer 启用局部 `nnopds-comic-mode`：
+
+| 按键 | 操作 |
+| --- | --- |
+| `1` / `2` | 单页 / 双页 |
+| `c` | 切换封面单页 |
+| `r` | 切换左向右 / 右向左 |
+| `n` / `SPC` | 下一页或下一跨页 |
+| `p` / `DEL` | 上一页或上一跨页 |
+| 左右箭头 | 按阅读方向翻页 |
+| `j` | 跳到指定原始页码 |
+| `g` | 重试当前页的取图失败 |
+
+默认单页，封面独占一跨页，方向使用 manifest 的 `readingProgression`；缺少方向
+时使用左向右。`M-x nnopds-comic-set-direction` 可选择 `auto`，恢复跟随书籍方向。
+这些设置可在阅读中切换，并按书保存。可配置未读漫画的初始布局：
+
+```elisp
+(setq nnopds-comic-layout 'double
+      nnopds-comic-cover-single t
+      nnopds-comic-direction 'auto)
+```
+
+封面单页时按 `[1] [2,3] [4,5] …` 配对，关闭后按 `[1,2] [3,4] …` 配对；
+右向左只改变屏幕上的左右摆放，原始图片次序和 article 编号始终保持不变。
+切换布局会保留当前原始页，例如第 3 页切换双页后显示 `[2,3]`，切回仍是第 3 页。
+横向图片独占一跨页，末尾剩一页也单独显示。图片按窗口宽高等比缩放，双页使用
+相同显示高度；调整窗口大小后自动重新排版。calibre 未提供页尺寸时在显示图片后
+识别，并记录尺寸以保持后续会话的配对。
+
+打开漫画只取 manifest 和当前图片，列页目录或 Gnus 预取文章不会下载图片。
+`nnopds-comic-prefetch-pages` 默认预取后续 4 张图片，设为 0 可关闭预取；
+`nnopds-comic-max-requests` 默认限制每本漫画最多 2 个并发请求。
+图片以临时文件下载，成功后替换正式缓存，关闭阅读或服务器时取消待处理请求。
+已经读取的 manifest 和图片可跨会话、离线复用，缓存保存在同一账号的 `.comic/`
+目录中；内存中的解码图片只保留当前显示的一页或两页。
+
+漫画自动保存本地原始页码，重新进入 group 时恢复。完整显示当前阅读单元后才
+保存位置，并处理双页的两篇 article 的已读标记；预取、失败请求和布局重绘
+不会推进位置，Gnus 的收藏等手动标记保留。漫画目前使用本地位置，
+`nnopds-koreader-*`、`nnopds-resume` 和 `nnopds-save-position` 的服务器同步
+继续用于 EPUB。
 
 取书请求优先接受 EPUB 媒体类型，也接受通用二进制响应；下载内容按 EPUB
 解析，支持将附件标为 `application/octet-stream` 的接口。
 
-目录和 EPUB 保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
+目录、EPUB 和漫画缓存保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
 不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
 没有缓存时也不联网；首次浏览才请求根目录，进入未缓存的目录或分页时请求
 该页。默认重访目录和返回上级均使用缓存。新增书籍或版本更新后，在所在
@@ -121,7 +173,8 @@ spine 中的序号估算，实际跳转使用 XPointer。KOReader 没有条件�
 
 目录、阅读格式和同步协议分别处理。`nnopds-progress-protocol` 当前只支持
 `koreader`，配置项和协议读写接口保留，方便后续添加正式的 OPDS 同步协议。
-后续漫画可增加阅读格式和 KOReader 页码适配，复用现有目录、缓存和位置队列。
+漫画的 Divina 读取和本地布局位于独立的 `nnopds-comic.el`，服务器漫画进度
+协议可在现有位置接口上另行适配。
 
 ## nnepub
 
@@ -202,7 +255,7 @@ group。类型会自动识别，EPUB 2/3 的章节、图片和脚注处理复用
 ## 检查
 
 ```sh
-make test TEST_FILE='gnus/test/nnepub-test.el gnus/test/nnopds-test.el'
+make test TEST_FILE='gnus/test/nnepub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el'
 make check-parens byte-compile FILE='$(wildcard gnus/*.el)'
 make clean
 ```
@@ -215,5 +268,8 @@ OPDS 测试启动本地 Python HTTP 服务，验证导航、分页、下载缓�
 和 [calibre 接口](https://github.com/kovidgoyal/calibre/blob/master/src/calibre/srv/kosync.py)
 构造对应的认证和响应，包含无时间戳、空响应、分块 MD5 和下载前登录检查，
 无需外部服务器。
+漫画测试使用 Komga 与 calibre 的两种 manifest 链接形式、相对页 URL 和 Digest
+认证，验证流式缓存、并发预取、实时布局切换、已读标记、失败重试和本地恢复。
+图像解码和显示能力在 nox Emacs 中使用替身，网络、图片文件和 Gnus 会话实际运行。
 未安装 `7zz`/`7z` 或 Emacs 不支持 libxml 时，
 需要这些依赖的测试会跳过。

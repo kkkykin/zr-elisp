@@ -13,6 +13,7 @@
 
 (defconst nnopds-test--directory (file-name-directory (or load-file-name buffer-file-name)))
 (defconst nnopds-test--load-path (file-name-directory (directory-file-name nnopds-test--directory)))
+(defvar nnopds-test--server-definitions nil)
 
 (defun nnopds-test--wait (predicate)
   "Wait up to ten seconds for PREDICATE, yielding process output."
@@ -108,8 +109,10 @@
          (gnus-browse-buffer (generate-new-buffer-name " *opds-browser*"))
          (gnus-browse-current-method nil) (gnus-browse-return-buffer nil)
          (gnus-secondary-select-methods
-          (list (list 'nnopds "library" (list 'nnopds-url opds-url)
-                      '(nnopds-headers (("X-API-Key" . "test-key")))))))
+          (list (append (list 'nnopds "library")
+                        (or nnopds-test--server-definitions
+                            (list (list 'nnopds-url opds-url)
+                                  '(nnopds-headers (("X-API-Key" . "test-key")))))))))
      (save-window-excursion
        (unwind-protect
            (progn
