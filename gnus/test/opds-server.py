@@ -1,6 +1,8 @@
 """Local OPDS/KOReader fixture based on Komga and calibre routes."""
 
 import base64
+import datetime
+import email.utils
 import hashlib
 import json
 import sys
@@ -100,7 +102,22 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def json_response(self, value, status=200, content_type="application/opds+json"):
-        self.respond(status, json.dumps(value, ensure_ascii=False).encode(), content_type)
+        body = json.dumps(value, ensure_ascii=False).encode()
+        headers = {}
+        validator = root / "feed-validator.txt"
+        if validator.exists() and content_type == "application/opds+json" and "metadata" in value:
+            if validator.read_text().strip() == "etag":
+                headers["ETag"] = '"' + hashlib.sha256(body).hexdigest() + '"'
+                unchanged = self.headers.get("If-None-Match") == headers["ETag"]
+            else:
+                revision = root / "revision.txt"
+                modified = revision.read_text().strip() if revision.exists() else "2026-01-01T00:00:00Z"
+                headers["Last-Modified"] = email.utils.format_datetime(datetime.datetime.fromisoformat(modified), usegmt=True)
+                unchanged = self.headers.get("If-Modified-Since") == headers["Last-Modified"]
+            if unchanged:
+                self.respond(304, headers=headers)
+                return
+        self.respond(status, body, content_type, headers)
 
     def record(self, body=None):
         with lock, (root / "requests.jsonl").open("a") as stream:
@@ -108,6 +125,8 @@ class Handler(BaseHTTPRequestHandler):
                                      "key": self.headers.get("X-API-Key"),
                                      "authorization": self.headers.get("Authorization"),
                                      "accept": self.headers.get("Accept"),
+                                     "if_none_match": self.headers.get("If-None-Match"),
+                                     "if_modified_since": self.headers.get("If-Modified-Since"),
                                      "content_type": self.headers.get("Content-Type"),
                                      "sync_user": self.headers.get("X-Auth-User"),
                                      "sync_key": self.headers.get("X-Auth-Key"),
@@ -207,6 +226,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/slow":
             time.sleep(2)
+        if path in ("/catalog", "/books", "/komga/opds/v2/catalog", "/calibre/opds"):
+            delay = root / "feed-delay.txt"
+            failure = root / "feed-failure-path.txt"
+            if delay.exists():
+                time.sleep(float(delay.read_text()))
+            if failure.exists() and self.path == failure.read_text().strip():
+                self.respond(503)
+                return
         if path == "/malformed":
             self.respond(200, b"not json")
         elif path == "/failure":

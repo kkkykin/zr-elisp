@@ -46,9 +46,17 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 原有命令，图片、跨章链接和脚注沿用 `nnepub`。
 
 目录和 EPUB 保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
-不同 server 和认证配置分别缓存。目录在 `nnopds-catalog-cache-ttl` 秒后刷新，
-刷新失败时保留已有书目。已下载的 EPUB 可离线阅读；解压内容在关闭 server
-时清理，下载缓存跨会话保留。`nnopds-request-timeout` 限制每个 HTTP 请求。
+不同 server 和认证配置分别缓存。默认只在没有目录缓存时联网，之后启动、
+`g` 和浏览书库均使用已有缓存，适合慢网或离线使用。新增书籍或版本更新后，
+用 `M-x nnopds-refresh-catalog` 选择已打开的 server 手动刷新，再浏览服务器
+查看新书。`nnopds-catalog-cache-ttl` 默认为 nil；设为秒数可启用定时过期，
+设为 0 则每次扫描都联网刷新。
+
+刷新按分页保存缓存，并使用服务器提供的 ETag/Last-Modified 条件请求，
+未变化的页面无需重新下载。首次抓取中断后，普通扫描可复用已完成的分页；
+刷新失败时保留完整的旧书目，重新启动也能继续使用。章节数集中缓存，启动
+无需逐本读取索引。已下载的 EPUB 可离线阅读；解压内容在关闭 server 时清理，
+下载缓存跨会话保留。`nnopds-request-timeout` 限制每个 HTTP 请求。
 
 Group 身份由书目的稳定 URL 和 `metadata.modified` 确定，书目版本更新会
 产生新 group，旧版本的 Gnus 标记继续保留。没有 `modified` 的书目作为一个

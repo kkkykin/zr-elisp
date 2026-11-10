@@ -35,9 +35,11 @@
   "Maximum seconds for each HTTP request."
   :type 'natnum :group 'nnopds)
 
-(defcustom nnopds-catalog-cache-ttl 300
-  "Seconds before a catalog is fetched again.  Zero always refreshes it."
-  :type 'natnum :group 'nnopds)
+(defcustom nnopds-catalog-cache-ttl nil
+  "Seconds before a catalog is fetched again automatically.
+Nil reuses the cached catalog until `nnopds-refresh-catalog' is called.
+Zero always refreshes it.  A first fetch is required without a cache."
+  :type '(choice (const :tag "Refresh manually" nil) natnum) :group 'nnopds)
 
 (nnoo-declare nnopds)
 (defvoo nnopds-url nil "OPDS 2 catalog URL.  Defaults to the server name.")
@@ -53,7 +55,7 @@
 (defvoo nnopds--group nil)
 
 (cl-defstruct (nnopds--connection (:constructor nnopds--make-connection))
-  name url headers directory catalog publications processes readers fetched closed progress auth-method)
+  name url headers directory catalog publications counts processes readers fetched closed progress auth-method)
 
 (cl-defstruct (nnopds--publication (:constructor nnopds--make-publication))
   group title author modified source acquisition format progress document data count)
@@ -275,8 +277,9 @@ are bounded and credentials are only sent to the configured origin."
 (cl-defgeneric nnopds--locate (format data locator) "Return (NUMBER . FRAGMENT) for LOCATOR, or nil.")
 
 (defun nnopds--publication (document base &optional connection)
-  "Convert an OPDS publication DOCUMENT at BASE into a reading entry."
-  (let* ((document (nnopds--normalize document base))
+  "Convert an OPDS publication DOCUMENT at BASE into a reading entry.
+With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
+  (let* ((document (if base (nnopds--normalize document base) document))
          (links (plist-get document :links))
          (acquisition (cl-find-if
                        (lambda (link)
@@ -318,69 +321,126 @@ are bounded and credentials are only sent to the configured origin."
           (rename-file temporary file t))
       (when (file-exists-p temporary) (delete-file temporary)))))
 
-(defun nnopds--read-json (file)
+(defun nnopds--read-json (file &optional object-type)
   "Read a cached JSON FILE, returning nil if unavailable or invalid."
   (when (file-readable-p file)
     (condition-case nil
-        (json-parse-string (decode-coding-string (nnopds--read-bytes file) 'utf-8)
-                           :object-type 'plist :array-type 'array :null-object nil :false-object :false)
+        (with-temp-buffer
+          (let ((coding-system-for-read 'utf-8-unix)) (insert-file-contents file))
+          (json-parse-buffer :object-type (or object-type 'plist) :array-type 'array
+                             :null-object nil :false-object :false))
       (error nil))))
 
-(defun nnopds--install-catalog (connection documents)
-  "Install normalized publication DOCUMENTS into CONNECTION."
-  (let ((table (nnopds--connection-publications connection)) catalog)
-    (seq-doseq (document documents)
-      (when-let* ((entry (nnopds--publication document (nnopds--connection-url connection) connection)))
+(defun nnopds--install-catalog (connection entries)
+  "Install publication ENTRIES into CONNECTION, preserving reading data."
+  (let ((table (nnopds--connection-publications connection))
+        (seen (make-hash-table :test #'equal)) catalog)
+    (seq-doseq (entry entries)
+      (when entry
         (let* ((group (nnopds--publication-group entry))
-               (old (gethash group table))
-               (index (nnopds--read-json (nnopds--cache-file connection (concat group ".json")))))
+               (old (gethash group table)))
           (when old (setf (nnopds--publication-data entry) (nnopds--publication-data old)))
           (setf (nnopds--publication-count entry)
-                (or (and old (nnopds--publication-count old)) (plist-get index :count)))
+                (or (and old (nnopds--publication-count old))
+                    (gethash group (nnopds--connection-counts connection))))
           (puthash group entry table)
-          (cl-pushnew group catalog :test #'equal))))
+          (unless (gethash group seen)
+            (puthash group t seen)
+            (push group catalog)))))
     (setf (nnopds--connection-catalog connection) (nreverse catalog))))
+
+(defun nnopds--cache-fresh-p (fetched)
+  "Whether a cache FETCHED at a Unix timestamp can be reused."
+  (and (numberp fetched)
+       (or (null nnopds-catalog-cache-ttl)
+           (< (- (float-time) fetched) nnopds-catalog-cache-ttl))))
+
+(defun nnopds--feed (connection url force)
+  "Read an OPDS feed at URL on CONNECTION, using its persistent cache.
+FORCE revalidates cached pages with HTTP conditional requests.  Each page
+is saved separately so an interrupted first scan can reuse completed pages."
+  (let* ((file (nnopds--cache-file connection (concat "feed." (secure-hash 'sha256 url) ".json")))
+         (cached (nnopds--read-json file)))
+    (if (and (not force) (plist-get cached :feed)
+             (nnopds--cache-fresh-p (plist-get cached :fetched)))
+        cached
+      (let* ((headers (append '(("Accept" . "application/opds+json"))
+                              (when-let* ((etag (plist-get cached :etag)))
+                                (list (cons "If-None-Match" etag)))
+                              (when-let* ((modified (plist-get cached :last-modified)))
+                                (list (cons "If-Modified-Since" modified)))))
+             (response (nnopds--request connection "GET" url nil nil headers))
+             (fields (plist-get response :headers))
+             (feed (if (= (plist-get response :status) 304)
+                       (or (plist-get cached :feed) (error "HTTP 304 without a cached OPDS feed"))
+                     (nnopds--json response))))
+        (unless (and (plist-get feed :metadata)
+                     (or (plist-member feed :navigation) (plist-member feed :publications)
+                         (plist-member feed :groups)))
+          (error "Not an OPDS 2 catalog"))
+        (let ((value (list :fetched (float-time) :feed feed
+                           :url (if (= (plist-get response :status) 304) (plist-get cached :url)
+                                  (or (plist-get response :url) url))
+                           :etag (or (cdr (assoc "etag" fields))
+                                     (and (= (plist-get response :status) 304) (plist-get cached :etag)))
+                           :last-modified (or (cdr (assoc "last-modified" fields))
+                                              (and (= (plist-get response :status) 304)
+                                                   (plist-get cached :last-modified))))))
+          (nnopds--write-json file value)
+          value)))))
 
 (defun nnopds--scan (connection &optional force)
   "Fetch CONNECTION's catalog graph, or reuse it unless FORCE is set."
-  (unless (and (not force) (nnopds--connection-fetched connection)
-               (< (- (float-time) (nnopds--connection-fetched connection)) nnopds-catalog-cache-ttl))
+  (unless (and (not force) (nnopds--cache-fresh-p (nnopds--connection-fetched connection)))
     (let ((queue (list (nnopds--connection-url connection)))
           (visited (make-hash-table :test #'equal))
-          (publications (make-hash-table :test #'equal)) documents)
+          (publications (make-hash-table :test #'equal)) entries)
+      (puthash (car queue) t visited)
       (while queue
-        (let ((url (pop queue)))
-          (unless (gethash url visited)
-            (puthash url t visited)
-            (let* ((response (nnopds--request connection "GET" url nil nil '(("Accept" . "application/opds+json"))))
-                   (feed (nnopds--json response))
-                   (base (or (plist-get response :url) url))
-                   (collections (vconcat (vector feed) (plist-get feed :groups))))
-              (unless (and (plist-get feed :metadata)
-                           (or (plist-member feed :navigation) (plist-member feed :publications)
-                               (plist-member feed :groups)))
-                (error "Not an OPDS 2 catalog"))
-              (seq-doseq (collection collections)
-                (dolist (link (append (plist-get collection :navigation)
-                                    (cl-remove-if-not
-                                     (lambda (link) (or (nnopds--rel-p link "next")
-                                                       (and (not (eq collection feed)) (nnopds--rel-p link "self"))))
-                                     (plist-get collection :links)) nil))
-                  (when (and (not (eq t (plist-get link :templated)))
-                             (or (equal (nnopds--media-type link) "application/opds+json")
-                                 (and (nnopds--rel-p link "next") (string-empty-p (nnopds--media-type link)))))
-                    (push (nnopds--url (plist-get link :href) base) queue)))
-                (seq-doseq (document (plist-get collection :publications))
-                  (when-let* ((entry (nnopds--publication document base connection)))
-                    (let ((key (nnopds--publication-source entry)))
-                      (unless (gethash key publications)
-                        (puthash key t publications)
-                        (push (nnopds--publication-document entry) documents))))))))))
-      (setq documents (nreverse documents))
-      (nnopds--write-json (nnopds--cache-file connection "catalog.json")
-                         (list :fetched (float-time) :publications (vconcat documents)))
-      (nnopds--install-catalog connection documents)
-      (setf (nnopds--connection-fetched connection) (float-time)))))
+        (let* ((response (nnopds--feed connection (pop queue) force))
+               (feed (plist-get response :feed))
+               (base (plist-get response :url))
+               (collections (vconcat (vector feed) (plist-get feed :groups))))
+          (seq-doseq (collection collections)
+            (dolist (link (append (plist-get collection :navigation)
+                                 (cl-remove-if-not
+                                  (lambda (link) (or (nnopds--rel-p link "next")
+                                                    (and (not (eq collection feed)) (nnopds--rel-p link "self"))))
+                                  (plist-get collection :links)) nil))
+              (when (and (not (eq t (plist-get link :templated)))
+                         (or (equal (nnopds--media-type link) "application/opds+json")
+                             (and (nnopds--rel-p link "next") (string-empty-p (nnopds--media-type link)))))
+                (let ((url (nnopds--url (plist-get link :href) base)))
+                  (unless (gethash url visited)
+                    (puthash url t visited)
+                    (push url queue)))))
+            (seq-doseq (document (plist-get collection :publications))
+              (when-let* ((entry (nnopds--publication document base connection)))
+                (let ((key (nnopds--publication-source entry)))
+                  (unless (gethash key publications)
+                    (puthash key t publications)
+                    (push entry entries))))))))
+      (let ((fetched (float-time)))
+        (setq entries (nreverse entries))
+        (nnopds--write-json (nnopds--cache-file connection "catalog.json")
+                           (list :fetched fetched
+                                 :publications (vconcat (mapcar #'nnopds--publication-document entries))))
+        (nnopds--install-catalog connection entries)
+        (setf (nnopds--connection-fetched connection) fetched)))))
+
+(defun nnopds-refresh-catalog (&optional server)
+  "Refresh SERVER's OPDS catalog, even when it is cached.
+An error leaves the installed catalog intact.  Browse the server again
+to see new books.  SERVER defaults to the current OPDS server."
+  (interactive
+   (list (completing-read "OPDS server: "
+                          (delete "*internal-non-initialized-backend*"
+                                  (mapcar #'car (cddr (assq 'nnopds nnoo-state-alist))))
+                          nil t nil nil (nnoo-current-server 'nnopds))))
+  (let ((connection (nnopds--change-server server)))
+    (nnopds--scan connection t)
+    (message "nnopds: Refreshed %d books" (length (nnopds--connection-catalog connection)))
+    t))
 
 (defun nnopds--change-server (server)
   "Switch to the already open SERVER and return its connection."
@@ -400,7 +460,12 @@ are bounded and credentials are only sent to the configured origin."
             (nnopds--load-publication (nnopds--publication-format publication) connection publication)
             (nnopds--publication-count publication)
             (length (nnopds--chapters (nnopds--publication-format publication)
-                                    (nnopds--publication-data publication)))))
+                                    (nnopds--publication-data publication))))
+      (let ((counts (nnopds--connection-counts connection))
+            (count (nnopds--publication-count publication)))
+        (unless (equal count (gethash (nnopds--publication-group publication) counts))
+          (puthash (nnopds--publication-group publication) count counts)
+          (nnopds--write-json (nnopds--cache-file connection "counts.json") counts))))
     (when load (nnopds-progress-loaded publication))
     publication))
 
@@ -410,7 +475,7 @@ are bounded and credentials are only sent to the configured origin."
          (index-file (nnopds--cache-file connection (concat group ".json")))
          (index (nnopds--read-json index-file))
          (temporary (unless (file-readable-p file) (make-temp-file (concat file "."))))
-         book success)
+         book digest success)
     (unwind-protect
         (progn
           (when temporary
@@ -422,16 +487,16 @@ are bounded and credentials are only sent to the configured origin."
                 (error "EPUB download: HTTP %s" (plist-get response :status)))
               (with-temp-file temporary
                 (set-buffer-multibyte nil) (insert (plist-get response :body)))))
-          (when (and (plist-get index :digest)
-                     (not (equal (plist-get index :digest) (nnepub--fingerprint (or temporary file)))))
+          (setq digest (nnepub--fingerprint (or temporary file)))
+          (when (and (plist-get index :digest) (not (equal (plist-get index :digest) digest)))
             (error "EPUB content changed within the same OPDS version"))
           (setq book (nnepub--load-book (or temporary file) (nnepub--file-signature (or temporary file))))
           (setf (nnepub--book-group book) group
                 (nnepub--book-title book) (nnopds--publication-title publication))
           (unless (string-empty-p (nnopds--publication-author publication))
             (setf (nnepub--book-author book) (nnopds--publication-author publication)))
-          (nnopds--write-json index-file (list :count (length (nnepub--book-chapters book))
-                                               :digest (nnepub--fingerprint (or temporary file))))
+          (let ((value (list :count (length (nnepub--book-chapters book)) :digest digest)))
+            (unless (equal index value) (nnopds--write-json index-file value)))
           (when temporary (rename-file temporary file t))
           (setf (nnepub--book-file book) file)
           (setq success t)
@@ -486,10 +551,14 @@ are bounded and credentials are only sent to the configured origin."
         (set-file-modes directory #o700)
         (setq nnopds--connection
               (nnopds--make-connection :name server :url url :headers headers :directory directory
-                                      :publications (make-hash-table :test #'equal) :auth-method nnopds-auth-method))
+                                      :publications (make-hash-table :test #'equal) :auth-method nnopds-auth-method
+                                      :counts (or (nnopds--read-json (expand-file-name "counts.json" directory) 'hash-table)
+                                                  (make-hash-table :test #'equal))))
         (nnopds-progress-configure nnopds--connection)
         (when-let* ((cached (nnopds--read-json (nnopds--cache-file nnopds--connection "catalog.json"))))
-          (nnopds--install-catalog nnopds--connection (plist-get cached :publications))
+          (nnopds--install-catalog nnopds--connection
+                                  (seq-map (lambda (document) (nnopds--publication document nil nnopds--connection))
+                                           (plist-get cached :publications)))
           (setf (nnopds--connection-fetched nnopds--connection) (plist-get cached :fetched)))))
     t))
 
@@ -577,7 +646,7 @@ are bounded and credentials are only sent to the configured origin."
       (cons (nnopds--publication-group publication) (plist-get chapter :number)))))
 
 (deffoo nnopds-request-scan (&optional _group server)
-  (nnopds--report-errors (nnopds--scan (nnopds--change-server server) t) t))
+  (nnopds--report-errors (nnopds--scan (nnopds--change-server server)) t))
 
 (deffoo nnopds-request-list-newsgroups (&optional server)
   (nnopds--report-errors
