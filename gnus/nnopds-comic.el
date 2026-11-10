@@ -588,11 +588,19 @@
 (defun nnopds-comic-goto-page (number)
   "Display original page NUMBER, preserving its identity in double page mode."
   (interactive "nPage: ")
-  (let* ((reader (nnopds-comic--current)) (book (nnopds-comic--reader-book reader)))
+  (let* ((reader (nnopds-comic--current))
+         (book (nnopds-comic--reader-book reader))
+         (windows (when (derived-mode-p 'gnus-article-mode) (current-window-configuration))))
     (unless (and (integerp number) (<= 1 number (length (nnopds-comic--book-pages book))))
       (user-error "Page out of range"))
-    (with-current-buffer (nnopds-comic--reader-summary reader)
-      (gnus-summary-goto-article number nil t))))
+    (unwind-protect
+        (with-current-buffer (nnopds-comic--reader-summary reader)
+          (gnus-summary-goto-article number nil t))
+      (when windows
+        ;; Gnus selects the summary while preparing an article.  Keep the
+        ;; reader's layout and refit cached images to the restored window.
+        (set-window-configuration windows)
+        (nnopds-comic--update reader)))))
 
 (defun nnopds-comic--move (amount)
   "Move AMOUNT reading units, independent of their on-screen order."

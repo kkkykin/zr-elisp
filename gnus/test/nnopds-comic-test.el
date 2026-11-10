@@ -160,6 +160,56 @@ queue, cache files, properties and reading events remain real."
                 (should (eq (get-text-property (point) 'keymap) nnopds-comic-mode-map)))
               (gnus-summary-exit))))))))
 
+(ert-deftest nnopds-comic-test-article-page-turns-preserve-window-layout ()
+  (nnopds-comic-test--with-server 'komga
+    (nnopds-comic-test--with-images
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (nnopds-browse-read)
+        (let* ((summary (get-buffer gnus-summary-buffer))
+               (article (get-buffer gnus-article-buffer))
+               (reader (buffer-local-value 'nnopds-comic--reader summary)))
+          (nnopds-comic-test--settled reader 1)
+          (select-window (get-buffer-window article))
+          ;; Keep focus in the article when both reader windows are visible.
+          (nnopds-comic-next)
+          (should (eq (window-buffer (selected-window)) article))
+          (should (get-buffer-window summary))
+          (nnopds-comic-test--settled reader 2)
+          ;; Gnus's article-only layout must survive an uncached page turn.
+          (with-current-buffer summary
+            (let ((gnus-widen-article-window t)) (gnus-summary-select-article-buffer)))
+          (should-not (get-buffer-window summary))
+          (nnopds-comic-next)
+          (should (one-window-p))
+          (should (eq (window-buffer (selected-window)) article))
+          (nnopds-comic-test--settled reader 3)
+          (should (equal (nnopds-comic-test--shown) '(3)))
+          ;; Also preserve a manually enlarged article and an unrelated window.
+          (gnus-article-show-summary)
+          (select-window (get-buffer-window article))
+          (delete-other-windows)
+          (with-temp-buffer
+            (let ((other (split-window-right))
+                  (other-buffer (current-buffer))
+                  (article-window (selected-window)))
+              (set-window-buffer other other-buffer)
+              (with-current-buffer article
+                (nnopds-comic-previous)
+                (should (eq (selected-window) article-window))
+                (should-not (get-buffer-window summary))
+                (should (eq (window-buffer other) other-buffer))
+                (nnopds-comic-test--settled reader 2)
+                (nnopds-comic-double-page)
+                (nnopds-comic-goto-page 5)
+                (should-not (get-buffer-window summary))
+                (should (window-live-p other))
+                (nnopds-comic-test--settled reader 5)
+                (should (equal (nnopds-comic-test--shown) '(5 4)))))
+            (delete-other-windows))
+          (gnus-article-show-summary)
+          (with-current-buffer summary (gnus-summary-exit)))))))
+
 (ert-deftest nnopds-comic-test-live-switches-preserve-original-page-and-marks ()
   (nnopds-comic-test--with-server 'calibre
     (nnopds-comic-test--with-images
