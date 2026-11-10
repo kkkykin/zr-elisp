@@ -71,6 +71,9 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 无需逐本读取索引。已下载的 EPUB 可离线阅读；解压内容在关闭 server 时清理，
 下载缓存跨会话保留。`nnopds-request-timeout` 限制每个 HTTP 请求。
 
+EPUB 和单书索引使用书籍 ID 的摘要作短文件名，临时文件使用固定短前缀，
+避免 Windows 用户目录较深时超出路径长度限制。
+
 Group 身份由书目的稳定 URL 和 `metadata.modified` 确定，书目版本更新会
 产生新 group，已遇到的旧版本和 Gnus 标记继续保留。没有 `modified` 的书目作为一个
 固定版本缓存；这种服务器需要提供版本变化信号才能自动发现新版。已记录的

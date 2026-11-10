@@ -314,9 +314,15 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
   "Return cache NAME in CONNECTION's account directory."
   (expand-file-name name (nnopds--connection-directory connection)))
 
+(defun nnopds--temporary-file (file)
+  "Create a short-named temporary sibling of FILE for atomic replacement."
+  (let ((directory (file-name-directory (expand-file-name file))))
+    (make-directory directory t)
+    (make-temp-file (expand-file-name ".nnopds-" directory))))
+
 (defun nnopds--write-json (file data)
   "Write JSON DATA atomically to FILE."
-  (let ((temporary (make-temp-file (concat file ".")))
+  (let ((temporary (nnopds--temporary-file file))
         (coding-system-for-write 'utf-8-unix))
     (unwind-protect
         (progn
@@ -494,10 +500,11 @@ SERVER defaults to the current OPDS server."
 
 (cl-defmethod nnopds--load-publication ((_format (eql epub)) connection publication)
   (let* ((group (nnopds--publication-group publication))
-         (file (nnopds--cache-file connection (concat group ".epub")))
-         (index-file (nnopds--cache-file connection (concat group ".json")))
+         (key (secure-hash 'sha256 group))
+         (file (nnopds--cache-file connection (concat key ".epub")))
+         (index-file (nnopds--cache-file connection (concat key ".json")))
          (index (nnopds--read-json index-file))
-         (temporary (unless (file-readable-p file) (make-temp-file (concat file "."))))
+         (temporary (unless (file-readable-p file) (nnopds--temporary-file file)))
          book digest success)
     (unwind-protect
         (progn
