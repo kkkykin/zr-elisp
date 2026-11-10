@@ -49,8 +49,24 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 已打开的服务器。浏览保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
 只加载当前页，不递归扫描。目录和分页链接都按 `RET` 进入，`b`/`^` 返回，
 `n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入章节
-列表，`SPC` 阅读。搜索模板暂不支持。可以直接将某个目录或书目列表的 URL
-配为 `nnopds-url`。
+列表，`SPC` 阅读。可以直接将某个目录或书目列表的 URL 配为 `nnopds-url`。
+
+在目录浏览器按 `s`（`M-x nnopds-browse-search`）输入关键词进行服务端搜索。
+后端自动读取当前页的 OPDS 2 `rel=search` URI 模板，当前页未提供时使用根目录
+的模板。支持 `{query}`、`{?query}`、`{&query}`，关键词按 UTF-8 编码，模板中
+未填写的可选字段会省略；服务器提供的库名、代理路径和其他参数会保留。
+搜索结果沿用目录的分页、订阅和阅读命令，`b` 返回搜索前的页面和光标位置，
+`g` 刷新结果。搜索只取书目，不下载 EPUB 或漫画图片。
+
+[Komga](https://github.com/gotson/komga/blob/master/komga/src/main/kotlin/org/gotson/komga/interfaces/api/opds/v2/Opds2Controller.kt)
+使用 `search{?query}`，搜索结果按系列、书籍、集合和阅读列表分组；当前每类
+最多返回 20 条，未提供搜索结果的分页链接。
+[calibre](https://github.com/kovidgoyal/calibre/blob/master/src/calibre/srv/opds.py)
+在 `/opds` 使用路径中的 `{query}`，可直接输入 calibre 搜索表达式，如
+`title:"三体" and authors:"刘慈欣"`；服务器启用全文索引后，进入目录中的
+“Search book contents” 再按 `s` 可搜索正文。
+具体搜索范围和语法由服务器决定，客户端遵循其
+[OPDS 2 搜索链接](https://specs.opds.io/opds-2.0#3-search)，无需按服务器配置路径。
 
 书籍始终显示完整章节列表，包括已读章节，并保留 Gnus 的已读标记。
 `gnus-large-newsgroup` 不限制书籍章节；目录按服务器提供的分页逐页加载。

@@ -5,18 +5,20 @@
 
 ;;; Commentary:
 
-;; Navigation and pagination load one OPDS page at a time.  Publications
+;; Navigation, search and pagination load one OPDS page at a time.  Publications
 ;; use Gnus groups for subscriptions, reading and local article marks.
 
 ;;; Code:
 
 (require 'nnopds)
 (require 'gnus-srvr)
+(require 'url-util)
 
 (defvar-local nnopds-browse--method nil)
 (defvar-local nnopds-browse--url nil)
 (defvar-local nnopds-browse--page nil)
 (defvar-local nnopds-browse--history nil)
+(defvar nnopds-browse-search-history nil "Previous OPDS search queries.")
 
 (defvar-keymap nnopds-browse-mode-map
   :parent gnus-browse-mode-map
@@ -25,6 +27,7 @@
   "SPC" #'nnopds-browse-read
   "u" #'nnopds-browse-subscribe
   "g" #'nnopds-browse-refresh
+  "s" #'nnopds-browse-search
   "b" #'nnopds-browse-up
   "^" #'nnopds-browse-up
   "DEL" #'nnopds-browse-up
@@ -38,6 +41,7 @@
     ["Enter" nnopds-browse-select t]
     ["Read book" nnopds-browse-read t]
     ["Toggle subscription" nnopds-browse-subscribe t]
+    ["Search" nnopds-browse-search t]
     ["Back" nnopds-browse-up nnopds-browse--history]
     ["Refresh page" nnopds-browse-refresh t]
     ["Quit" gnus-browse-exit t]))
@@ -47,6 +51,7 @@
 \\<nnopds-browse-mode-map>
 \\[nnopds-browse-select] enters a directory or selects a book.
 \\[nnopds-browse-read] reads a book, \\[nnopds-browse-subscribe] toggles its subscription.
+\\[nnopds-browse-search] searches the server's catalog.
 \\[nnopds-browse-up] goes back and \\[nnopds-browse-refresh] refreshes this page."
   (setq-local revert-buffer-function (lambda (&rest _args) (nnopds-browse-refresh))))
 
@@ -88,7 +93,7 @@
     (insert (propertize (concat "OPDS — " (nnopds-browse--title page) "\n") 'face 'bold))
     (when nnopds-browse--history
       (insert (mapconcat #'cadr (reverse nnopds-browse--history) " / ") " / " (nnopds-browse--title page) "\n"))
-    (insert "RET enter   SPC read   u subscribe   b back   g refresh   q quit\n\n")
+    (insert "RET enter   SPC read   u subscribe   s search   b back   g refresh   q quit\n\n")
     (cl-labels
         ((collection (document root)
            (unless root
@@ -106,6 +111,9 @@
            (seq-doseq (group (plist-get document :groups))
              (insert "\n") (collection group nil))))
       (collection feed t))
+    (unless (or (text-property-not-all (point-min) (point-max) 'nnopds-browse-book nil)
+                (text-property-not-all (point-min) (point-max) 'nnopds-browse-link nil))
+      (insert "No entries.\n\n"))
     (seq-doseq (link (plist-get feed :links))
       (when-let* ((relation (cl-find-if (lambda (rel) (nnopds--rel-p link rel)) '("next" "previous" "prev" "first" "last"))))
         (nnopds-browse--link link base (pcase relation
@@ -121,6 +129,68 @@
   "Whether the current line is a directory or a book."
   (or (get-text-property (line-beginning-position) 'nnopds-browse-link)
       (get-text-property (line-beginning-position) 'nnopds-browse-book)))
+
+(defun nnopds-browse--search-link (page)
+  "Return PAGE's advertised OPDS 2 search link, if any."
+  (seq-find (lambda (link)
+              (and (nnopds--rel-p link "search")
+                   (plist-get link :href)
+                   (eq t (plist-get link :templated))
+                   (member (nnopds--media-type link) '("" "application/opds+json"))))
+            (plist-get (plist-get page :feed) :links)))
+
+(defun nnopds-browse--search-url (template base query)
+  "Expand search TEMPLATE against BASE with keyword QUERY.
+Support simple {query} and form-style {?query} / {&query} URI expansions.
+Unset optional variables are omitted.  Other URI template forms are rejected."
+  (let* ((case-fold-search nil)
+         (encoded (url-hexify-string query))
+         found
+         (href
+          (replace-regexp-in-string
+           "{[^{}]*}"
+           (lambda (expression)
+             (save-match-data
+               (let* ((body (substring expression 1 -1))
+                      (operator (and (not (string-empty-p body)) (memq (aref body 0) '(?? ?&))
+                                     (substring body 0 1)))
+                      (variables (split-string (if operator (substring body 1) body) ","))
+                      values)
+                 (dolist (variable variables)
+                   (unless (string-match-p "\\`[[:alnum:]_.]+\\'" variable)
+                     (user-error "Unsupported OPDS search template: %s" template))
+                   (when (equal variable "query")
+                     (setq found t)
+                     (push (if operator (concat "query=" encoded) encoded) values)))
+                 (if values
+                     (concat operator (string-join (nreverse values) (if operator "&" ",")))
+                   ""))))
+           template t t)))
+    (unless (and found (not (string-match-p "[{}]" href)))
+      (user-error "OPDS search template must contain a query variable"))
+    (nnopds--url href base)))
+
+(defun nnopds-browse-search (&optional query)
+  "Search the OPDS server for QUERY and browse the resulting feed.
+With no QUERY, prompt for keywords or the server's search expression.
+Discover the URI template in this page or the root catalog.
+Returning with b restores the current page."
+  (interactive nil nnopds-browse-mode)
+  (unless (gnus-check-server nnopds-browse--method) (user-error "OPDS server unavailable"))
+  (let* ((connection (nnopds--change-server (cadr nnopds-browse--method)))
+         (root (nnopds--connection-url connection))
+         (page nnopds-browse--page)
+         (link (or (nnopds-browse--search-link page)
+                   (unless (equal nnopds-browse--url root)
+                     (setq page (nnopds--feed connection root nil))
+                     (nnopds-browse--search-link page)))))
+    (unless link (user-error "This OPDS catalog does not advertise search"))
+    (setq query (or query (read-string "OPDS search: " nil 'nnopds-browse-search-history)))
+    (when (string-blank-p query) (user-error "Enter a search query"))
+    (nnopds-browse--show
+     (nnopds-browse--search-url (plist-get link :href) (plist-get page :url) query)
+     (cons (list nnopds-browse--url (nnopds-browse--title nnopds-browse--page) (point))
+           nnopds-browse--history))))
 
 (defun nnopds-browse--show (url history &optional force)
   "Load URL with HISTORY, optionally forcing revalidation.

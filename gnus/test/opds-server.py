@@ -74,6 +74,20 @@ def publication(name):
             "links": links}
 
 
+def search_links(kind="generic", full_text=False):
+    if (root / "no-search.txt").exists():
+        return []
+    override = root / "search-template.txt"
+    href = override.read_text().strip() if override.exists() else {
+        "generic": "search{?query,title,author}",
+        "komga": "/komga/opds/v2/search{?query}",
+        "calibre": "/calibre/opds/search/{query}?library_id=main",
+    }[kind]
+    if full_text:
+        href += "&full_text=y"
+    return [{"rel": ["search"], "href": href, "type": "application/opds+json", "templated": True}]
+
+
 def comic_publication(kind):
     manifest = ("/komga/opds/v2/books/comic/manifest" if kind == "komga"
                 else "/calibre/comic-manifest/2?library_id=main")
@@ -293,7 +307,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/slow":
             time.sleep(2)
-        if path in ("/catalog", "/books", "/komga/opds/v2/catalog", "/calibre/opds") or path.startswith(("/libraries", "/series/")):
+        if path in ("/catalog", "/books", "/search", "/komga/opds/v2/catalog", "/komga/opds/v2/search", "/calibre/opds") or path.startswith(("/libraries", "/series/", "/calibre/opds/")):
             delay = root / "feed-delay.txt"
             failure = root / "feed-failure-path.txt"
             if delay.exists():
@@ -312,27 +326,77 @@ class Handler(BaseHTTPRequestHandler):
             if (root / "comic-catalog.txt").exists():
                 kind = (root / "comic-catalog.txt").read_text().strip()
                 self.json_response({"metadata": {"title": "Comic Library"},
+                                    "links": search_links(kind),
                                     "publications": [comic_publication(kind), publication("one")]})
                 return
             if path == "/calibre/opds":
                 book = publication("one")
                 book["links"] = [{"rel": "http://opds-spec.org/acquisition", "href": "/calibre/get/epub/1/main",
                                   "type": "application/epub+zip"}]
-                self.json_response({"metadata": {"title": "calibre Library"}, "publications": [book]})
+                self.json_response({"metadata": {"title": "calibre Library"}, "links": search_links("calibre"),
+                                    "navigation": [{"href": "/calibre/opds/fts?library_id=main", "title": "Search book contents",
+                                                    "type": "application/opds+json"}], "publications": [book]})
                 return
             if path == "/komga/opds/v2/catalog":
-                self.json_response({"metadata": {"title": "Komga Library"}, "publications": [publication("one")]})
+                self.json_response({"metadata": {"title": "Komga Library"}, "links": search_links("komga"),
+                                    "publications": [publication("one")]})
                 return
             if (root / "directory-only.txt").exists():
                 self.json_response({"metadata": {"title": "Library: Root"},
+                                    "links": search_links(),
                                     "navigation": [{"href": "/libraries", "title": "Libraries", "type": "application/opds+json"}]})
                 return
             self.json_response({"metadata": {"title": "Library"},
-                                "links": [{"rel": "self", "href": "/catalog"}],
+                                "links": [{"rel": "self", "href": "/catalog"}] + search_links(),
                                 "navigation": [{"href": "/books", "type": "application/opds+json", "title": "All books", "templated": False}],
                                 "groups": [{"metadata": {"title": "Recommended"},
                                             "links": [{"rel": "self", "href": "/books", "type": "application/opds+json"}],
                                             "publications": [publication("one")]}]})
+        elif path == "/calibre/opds/fts":
+            self.json_response({"metadata": {"title": "Search book contents"}, "links": search_links("calibre", full_text=True),
+                                "navigation": [{"href": "/calibre/opds", "title": "Library", "type": "application/opds+json"}]})
+        elif path in ("/search", "/komga/opds/v2/search") or path.startswith("/calibre/opds/search/"):
+            if self.headers.get("Accept") != "application/opds+json":
+                self.respond(406)
+                return
+            params = urllib.parse.parse_qs(parsed.query)
+            kind = "calibre" if path.startswith("/calibre/") else "komga" if path.startswith("/komga/") else "generic"
+            if kind == "calibre":
+                if params.get("library_id") != ["main"]:
+                    self.respond(400)
+                    return
+                query = urllib.parse.unquote_plus(path.rsplit("/", 1)[-1])
+                page = params.get("offset", ["0"])[0]
+                full_text = params.get("full_text") == ["y"]
+            else:
+                if "query" not in params or "title" in params or "author" in params:
+                    self.respond(400)
+                    return
+                query = params["query"][0]
+                page = params.get("page", ["1"])[0]
+                full_text = False
+            feed = {"metadata": {"title": "Search: " + query}, "links": search_links(kind, full_text=full_text)}
+            if query != "empty":
+                if kind == "komga":
+                    feed["groups"] = [{"metadata": {"title": "Series"}, "navigation": [
+                        {"href": "/series/one", "title": "Series one", "type": "application/opds+json"}]},
+                        {"metadata": {"title": "Books"}, "publications": [comic_publication("komga"), publication("one")]},
+                        {"metadata": {"title": "Collections"}, "navigation": [
+                            {"href": "/libraries", "title": "Collection", "type": "application/opds+json"}]},
+                        {"metadata": {"title": "Read Lists"}, "navigation": [
+                            {"href": "/books", "title": "Read list", "type": "application/opds+json"}]}]
+                else:
+                    if page in ("0", "1"):
+                        feed["publications"] = [publication("one")]
+                        next_params = dict(params)
+                        next_params["offset" if kind == "calibre" else "page"] = ["20" if kind == "calibre" else "2"]
+                        feed["links"].append({"rel": "next", "href": path + "?" + urllib.parse.urlencode(next_params, doseq=True),
+                                              "type": "application/opds+json"})
+                    else:
+                        feed["publications"] = [publication("two")]
+            elif kind != "komga":
+                feed["publications"] = []
+            self.json_response(feed)
         elif path == "/libraries":
             self.json_response({"metadata": {"title": "Libraries"},
                                 "navigation": [{"href": "libraries/one", "title": "Library one", "type": "application/opds+json"}]})

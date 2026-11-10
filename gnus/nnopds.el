@@ -30,6 +30,7 @@
 (autoload 'nnopds-resume "nnopds-progress" nil t)
 (autoload 'nnopds-save-position "nnopds-progress" nil t)
 (autoload 'nnopds-browse "nnopds-browse" nil t)
+(autoload 'nnopds-browse-search "nnopds-browse" nil t)
 
 (defgroup nnopds nil "OPDS 2 publications in Gnus." :group 'gnus)
 
@@ -408,7 +409,13 @@ revalidation fails; an explicit refresh reports the error."
                          (nnopds--json response))))
             (unless (and (plist-get feed :metadata)
                          (or (plist-member feed :navigation) (plist-member feed :publications)
-                             (plist-member feed :groups)))
+                             (plist-member feed :groups)
+                             ;; Komga omits empty result arrays.  Its empty
+                             ;; search feed still advertises OPDS search.
+                             (seq-some (lambda (link)
+                                         (and (nnopds--rel-p link "search")
+                                              (equal (nnopds--media-type link) "application/opds+json")))
+                                       (plist-get feed :links))))
               (error "Not an OPDS 2 catalog"))
             (let ((value (list :fetched (float-time) :feed feed
                                :url (if (= (plist-get response :status) 304) (plist-get cached :url)
