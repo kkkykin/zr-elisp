@@ -7,8 +7,8 @@
 
 ;; An OPDS 2 catalog is a server, a publication is a group, and its reading
 ;; resources are articles.  EPUB files are downloaded on first group entry
-;; and read using nnepub.  Catalog navigation and pagination are followed;
-;; facets and search templates are not enumerated.  Reading formats and
+;; and read using nnepub.  Catalog directories and pagination are browsed
+;; on demand, with visited pages cached locally.  Reading formats and
 ;; progress protocols have separate interfaces for future extensions.
 
 ;;; Code:
@@ -28,6 +28,7 @@
 (autoload 'nnopds-progress-loaded "nnopds-progress")
 (autoload 'nnopds-resume "nnopds-progress" nil t)
 (autoload 'nnopds-save-position "nnopds-progress" nil t)
+(autoload 'nnopds-browse "nnopds-browse" nil t)
 
 (defgroup nnopds nil "OPDS 2 publications in Gnus." :group 'gnus)
 
@@ -36,13 +37,14 @@
   :type 'natnum :group 'nnopds)
 
 (defcustom nnopds-catalog-cache-ttl nil
-  "Seconds before a catalog is fetched again automatically.
-Nil reuses the cached catalog until `nnopds-refresh-catalog' is called.
-Zero always refreshes it.  A first fetch is required without a cache."
+  "Seconds before a visited OPDS page is fetched again.
+Nil reuses cached pages until explicitly refreshed.  Zero always revalidates
+visited pages.  Gnus startup only reads the local publication index."
   :type '(choice (const :tag "Refresh manually" nil) natnum) :group 'nnopds)
 
 (nnoo-declare nnopds)
 (defvoo nnopds-url nil "OPDS 2 catalog URL.  Defaults to the server name.")
+(defvoo nnopds-address nil "Catalog address or original server name for Gnus temporary groups.")
 (defvoo nnopds-user nil "HTTP user, optionally looked up in auth-source.")
 (defvoo nnopds-password nil "HTTP password.  Prefer auth-source.")
 (defvoo nnopds-auth-method 'basic "HTTP authentication method: basic or digest.")
@@ -359,89 +361,109 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
 (defun nnopds--feed (connection url force)
   "Read an OPDS feed at URL on CONNECTION, using its persistent cache.
 FORCE revalidates cached pages with HTTP conditional requests.  Each page
-is saved separately so an interrupted first scan can reuse completed pages."
+is saved separately.  Ordinary browsing falls back to the cached page if
+revalidation fails; an explicit refresh reports the error."
   (let* ((file (nnopds--cache-file connection (concat "feed." (secure-hash 'sha256 url) ".json")))
          (cached (nnopds--read-json file)))
     (if (and (not force) (plist-get cached :feed)
              (nnopds--cache-fresh-p (plist-get cached :fetched)))
         cached
-      (let* ((headers (append '(("Accept" . "application/opds+json"))
-                              (when-let* ((etag (plist-get cached :etag)))
-                                (list (cons "If-None-Match" etag)))
-                              (when-let* ((modified (plist-get cached :last-modified)))
-                                (list (cons "If-Modified-Since" modified)))))
-             (response (nnopds--request connection "GET" url nil nil headers))
-             (fields (plist-get response :headers))
-             (feed (if (= (plist-get response :status) 304)
-                       (or (plist-get cached :feed) (error "HTTP 304 without a cached OPDS feed"))
-                     (nnopds--json response))))
-        (unless (and (plist-get feed :metadata)
-                     (or (plist-member feed :navigation) (plist-member feed :publications)
-                         (plist-member feed :groups)))
-          (error "Not an OPDS 2 catalog"))
-        (let ((value (list :fetched (float-time) :feed feed
-                           :url (if (= (plist-get response :status) 304) (plist-get cached :url)
-                                  (or (plist-get response :url) url))
-                           :etag (or (cdr (assoc "etag" fields))
-                                     (and (= (plist-get response :status) 304) (plist-get cached :etag)))
-                           :last-modified (or (cdr (assoc "last-modified" fields))
-                                              (and (= (plist-get response :status) 304)
-                                                   (plist-get cached :last-modified))))))
-          (nnopds--write-json file value)
-          value)))))
+      (condition-case err
+          (let* ((headers (append '(("Accept" . "application/opds+json"))
+                                  (when-let* ((etag (plist-get cached :etag)))
+                                    (list (cons "If-None-Match" etag)))
+                                  (when-let* ((modified (plist-get cached :last-modified)))
+                                    (list (cons "If-Modified-Since" modified)))))
+                 (response (nnopds--request connection "GET" url nil nil headers))
+                 (fields (plist-get response :headers))
+                 (feed (if (= (plist-get response :status) 304)
+                           (or (plist-get cached :feed) (error "HTTP 304 without a cached OPDS feed"))
+                         (nnopds--json response))))
+            (unless (and (plist-get feed :metadata)
+                         (or (plist-member feed :navigation) (plist-member feed :publications)
+                             (plist-member feed :groups)))
+              (error "Not an OPDS 2 catalog"))
+            (let ((value (list :fetched (float-time) :feed feed
+                               :url (if (= (plist-get response :status) 304) (plist-get cached :url)
+                                      (or (plist-get response :url) url))
+                               :etag (or (cdr (assoc "etag" fields))
+                                         (and (= (plist-get response :status) 304) (plist-get cached :etag)))
+                               :last-modified (or (cdr (assoc "last-modified" fields))
+                                                  (and (= (plist-get response :status) 304)
+                                                       (plist-get cached :last-modified))))))
+              (nnopds--write-json file value)
+              value))
+        (error
+         (if (and (not force) (plist-get cached :feed))
+             (progn
+               (message "nnopds: Using cached page (%s)" (error-message-string err))
+               cached)
+           (signal (car err) (cdr err))))))))
 
-(defun nnopds--scan (connection &optional force)
-  "Fetch CONNECTION's catalog graph, or reuse it unless FORCE is set."
-  (unless (and (not force) (nnopds--cache-fresh-p (nnopds--connection-fetched connection)))
-    (let ((queue (list (nnopds--connection-url connection)))
-          (visited (make-hash-table :test #'equal))
-          (publications (make-hash-table :test #'equal)) entries)
-      (puthash (car queue) t visited)
-      (while queue
-        (let* ((response (nnopds--feed connection (pop queue) force))
-               (feed (plist-get response :feed))
-               (base (plist-get response :url))
-               (collections (vconcat (vector feed) (plist-get feed :groups))))
-          (seq-doseq (collection collections)
-            (dolist (link (append (plist-get collection :navigation)
-                                 (cl-remove-if-not
-                                  (lambda (link) (or (nnopds--rel-p link "next")
-                                                    (and (not (eq collection feed)) (nnopds--rel-p link "self"))))
-                                  (plist-get collection :links)) nil))
-              (when (and (not (eq t (plist-get link :templated)))
-                         (or (equal (nnopds--media-type link) "application/opds+json")
-                             (and (nnopds--rel-p link "next") (string-empty-p (nnopds--media-type link)))))
-                (let ((url (nnopds--url (plist-get link :href) base)))
-                  (unless (gethash url visited)
-                    (puthash url t visited)
-                    (push url queue)))))
-            (seq-doseq (document (plist-get collection :publications))
-              (when-let* ((entry (nnopds--publication document base connection)))
-                (let ((key (nnopds--publication-source entry)))
-                  (unless (gethash key publications)
-                    (puthash key t publications)
-                    (push entry entries))))))))
-      (let ((fetched (float-time)))
-        (setq entries (nreverse entries))
+(defun nnopds--collections (feed)
+  "Return FEED and its embedded groups, without fetching navigation links."
+  (cons feed (seq-mapcat #'nnopds--collections (plist-get feed :groups))))
+
+(defun nnopds--catalog-page (connection url &optional force)
+  "Read one catalog page at URL on CONNECTION, optionally revalidating it.
+Register only publications embedded in this page.  Navigation and pagination
+remain links for the browser to follow on demand.  Previously encountered
+publications stay available for subscriptions and offline reading."
+  (let* ((page (nnopds--feed connection url force))
+         (base (plist-get page :url))
+         (table (nnopds--connection-publications connection))
+         (entries (make-hash-table :test #'eq))
+         staged additions changed)
+    ;; Parse the entire page before changing the known publication index.
+    (dolist (collection (nnopds--collections (plist-get page :feed)))
+      (seq-doseq (document (plist-get collection :publications))
+        (when-let* ((entry (nnopds--publication document base connection)))
+          (push (cons document entry) staged))))
+    (dolist (pair (nreverse staged))
+      (let* ((entry (cdr pair))
+             (group (nnopds--publication-group entry))
+             (old (gethash group table)))
+        (if (and old (equal (nnopds--publication-document old) (nnopds--publication-document entry)))
+            (setq entry old)
+          (setf (nnopds--publication-data entry) (and old (nnopds--publication-data old))
+                (nnopds--publication-count entry)
+                (or (and old (nnopds--publication-count old))
+                    (gethash group (nnopds--connection-counts connection))))
+          (unless old (push group additions))
+          (puthash group entry table)
+          (setq changed t))
+        (puthash (car pair) entry entries)))
+    (when changed
+      (let ((catalog (append (nnopds--connection-catalog connection) (nreverse additions)))
+            (fetched (float-time)))
         (nnopds--write-json (nnopds--cache-file connection "catalog.json")
-                           (list :fetched fetched
-                                 :publications (vconcat (mapcar #'nnopds--publication-document entries))))
-        (nnopds--install-catalog connection entries)
-        (setf (nnopds--connection-fetched connection) fetched)))))
+                            (list :fetched fetched
+                                  :publications
+                                  (vconcat (mapcar (lambda (group)
+                                                     (nnopds--publication-document (gethash group table)))
+                                                   catalog))))
+        (setf (nnopds--connection-catalog connection) catalog
+              (nnopds--connection-fetched connection) fetched)))
+    (plist-put page :entries entries)))
 
 (defun nnopds-refresh-catalog (&optional server)
-  "Refresh SERVER's OPDS catalog, even when it is cached.
-An error leaves the installed catalog intact.  Browse the server again
-to see new books.  SERVER defaults to the current OPDS server."
+  "Refresh SERVER's root OPDS directory without traversing its descendants.
+In the OPDS browser, use g to refresh the displayed page.
+SERVER defaults to the current OPDS server."
   (interactive
    (list (completing-read "OPDS server: "
-                          (delete "*internal-non-initialized-backend*"
-                                  (mapcar #'car (cddr (assq 'nnopds nnoo-state-alist))))
+                          (nnopds--servers)
                           nil t nil nil (nnoo-current-server 'nnopds))))
-  (let ((connection (nnopds--change-server server)))
-    (nnopds--scan connection t)
-    (message "nnopds: Refreshed %d books" (length (nnopds--connection-catalog connection)))
+  (let* ((connection (nnopds--change-server server))
+         (page (nnopds--catalog-page connection (nnopds--connection-url connection) t)))
+    (message "nnopds: Refreshed %s" (plist-get (plist-get (plist-get page :feed) :metadata) :title))
     t))
+
+(defun nnopds--servers ()
+  "Return the names of open OPDS servers."
+  (delete "*internal-non-initialized-backend*"
+          (delete-dups (delq nil (cons (nnoo-current-server 'nnopds)
+                                     (mapcar #'car (cddr (assq 'nnopds nnoo-state-alist))))))))
 
 (defun nnopds--change-server (server)
   "Switch to the already open SERVER and return its connection."
@@ -455,7 +477,7 @@ to see new books.  SERVER defaults to the current OPDS server."
   "Return GROUP's publication on SERVER, optionally LOAD reading data."
   (let* ((connection (nnopds--change-server server))
          (publication (or (gethash (or group nnopds--group) (nnopds--connection-publications connection))
-                          (error "OPDS publication unavailable; refresh the catalog: %s" group))))
+                          (error "OPDS publication unavailable; browse its catalog directory: %s" group))))
     (when (and load (not (nnopds--publication-data publication)))
       (setf (nnopds--publication-data publication)
             (nnopds--load-publication (nnopds--publication-format publication) connection publication)
@@ -544,9 +566,9 @@ to see new books.  SERVER defaults to the current OPDS server."
     (unless nnopds--connection
       (unless (memq nnopds-auth-method '(basic digest))
         (error "Unsupported HTTP authentication method: %s" nnopds-auth-method))
-      (let* ((url (nnopds--url (or nnopds-url server)))
+      (let* ((url (nnopds--url (or nnopds-url nnopds-address server)))
              (headers (nnopds--credentials url))
-             (directory (expand-file-name (secure-hash 'sha256 (prin1-to-string (list server url headers)))
+             (directory (expand-file-name (secure-hash 'sha256 (prin1-to-string (list (or nnopds-address server) url headers)))
                                           (expand-file-name "nnopds/" gnus-cache-directory))))
         (make-directory directory t)
         (set-file-modes directory #o700)
@@ -567,7 +589,9 @@ to see new books.  SERVER defaults to the current OPDS server."
   (setq server (or server (nnoo-current-server 'nnopds)))
   (when (and server (or (nnoo-current-server-p 'nnopds server)
                         (assoc server (cddr (assq 'nnopds nnoo-state-alist)))))
-    (let ((connection (nnopds--change-server server)))
+    (unless (nnoo-current-server-p 'nnopds server)
+      (nnoo-change-server 'nnopds server nil))
+    (when-let* ((connection nnopds--connection))
       (dolist (reader (copy-sequence (nnopds--connection-readers connection)))
         (nnopds-progress-close (cdr reader)))
       (setf (nnopds--connection-closed connection) t)
@@ -576,25 +600,19 @@ to see new books.  SERVER defaults to the current OPDS server."
       (maphash (lambda (_group publication)
                  (when-let* ((data (nnopds--publication-data publication)))
                    (nnopds--dispose (nnopds--publication-format publication) data)))
-               (nnopds--connection-publications connection))
-      (setq nnopds--connection nil nnopds--group nil)
-      (nnoo-close-server 'nnopds server)))
+               (nnopds--connection-publications connection)))
+    (setq nnopds--connection nil nnopds--group nil)
+    (nnoo-close-server 'nnopds server))
   t)
 
 (deffoo nnopds-request-close ()
-  (dolist (server (delete "*internal-non-initialized-backend*"
-                         (delete-dups (delq nil (cons (nnoo-current-server 'nnopds)
-                                                      (mapcar #'car (cddr (assq 'nnopds nnoo-state-alist))))))))
+  (dolist (server (nnopds--servers))
     (nnopds-close-server server))
   (nnoo-close 'nnopds))
 
 (deffoo nnopds-request-list (&optional server)
   (nnopds--report-errors
     (let ((connection (nnopds--change-server server)))
-      (condition-case err (nnopds--scan connection)
-        (error (if (nnopds--connection-fetched connection)
-                   (nnheader-message 3 "nnopds: Using cached catalog: %s" (error-message-string err))
-                 (signal (car err) (cdr err)))))
       (with-current-buffer nntp-server-buffer
         (erase-buffer)
         (dolist (group (nnopds--connection-catalog connection))
@@ -621,16 +639,14 @@ to see new books.  SERVER defaults to the current OPDS server."
     (setq nnopds--group nil)
     t))
 
-(deffoo nnopds-retrieve-headers (articles &optional group server fetch-old)
+(deffoo nnopds-retrieve-headers (articles &optional group server _fetch-old)
   (nnopds--report-errors
     (let* ((publication (nnopds--get-publication group server t))
            (format (nnopds--publication-format publication))
            (data (nnopds--publication-data publication)))
       (with-current-buffer nntp-server-buffer
         (erase-buffer)
-        (dolist (article (if fetch-old
-                             (mapcar (lambda (chapter) (plist-get chapter :number)) (nnopds--chapters format data))
-                           (if (and (consp articles) (stringp (car articles))) articles (range-uncompress articles))))
+        (dolist (article (if (and (consp articles) (stringp (car articles))) articles (range-uncompress articles)))
           (nnheader-insert-nov (nnopds--header format data (nnopds--chapter publication article)))))
       'nov)))
 
@@ -647,7 +663,7 @@ to see new books.  SERVER defaults to the current OPDS server."
       (cons (nnopds--publication-group publication) (plist-get chapter :number)))))
 
 (deffoo nnopds-request-scan (&optional _group server)
-  (nnopds--report-errors (nnopds--scan (nnopds--change-server server)) t))
+  (nnopds--report-errors (nnopds--change-server server) t))
 
 (deffoo nnopds-request-list-newsgroups (&optional server)
   (nnopds--report-errors
@@ -671,11 +687,22 @@ to see new books.  SERVER defaults to the current OPDS server."
 (unless (assoc "nnopds" gnus-valid-select-methods)
   (gnus-declare-backend "nnopds" 'none 'address))
 
+(defun nnopds--browse-server (original server &optional return-buffer)
+  "Browse OPDS SERVER hierarchically, delegating other servers to ORIGINAL."
+  (let ((method (gnus-server-to-method server)))
+    (if (eq (car-safe method) 'nnopds)
+        (nnopds-browse method return-buffer)
+      (funcall original server return-buffer))))
+
+(with-eval-after-load 'gnus-srvr
+  (advice-add 'gnus-browse-foreign-server :around #'nnopds--browse-server))
+
 (with-eval-after-load 'gnus-sum
   (add-to-list 'gnus-parameters
                '("\\`nnopds[+:]"
+                 (display . all)
+                 (gnus-large-newsgroup nil)
                  (mm-text-html-renderer 'nnepub--render-html)
-                 (gnus-fetch-old-headers t)
                  (gnus-show-threads nil)
                  (gnus-article-sort-functions '(gnus-article-sort-by-number))
                  (gnus-thread-sort-functions '(gnus-thread-sort-by-number))))

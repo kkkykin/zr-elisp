@@ -8,11 +8,11 @@
 是 articles。首次进入书籍时下载 EPUB，章节、图片及脚注处理复用 `nnepub`。
 需要支持 libxml 的 Emacs、`curl` 和 `7zz`/`7z`。
 
-更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译三个
+更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译这些
 模块；它们共享的结构体访问器会在编译时内联：
 
 ```sh
-make byte-compile FILE='gnus/nnopds.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
+make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
 ```
 
 ```elisp
@@ -43,30 +43,36 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 后端已发送此请求头。反向代理有路径前缀时，需要在两个 URL 中显式写出。
 
 在 Gnus group buffer 按 `^` 进入 server buffer，选择服务器并用 `RET` 浏览；
-用 `u` 订阅书籍、`RET` 阅读。也可以用 `B nnopds RET 目录URL RET` 浏览。
-目录支持 `navigation`、嵌套 `groups` 和 `next` 分页，并按 publication 的
-`self`/取书 URL 去重；搜索模板和 facets 不自动遍历。可以直接将某个书目
-列表的 URL 配为 `nnopds-url`，缩小书库范围。
+也可以用 `B nnopds RET 目录URL RET` 浏览，或用 `M-x nnopds-browse` 选择
+已打开的服务器。浏览保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
+只加载当前页，不递归扫描。目录和分页链接都按 `RET` 进入，`b`/`^` 返回，
+`n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入章节
+列表，`SPC` 阅读。搜索模板暂不支持。可以直接将某个目录或书目列表的 URL
+配为 `nnopds-url`。
+
+书籍始终显示完整章节列表，包括已读章节，并保留 Gnus 的已读标记。
+`gnus-large-newsgroup` 不限制书籍章节；目录按服务器提供的分页逐页加载。
 
 首次列出书籍时只取书目，章节数在首次打开后更新。当前支持带直接 EPUB
 取书链接的 publication；不提供 EPUB 下载的条目暂不列出。阅读使用 Gnus
 原有命令，图片、跨章链接和脚注沿用 `nnepub`。
 
 目录和 EPUB 保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
-不同 server 和认证配置分别缓存。默认只在没有目录缓存时联网，之后启动、
-`g` 和浏览书库均使用已有缓存，适合慢网或离线使用。新增书籍或版本更新后，
-用 `M-x nnopds-refresh-catalog` 选择已打开的 server 手动刷新，再浏览服务器
-查看新书。`nnopds-catalog-cache-ttl` 默认为 nil；设为秒数可启用定时过期，
-设为 0 则每次扫描都联网刷新。
+不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
+没有缓存时也不联网；首次浏览才请求根目录，进入未缓存的目录或分页时请求
+该页。默认重访目录和返回上级均使用缓存。新增书籍或版本更新后，在所在
+目录按 `g` 手动刷新；`M-x nnopds-refresh-catalog` 只刷新服务器根目录。
+`nnopds-catalog-cache-ttl` 默认为 nil；设为秒数可启用页面定时过期，设为 0
+则每次浏览页面都尝试联网刷新，失败时复用旧页。
 
 刷新按分页保存缓存，并使用服务器提供的 ETag/Last-Modified 条件请求，
-未变化的页面无需重新下载。首次抓取中断后，普通扫描可复用已完成的分页；
-刷新失败时保留完整的旧书目，重新启动也能继续使用。章节数集中缓存，启动
+未变化的页面无需重新下载。页面加载失败时保留当前位置和已缓存的页面，
+重新启动也能继续使用。只有浏览过的书籍进入 Gnus 索引，章节数集中缓存，启动
 无需逐本读取索引。已下载的 EPUB 可离线阅读；解压内容在关闭 server 时清理，
 下载缓存跨会话保留。`nnopds-request-timeout` 限制每个 HTTP 请求。
 
 Group 身份由书目的稳定 URL 和 `metadata.modified` 确定，书目版本更新会
-产生新 group，旧版本的 Gnus 标记继续保留。没有 `modified` 的书目作为一个
+产生新 group，已遇到的旧版本和 Gnus 标记继续保留。没有 `modified` 的书目作为一个
 固定版本缓存；这种服务器需要提供版本变化信号才能自动发现新版。已记录的
 版本会校验 EPUB 内容摘要，避免缓存缺失后将不同内容用于旧文章编号。
 

@@ -226,7 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/slow":
             time.sleep(2)
-        if path in ("/catalog", "/books", "/komga/opds/v2/catalog", "/calibre/opds"):
+        if path in ("/catalog", "/books", "/komga/opds/v2/catalog", "/calibre/opds") or path.startswith(("/libraries", "/series/")):
             delay = root / "feed-delay.txt"
             failure = root / "feed-failure-path.txt"
             if delay.exists():
@@ -251,12 +251,26 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/komga/opds/v2/catalog":
                 self.json_response({"metadata": {"title": "Komga Library"}, "publications": [publication("one")]})
                 return
+            if (root / "directory-only.txt").exists():
+                self.json_response({"metadata": {"title": "Library: Root"},
+                                    "navigation": [{"href": "/libraries", "title": "Libraries", "type": "application/opds+json"}]})
+                return
             self.json_response({"metadata": {"title": "Library"},
                                 "links": [{"rel": "self", "href": "/catalog"}],
                                 "navigation": [{"href": "/books", "type": "application/opds+json", "title": "All books", "templated": False}],
                                 "groups": [{"metadata": {"title": "Recommended"},
                                             "links": [{"rel": "self", "href": "/books", "type": "application/opds+json"}],
                                             "publications": [publication("one")]}]})
+        elif path == "/libraries":
+            self.json_response({"metadata": {"title": "Libraries"},
+                                "navigation": [{"href": "libraries/one", "title": "Library one", "type": "application/opds+json"}]})
+        elif path == "/libraries/one":
+            self.json_response({"metadata": {"title": "Library one"},
+                                "navigation": [{"href": "/series/" + name, "title": "Series " + name, "type": "application/opds+json"}
+                                               for name in ("one", "two")]})
+        elif path.startswith("/series/"):
+            name = path.rsplit("/", 1)[-1]
+            self.json_response({"metadata": {"title": "Series " + name}, "publications": [publication(name)]})
         elif path == "/books":
             page = urllib.parse.parse_qs(parsed.query).get("page", ["1"])[0]
             links = [{"rel": "self", "href": self.path}]
