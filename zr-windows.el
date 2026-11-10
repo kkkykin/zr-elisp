@@ -52,8 +52,6 @@ powershell on native Windows."
 
 (defvar explicit-shell-file-name)
 
-(defvar ls-lisp-use-insert-directory-program)
-
 (defvar zr-windows-encoding-mode)
 
 (defvar zr-windows-ime-mode)
@@ -235,15 +233,15 @@ Also supports powershell.exe accessible from WSL."
         (apply original arguments)))))
 
 (defun zr-windows--insert-directory (original &rest arguments)
-  "Read directory output as UTF-8, falling back to ls-lisp on local errors."
+  "Read local ls output as UTF-8 and encode arguments for Windows."
   (if (file-remote-p (car arguments))
       (apply original arguments)
-    (condition-case nil
-        (let ((coding-system-for-read 'utf-8))
-          (apply original arguments))
-      (file-error
-       (let ((ls-lisp-use-insert-directory-program nil))
-         (apply original arguments))))))
+    (let ((coding-system-for-read 'utf-8)
+          ;; insert-directory binds coding-system-for-write from this value.
+          ;; CreateProcessA needs ANSI argument bytes even for Unicode-aware ls.
+          ;; Native Windows file APIs still use Unicode filenames.
+          (file-name-coding-system locale-coding-system))
+      (apply original arguments))))
 
 (defun zr-windows--dired-command (arguments)
   "Translate a trailing Dired sequencing marker for Windows start /wait."

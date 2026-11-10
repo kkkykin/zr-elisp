@@ -4,6 +4,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'dired)
 (require 'zr-windows)
 
 (ert-deftest zr-windows-test-powershell-custom-program-and-shared-arguments ()
@@ -236,6 +237,73 @@ $item = $folder.ParseName([IO.Path]::GetFileName($path))
                              'result)
                            1 2 "dir")))
       (should (equal calls '(1 2 "dir"))))))
+
+(ert-deftest zr-windows-test-directory-ansi-arguments-and-utf8-output ()
+  (skip-unless (not (eq system-type 'windows-nt)))
+  (let ((python (executable-find "python3"))
+        (ls (executable-find "ls")))
+    (skip-unless (and python ls))
+    (let* ((root (make-temp-file "zr-windows-ls-" t))
+           (directory (expand-file-name "弱网 目录/" root))
+           (filename "中文😀.txt")
+           (insert-directory-program (expand-file-name "ansi-ls" root))
+           (ls-lisp-use-insert-directory-program t)
+           (locale-coding-system 'cp936)
+           (file-name-coding-system nil)
+           (default-file-name-coding-system 'utf-8-unix)
+           (dired--ls-error-buffer nil))
+      (unwind-protect
+          (progn
+            (make-directory directory)
+            (write-region "" nil (expand-file-name filename directory) nil 'silent)
+            ;; Emulate CreateProcessA interpreting argument bytes in CP936,
+            ;; then let a real ls read the directory and emit UTF-8 filenames.
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region
+               (concat "#!" python "\nimport os, sys\n"
+                       "args = [os.fsencode(arg).decode('cp936') for arg in sys.argv[1:]]\n"
+                       "ls = " (json-serialize ls) "\n"
+                       "os.execv(ls, [ls, *args])\n")
+               nil insert-directory-program nil 'silent))
+            (set-file-modes insert-directory-program #o700)
+            (with-temp-buffer
+              (let ((default-directory root))
+                (zr-windows--insert-directory
+                 #'insert-directory directory "-l --dired --quoting-style=literal" nil t))
+              (should-not dired--ls-error-buffer)
+              (goto-char (point-min))
+              (should (search-forward filename nil t))
+              (should (get-text-property (1- (point)) 'dired-filename)))
+            (should-not file-name-coding-system))
+        (when (buffer-live-p dired--ls-error-buffer)
+          (kill-buffer dired--ls-error-buffer))
+        (delete-directory root t)))))
+
+(ert-deftest zr-windows-test-directory-keeps-remote-coding ()
+  (let ((coding-system-for-read 'raw-text)
+        (file-name-coding-system 'utf-8-unix))
+    (should
+     (eq 'listing
+         (zr-windows--insert-directory
+          (lambda (&rest arguments)
+            (should (eq coding-system-for-read 'raw-text))
+            (should (eq file-name-coding-system 'utf-8-unix))
+            (should (equal arguments '("/ssh:example.org:/tmp/" "-l" nil t)))
+            'listing)
+          "/ssh:example.org:/tmp/" "-l" nil t)))))
+
+(ert-deftest zr-windows-test-directory-reports-external-errors ()
+  (let ((ls-lisp-use-insert-directory-program t)
+        (calls 0))
+    (should-error
+     (zr-windows--insert-directory
+      (lambda (&rest _)
+        (cl-incf calls)
+        (should ls-lisp-use-insert-directory-program)
+        (signal 'file-error '("External ls failed")))
+      temporary-file-directory "-l" nil t)
+     :type 'file-error)
+    (should (= calls 1))))
 
 (ert-deftest zr-windows-test-armored-only-normalization ()
   (should (equal (zr-windows--armor "-----BEGIN PGP MESSAGE-----\r\nbody\r\n")
