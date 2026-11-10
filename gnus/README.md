@@ -268,6 +268,37 @@ group。类型会自动识别，EPUB 2/3 的章节、图片和脚注处理复用
 清理。单本入口沿用 `nndoc` 的 group 身份；需要按 EPUB 版本分别保存阅读状态
 时，使用上面的 `nnepub` 书库。
 
+## zr-gnus-article-follow
+
+`zr-gnus-article-follow-mode` 让 Gnus 按整个 Follow 窗口组翻页，适用于普通
+文章和 EPUB 章节。在 article buffer 中启用，再手动分栏，或使用已有的
+`zr-window-follow-columns`：
+
+```elisp
+(require 'zr-gnus-article-follow)
+(require 'zr-window)
+```
+
+在正文窗口执行 `M-x zr-gnus-article-follow-mode` 和
+`M-x zr-window-follow-columns`。后者按 `fill-column` 决定栏数；带前缀参数
+时先删除其他窗口。已有分栏可以直接启用新模式，无需重新分栏。
+
+模式通过局部 keymap 将正文的 `SPC` / `C-v` 映射到
+`zr-gnus-article-follow-next-page`，将 `DEL` / `S-SPC` / `M-v` 映射到
+`zr-gnus-article-follow-prev-page`，不使用 advice。
+前后翻过整屏的栏，保留 `next-screen-context-lines` 行上下文；后续栏
+显示到文章末尾后，再按 `SPC` 即切换下一篇，无需让最左栏也滚到末尾。
+最左栏已显示文章开头时，向前翻页切换上一篇。带前缀参数时按指定行数滚动，
+并在文章边界停止。
+
+这两个新命令也可以在 Summary 中调用，操作已启用模式的可见正文。
+文章选择及已读标记继续由 Gnus 处理，Gnus 的原有命令及函数保持不变。
+
+新命令切换文章时保留现有分栏和其他窗口，并从第一栏开始显示新正文。模式不负责
+重新排版正文；HTML 分栏前已渲染的换行仍由 shr/Gnus 决定。
+关闭模式恢复启用前的 `follow-mode` 状态和原有按键，窗口布局保留；
+加载库不会自动启用模式。
+
 ## 检查
 
 ```sh
