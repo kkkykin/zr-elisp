@@ -226,16 +226,25 @@
       (nnopds-test--with-browser
         (nnopds-test--at-book)
         (when subscribe (nnopds-browse-subscribe))
-        (let ((gnus-large-newsgroup 1) (gnus-large-ephemeral-newsgroup 1))
+        (let ((gnus-large-newsgroup 1) (gnus-large-ephemeral-newsgroup 1)
+              (load-book (symbol-function 'nnepub--load-book))
+              (fingerprint (symbol-function 'nnepub--fingerprint))
+              (loads 0) (hashes 0))
           (cl-letf (((symbol-function 'read-string)
-                     (lambda (&rest _args) (ert-fail "Reading a book prompted for a chapter limit"))))
+                     (lambda (&rest _args) (ert-fail "Reading a book prompted for a chapter limit")))
+                    ((symbol-function 'nnepub--load-book)
+                     (lambda (&rest args) (cl-incf loads) (apply load-book args)))
+                    ((symbol-function 'nnepub--fingerprint)
+                     (lambda (&rest args) (cl-incf hashes) (apply fingerprint args))))
             (nnopds-browse-read)
             (with-current-buffer gnus-summary-buffer
               (should (equal (mapcar #'mail-header-number gnus-newsgroup-headers) '(1 2 3 4)))
               (should (= gnus-current-article 1))
               (with-current-buffer gnus-article-buffer
                 (should (string-match-p "中文内容 α" (buffer-string))))
-              (gnus-summary-exit))))
+              (gnus-summary-exit)))
+          (should (= loads 1))
+          (should (= hashes 1)))
         (should (equal (mapcar (lambda (request) (plist-get request :path)) (nnopds-test--requests opds-root))
                        '("/catalog" "/content/one.epub")))))))
 
@@ -341,6 +350,83 @@
       (should (nnopds-request-group group "library"))
       (should (= 2 (cl-count "/content/one.epub" (nnopds-test--requests opds-root)
                             :key (lambda (request) (plist-get request :path)) :test #'equal))))))
+
+(ert-deftest nnopds-test-completed-download-survives-crashes-during-book-loading ()
+  (nnopds-test--with-server
+    (skip-unless (and (or (executable-find "7zz") (executable-find "7z")) (libxml-available-p)))
+    (nnopds--catalog-page connection opds-url)
+    (let* ((group (car (nnopds--connection-catalog connection)))
+           (key (secure-hash 'sha256 group))
+           (file (nnopds--cache-file connection (concat key ".epub")))
+           (index-file (nnopds--cache-file connection (concat key ".json")))
+           (marker (expand-file-name "loading" opds-root))
+           (setup `(progn
+                     (require 'nnopds)
+                     (setq gnus-cache-directory ,gnus-cache-directory
+                           temporary-file-directory ,(expand-file-name "tmp/" opds-root))
+                     (make-directory temporary-file-directory t)
+                     (unless (nnopds-open-server
+                              "library" '((nnopds-url ,opds-url) (nnopds-headers (("X-API-Key" . "test-key")))))
+                       (error "Could not open OPDS server")))))
+      ;; Terminate fresh Emacs processes without running unwinding or server
+      ;; cleanup, first before extraction, then during chapter indexing.
+      (dolist (stage '(nnepub--extract nnepub--navigation))
+        (let* ((form (append setup
+                             `((advice-add ',stage :before
+                                           (lambda (&rest _args)
+                                             (with-temp-file ,marker (insert "loading"))
+                                             (while t (accept-process-output nil 0.1))))
+                               (nnopds--get-publication ,group "library" t))))
+               (output (generate-new-buffer " *opds-crash-test*"))
+               (child (make-process :name "opds-crash-test" :buffer output :noquery t
+                                    :command (list invocation-name "--batch" "-Q" "-L" nnopds-test--load-path
+                                                   "--eval" (prin1-to-string form)))))
+          (unwind-protect
+              (progn
+                (nnopds-test--wait (lambda () (or (file-readable-p marker) (not (process-live-p child)))))
+                (ert-info ((with-current-buffer output (buffer-string)))
+                  (should (file-readable-p marker)))
+                (delete-process child)
+                (should (equal (nnopds--read-bytes file)
+                               (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
+                (should (equal (plist-get (nnopds--read-json index-file) :digest) (nnepub--fingerprint file)))
+                (should-not (plist-get (nnopds--read-json index-file) :count))
+                (should-not (directory-files (file-name-directory file) nil "^\\.nnopds-"))
+                (delete-file marker))
+            (when (process-live-p child) (delete-process child))
+            (kill-buffer output))))
+      (with-temp-buffer
+        (let* ((form (append setup
+                             `((let ((publication (nnopds--get-publication ,group "library" t)))
+                                 (unless (= 4 (nnopds--publication-count publication)) (error "Missing chapters")))
+                               (nnopds-request-close))))
+               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+                                     "--eval" (prin1-to-string form))))
+          (ert-info ((buffer-string)) (should (= status 0)))))
+      (should (= 4 (plist-get (nnopds--read-json index-file) :count)))
+      (should (= 1 (cl-count "/content/one.epub" (nnopds-test--requests opds-root)
+                            :key (lambda (request) (plist-get request :path)) :test #'equal))))))
+
+(ert-deftest nnopds-test-failed-downloads-and-edition-mismatches-are-not-published ()
+  (nnopds-test--with-server
+    (nnopds--catalog-page connection opds-url)
+    (let* ((group (car (nnopds--connection-catalog connection)))
+           (publication (gethash group (nnopds--connection-publications connection)))
+           (key (secure-hash 'sha256 group))
+           (file (nnopds--cache-file connection (concat key ".epub")))
+           (index-file (nnopds--cache-file connection (concat key ".json"))))
+      (dolist (failure '("503" "truncated"))
+        (nnopds-test--write opds-root "download-failure.txt" failure)
+        (should-error (nnopds--load-publication 'epub connection publication))
+        (should-not (file-exists-p file))
+        (should-not (file-exists-p index-file))
+        (should-not (directory-files (file-name-directory file) nil "^\\.nnopds-")))
+      (delete-file (expand-file-name "download-failure.txt" opds-root))
+      (nnopds--write-json index-file '(:digest "previous-edition" :count 99))
+      (should-error (nnopds--load-publication 'epub connection publication))
+      (should-not (file-exists-p file))
+      (should (equal (nnopds--read-json index-file) '(:digest "previous-edition" :count 99)))
+      (should-not (directory-files (file-name-directory file) nil "^\\.nnopds-")))))
 
 (ert-deftest nnopds-test-cache-writes-stay-within-windows-path-limit ()
   (nnopds-test--with-server
@@ -593,6 +679,46 @@
                        (lambda (_response error) (cl-incf calls) (setq failure error)))
       (nnopds-test--wait (lambda () failure))
       (should (= calls 1))
+      (should-not (nnopds--connection-processes connection)))))
+
+(ert-deftest nnopds-test-http-file-output-redirects-and-ownership ()
+  (nnopds-test--with-server
+    (let* ((file (expand-file-name "response" opds-root))
+           (target (nnopds--url "/content/one.epub" opds-url))
+           (redirect (concat (nnopds--url "/redirect" opds-url) "?target=" (url-hexify-string target)))
+           response failure (calls 0) headers)
+      (let ((make-temporary (symbol-function 'make-temp-file)))
+        (cl-letf (((symbol-function 'nnopds--read-bytes)
+                   (lambda (&rest _args) (ert-fail "File response was copied into Emacs memory")))
+                  ((symbol-function 'make-temp-file)
+                   (lambda (prefix &rest args)
+                     (let ((path (apply make-temporary prefix args)))
+                       (push path headers)
+                       path))))
+          (nnopds--request connection "GET" redirect nil
+                           (lambda (value error) (cl-incf calls) (setq response value failure error))
+                           nil nil file)
+          (nnopds-test--wait (lambda () (> calls 0)))))
+      (should (= calls 1))
+      (should-not failure)
+      (should (= 200 (plist-get response :status)))
+      (should (equal target (plist-get response :url)))
+      (should (equal file (plist-get response :file)))
+      (should-not (plist-member response :body))
+      (should (equal (nnopds--read-bytes file) (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
+      (should-not (nnopds--connection-processes connection))
+      (should (cl-every (lambda (path) (not (file-exists-p path))) headers))
+      ;; Direct file requests use the same origin scoping as string requests.
+      (let* ((target (replace-regexp-in-string "127.0.0.1" "localhost" (nnopds--url "/echo" opds-url)))
+             (redirect (concat (nnopds--url "/redirect" opds-url) "?target=" (url-hexify-string target))))
+        (nnopds--request connection "GET" redirect nil nil nil nil file)
+        (let ((echo (nnopds--read-json file)))
+          (should-not (plist-get echo :X-API-Key))
+          (should-not (plist-get echo :Authorization))))
+      (let ((nnopds-request-timeout 1))
+        (should-error (nnopds--request connection "GET" (nnopds--url "/slow" opds-url) nil nil nil nil file)))
+      ;; Even a failed transfer leaves output-file cleanup to its owner.
+      (should (file-exists-p file))
       (should-not (nnopds--connection-processes connection)))))
 
 (ert-deftest nnopds-test-json-arrays-and-booleans-survive-cache-round-trip ()

@@ -155,6 +155,61 @@
               (with-current-buffer destination (should (string-match-p "Message-ID:" (buffer-string)))))
           (kill-buffer destination))))))
 
+(ert-deftest nnepub-test-large-manifest-keeps-spine-order-titles-and-supplements ()
+  (nnepub-test--with-library
+    (let ((file (nnepub-test--book))
+          (extract (symbol-function 'nnepub--extract))
+          (count 200)
+          book)
+      (unwind-protect
+          (progn
+            ;; Extend the extracted EPUB fixture with many resources in a
+            ;; manifest order different from their reading order.
+            (cl-letf (((symbol-function 'nnepub--extract)
+                       (lambda (file root)
+                         (funcall extract file root)
+                         (let (items refs links)
+                           (dotimes (offset count)
+                             (let ((n (1+ offset)))
+                               (nnepub-test--write root (format "OEBPS/Text/c%d.xhtml" n)
+                                                   (format "<html><head><title>Fallback %d</title></head><body><p>Text</p></body></html>" n))
+                               (push (format "<item id='c%d' href='Text/c%d.xhtml' media-type='application/xhtml+xml'/>" n n) items)
+                               (push (format "<itemref idref='c%d'/>" n) refs)
+                               (when (cl-evenp n)
+                                 (push (format "<a href='Text/c%d.xhtml'>TOC %d</a>" n n) links))))
+                           (with-temp-buffer
+                             (insert-file-contents (expand-file-name "OEBPS/book.opf" root))
+                             (goto-char (point-min))
+                             (search-forward "</manifest>")
+                             (replace-match (concat (apply #'concat (nreverse items)) "</manifest>") t t)
+                             (re-search-forward "<spine[^>]*>.*?</spine>")
+                             (replace-match (concat "<spine>" (apply #'concat refs)
+                                                    "<itemref idref='image'/><itemref idref='c1'/></spine>") t t)
+                             (write-region (point-min) (point-max) (expand-file-name "OEBPS/book.opf" root) nil 'silent))
+                           (with-temp-buffer
+                             (insert-file-contents (expand-file-name "OEBPS/nav.xhtml" root))
+                             (goto-char (point-min))
+                             (search-forward "<nav epub:type='toc'>")
+                             (insert (apply #'concat links))
+                             (write-region (point-min) (point-max) (expand-file-name "OEBPS/nav.xhtml" root) nil 'silent))))))
+              (setq book (nnepub--load-book file (nnepub--file-signature file))))
+            (let ((chapters (nnepub--book-chapters book)))
+              (should (equal (mapcar (lambda (item) (plist-get item :id)) chapters)
+                             (append (mapcar (lambda (n) (format "c%d" n)) (number-sequence count 1 -1))
+                                     '("image" "a" "b" "notes" "nav"))))
+              (should (equal (mapcar (lambda (item) (plist-get item :number)) chapters)
+                             (number-sequence 1 (+ count 5))))
+              (should (equal (mapcar (lambda (item) (plist-get item :title)) (seq-take chapters count))
+                             (mapcar (lambda (n) (format (if (cl-evenp n) "TOC %d" "Fallback %d") n))
+                                     (number-sequence count 1 -1))))
+              (should (equal (mapcar (lambda (item) (plist-get item :title)) (nthcdr count chapters))
+                             '("tiny" "第一章" "第二章" "附录" "目录")))
+              ;; Repeated spine positions retain their order for progress,
+              ;; while the chapter list presents each resource once.
+              (should (= (+ count 2) (length (nnepub--book-spine book))))
+              (should (equal (car (last (nnepub--book-spine book))) (plist-get (nth (1- count) chapters) :path)))))
+        (when book (nnepub--dispose-book book))))))
+
 (ert-deftest nnepub-test-cache-versioning-and-cleanup ()
   (nnepub-test--with-library
     (let ((file (nnepub-test--book)))
@@ -240,6 +295,30 @@
 (ert-deftest nnepub-test-rejects-remote-input-and-posting ()
   (should-not (nnepub-open-server "remote" '((nnepub-directory "/ssh:host:/books/"))))
   (should-not (nnepub-request-post)))
+
+(ert-deftest nnepub-test-path-cache-retains-symlink-and-directory-boundaries ()
+  (zr-test-with-temp-directory
+    (let* ((root (expand-file-name "book/"))
+           (outside (expand-file-name "book-other/"))
+           (base (expand-file-name "chapter.xhtml" root)))
+      (nnepub-test--write root "Text/inside.xhtml" "inside")
+      (nnepub-test--write outside "outside.xhtml" "outside")
+      (condition-case nil
+          (progn
+            (make-symbolic-link outside (expand-file-name "escape" root))
+            (make-symbolic-link (expand-file-name "outside.xhtml" outside) (expand-file-name "file-link.xhtml" root))
+            (make-symbolic-link (expand-file-name "Text/" root) (expand-file-name "internal" root)))
+        (file-error (ert-skip "Symbolic links are unavailable")))
+      (dolist (nnepub--path-cache (list nil (make-hash-table :test #'equal)))
+        (should (nnepub--resolve root base "Text/inside.xhtml"))
+        (should (nnepub--resolve root base "internal/inside.xhtml"))
+        (should-error (nnepub--resolve root base "escape/outside.xhtml"))
+        (should-error (nnepub--resolve root base "file-link.xhtml"))
+        (should-error (nnepub--resolve root base "../book-other/outside.xhtml")))
+      ;; No stale validation survives the indexing scope.
+      (delete-file (expand-file-name "Text/inside.xhtml" root))
+      (make-symbolic-link (expand-file-name "outside.xhtml" outside) (expand-file-name "Text/inside.xhtml" root))
+      (should-error (nnepub--resolve root base "Text/inside.xhtml")))))
 
 (ert-deftest nnepub-test-gnus-reading-links-and-persistent-marks ()
   ;; A fresh Gnus session exercises actual NOV parsing, MIME rendering,

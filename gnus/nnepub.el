@@ -55,6 +55,9 @@ Defaults to the virtual server name.  Only this directory is scanned.")
 (cl-defstruct (nnepub--book (:constructor nnepub--make-book))
   file signature root key group title author date chapters resources spine)
 
+(defvar nnepub--path-cache nil
+  "Path containment checks cached only while indexing one extracted book.")
+
 (nnoo-define-basics nnepub)
 
 (defmacro nnepub--report-errors (&rest body)
@@ -66,14 +69,25 @@ Defaults to the virtual server name.  Only this directory is scanned.")
 
 (defun nnepub--local-name (name)
   "Return NAME without an XML namespace prefix."
-  (intern (car (last (split-string (symbol-name name) ":")))))
+  (if-let* ((colon (cl-position ?: (symbol-name name) :from-end t)))
+      (intern (substring (symbol-name name) (1+ colon)))
+    name))
 
 (defun nnepub--elements (node tag)
   "Return NODE and descendants whose local name is TAG, in document order."
+  (let (nodes)
+    (cl-labels ((visit (node)
+                  (when (consp node)
+                    (when (eq (nnepub--local-name (dom-tag node)) tag) (push node nodes))
+                    (dolist (child (dom-children node)) (visit child)))))
+      (visit node))
+    (nreverse nodes)))
+
+(defun nnepub--first-element (node tag)
+  "Return the first element with local name TAG, stopping when found."
   (when (consp node)
-    (append (when (eq (nnepub--local-name (dom-tag node)) tag) (list node))
-            (mapcan (lambda (child) (nnepub--elements child tag))
-                    (dom-children node)))))
+    (if (eq (nnepub--local-name (dom-tag node)) tag) node
+      (cl-some (lambda (child) (nnepub--first-element child tag)) (dom-children node)))))
 
 (defun nnepub--child (node tag)
   "Return the first direct child of NODE with local name TAG."
@@ -117,7 +131,21 @@ External URLs and paths escaping the EPUB are rejected."
                      (nnepub--decode-url value)))
          (path (if (string-empty-p part) base
                  (expand-file-name part (file-name-directory base)))))
-    (unless (file-in-directory-p path root)
+    (unless
+        (if (not nnepub--path-cache) (file-in-directory-p path root)
+          ;; Extraction is complete and this tree stays unchanged during
+          ;; indexing.  Cache canonical root/validated paths for this scope;
+          ;; rendering later still performs fresh filesystem checks.
+          (let* ((directory (file-name-as-directory root))
+                 (key (cons directory path)))
+            (or (gethash key nnepub--path-cache)
+                (let ((true-root (or (gethash directory nnepub--path-cache)
+                                     (puthash directory (file-name-as-directory (file-truename directory))
+                                              nnepub--path-cache)))
+                      (true-path (file-truename path)))
+                  (when (or (equal true-path (directory-file-name true-root))
+                            (string-prefix-p true-root true-path))
+                    (puthash key t nnepub--path-cache))))))
       (error "EPUB resource outside book: %s" href))
     (cons path fragment)))
 
@@ -160,7 +188,7 @@ External URLs and paths escaping the EPUB are rejected."
 
 (defun nnepub--navigation (root package resources)
   "Read navigation titles from PACKAGE and RESOURCES inside ROOT.
-Return an alist of resource paths and their first navigation title."
+Return a hash table of resource paths and their first navigation title."
   (let* ((spine (nnepub--child package 'spine))
          (nav (cl-find-if (lambda (item)
                             (member "nav" (split-string (or (plist-get item :properties) ""))))
@@ -168,7 +196,7 @@ Return an alist of resource paths and their first navigation title."
          (ncx (cl-find (nnepub--attr spine 'toc) resources
                        :key (lambda (item) (plist-get item :id)) :test #'equal))
          (resource (or nav ncx))
-         titles)
+         (titles (make-hash-table :test #'equal)))
     (when resource
       (let* ((file (plist-get resource :path))
              (document (nnepub--read-xml file))
@@ -177,7 +205,7 @@ Return an alist of resource paths and their first navigation title."
                               (lambda (node)
                                 (member "toc" (split-string (or (nnepub--attr node 'type) ""))))
                               (nnepub--elements document 'nav))
-                           (car (nnepub--elements document 'navMap))))
+                           (nnepub--first-element document 'navMap)))
              (nodes (nnepub--elements navigation (if nav 'a 'navPoint))))
         (dolist (node nodes)
           (let* ((href (if nav (nnepub--attr node 'href)
@@ -186,19 +214,25 @@ Return an alist of resource paths and their first navigation title."
                           (nnepub--text (nnepub--child node 'navLabel)))))
             (when (and href (not (nnepub--external-url-p href)))
               (let ((path (car (nnepub--resolve root file href))))
-                (unless (or (assoc path titles) (string-empty-p title))
-                  (push (cons path title) titles))))))))
-    (nreverse titles)))
+                (unless (or (gethash path titles) (string-empty-p title))
+                  (puthash path title titles))))))))
+    titles))
 
-(defun nnepub--load-book (file signature)
-  "Read FILE with SIGNATURE, returning a book with extracted resources."
+(defun nnepub--load-book (file signature &optional fingerprint)
+  "Read FILE with SIGNATURE, returning a book with extracted resources.
+FINGERPRINT, when supplied, is the already computed SHA-256 of FILE."
   (unless (libxml-available-p)
     (error "Reading EPUB requires Emacs with libxml support"))
   (let ((root (make-temp-file "nnepub-" t))
+        (nnepub--path-cache (make-hash-table :test #'equal))
+        (started (float-time)) extracted
         success)
     (unwind-protect
         (progn
+          (message "nnepub: Extracting %s..." (file-name-nondirectory file))
           (nnepub--extract file root)
+          (setq extracted (float-time))
+          (message "nnepub: Extracted (%.2fs); indexing chapters..." (- extracted started))
           (let* ((container (nnepub--read-xml
                              (expand-file-name "META-INF/container.xml" root)))
                  (rootfile (cl-find-if
@@ -214,9 +248,11 @@ Return an alist of resource paths and their first navigation title."
                  (package (nnepub--read-xml package-file))
                  (metadata (nnepub--child package 'metadata))
                  (spine (nnepub--child package 'spine))
-                 (fingerprint (nnepub--fingerprint file))
+                 (fingerprint (or fingerprint (nnepub--fingerprint file)))
                  (key (secure-hash 'sha256 file))
                  (group (concat "book." key "." fingerprint))
+                 (by-id (make-hash-table :test #'equal))
+                 (seen (make-hash-table :test #'equal))
                  resources chapters reading-order)
             (dolist (item (nnepub--elements (nnepub--child package 'manifest) 'item))
               (let ((href (nnepub--attr item 'href)))
@@ -227,33 +263,38 @@ Return an alist of resource paths and their first navigation title."
                               :properties (nnepub--attr item 'properties))
                         resources))))
             (setq resources (nreverse resources))
+            (dolist (resource resources)
+              (let ((id (plist-get resource :id)))
+                (unless (gethash id by-id) (puthash id resource by-id))))
             (dolist (item (nnepub--elements spine 'itemref))
               (let* ((id (nnepub--attr item 'idref))
-                     (resource (cl-find id resources :test #'equal
-                                        :key (lambda (entry) (plist-get entry :id)))))
+                     (resource (gethash id by-id)))
                 (unless resource (error "Missing EPUB spine resource: %s" id))
                 (push (plist-get resource :path) reading-order)
                 (unless (or (member (plist-get resource :type)
                                     '("application/xhtml+xml" "text/html"))
                             (string-prefix-p "image/" (or (plist-get resource :type) "")))
                   (error "Unsupported EPUB spine resource: %s" id))
-                (unless (member resource chapters) (push resource chapters))))
-            (setq chapters (nreverse chapters))
+                (unless (gethash resource seen)
+                  (puthash resource t seen)
+                  (push resource chapters))))
             (unless chapters (error "EPUB has an empty spine"))
             (setq reading-order (nreverse reading-order))
             ;; Footnotes and navigation documents can be outside the spine.
             (dolist (resource resources)
               (when (and (member (plist-get resource :type)
                                  '("application/xhtml+xml" "text/html"))
-                         (not (member resource chapters)))
-                (setq chapters (append chapters (list resource)))))
+                         (not (gethash resource seen)))
+                (puthash resource t seen)
+                (push resource chapters)))
+            (setq chapters (nreverse chapters))
             (let ((titles (nnepub--navigation root package resources))
                   (number 0))
               (setq chapters
                     (mapcar
                      (lambda (resource)
                        (let* ((path (plist-get resource :path))
-                              (title (cdr (assoc path titles))))
+                              (title (gethash path titles)))
                          (unless (file-readable-p path)
                            (error "Missing EPUB resource: %s" path))
                          (unless title
@@ -261,7 +302,7 @@ Return an alist of resource paths and their first navigation title."
                                  (if (string-prefix-p "image/" (plist-get resource :type))
                                      (file-name-base path)
                                    (nnepub--text
-                                    (car (nnepub--elements (nnepub--read-xml path) 'title))))))
+                                    (nnepub--first-element (nnepub--read-xml path) 'title)))))
                          (append (list :number (cl-incf number)
                                        :title (if (string-empty-p title)
                                                   (format "Chapter %d" number) title))
@@ -277,7 +318,9 @@ Return an alist of resource paths and their first navigation title."
                            (if authors (string-join authors ", ") "Unknown"))
                  :date (format-time-string "%a, %d %b %Y %T %z" (car signature) t)
                  :chapters chapters :resources resources :spine reading-order)
-              (setq success t))))
+              (setq success t)
+              (message "nnepub: Ready (%d chapters; indexing %.2fs)"
+                       (length chapters) (- (float-time) extracted)))))
       (unless success (delete-directory root t)))))
 
 (defun nnepub--dispose-book (book)

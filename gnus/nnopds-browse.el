@@ -158,10 +158,15 @@ Update the browser only after the requested page has loaded successfully."
                                      nnopds-browse--history))
     (unless (get-text-property (line-beginning-position) 'nnopds-browse-book) (user-error "No directory or book here"))
     (setq gnus-browse-current-method nnopds-browse--method)
-    ;; The catalog only knows a placeholder article count until the EPUB is
-    ;; opened.  Update Gnus's range before it chooses which headers to fetch.
-    (unless (gnus-activate-group (gnus-browse-group-name))
-      (user-error "Could not open OPDS book: %s" (gnus-status-message nnopds-browse--method)))
+    ;; Subscribed groups need the real chapter count before choosing headers.
+    ;; Gnus activates unknown/ephemeral groups itself on a temporary server;
+    ;; preloading here would extract and index the same book twice.
+    (let* ((full-name (gnus-browse-group-name))
+           (group (if (gnus-native-method-p (gnus-find-method-for-group full-name))
+                      (gnus-group-short-name full-name) full-name)))
+      (when (and (gnus-get-info group) (not (gnus-ephemeral-group-p group)))
+        (unless (gnus-activate-group group)
+          (user-error "Could not open OPDS book: %s" (gnus-status-message nnopds-browse--method)))))
     (if read
         (progn
           (gnus-browse-read-group)

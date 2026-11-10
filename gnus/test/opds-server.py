@@ -133,6 +133,19 @@ class Handler(BaseHTTPRequestHandler):
                                      "body": body}) + "\n")
 
     def download(self, file):
+        failure = root / "download-failure.txt"
+        if failure.exists():
+            value = failure.read_text().strip()
+            if value == "truncated":
+                body = file.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:len(body) // 2])
+                self.close_connection = True
+            else:
+                self.respond(int(value), b"Download failed")
+            return
         media_type = root / "download-media-type.txt"
         content_type = media_type.read_text().strip() if media_type.exists() else "application/epub+zip"
         accepted = {value.split(";", 1)[0].strip() for value in self.headers.get("Accept", "*/*").split(",")}

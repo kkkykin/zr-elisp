@@ -122,7 +122,7 @@ visited pages.  Gnus startup only reads the local publication index."
     (insert-file-contents-literally file)
     (buffer-string)))
 
-(defun nnopds--response (headers body)
+(defun nnopds--response (headers body &optional output-file)
   "Parse curl's HEADERS and BODY files into a response plist."
   (with-temp-buffer
     (insert-file-contents headers)
@@ -135,18 +135,23 @@ visited pages.  Gnus startup only reads the local publication index."
           (push (cons (downcase (match-string 1)) (match-string 2)) fields)
           (goto-char (match-end 0))))
       (unless status (error "No HTTP response"))
-      (list :status status :headers fields :body (nnopds--read-bytes body)))))
+      (append (list :status status :headers fields)
+              (if output-file (list :file output-file)
+                (list :body (nnopds--read-bytes body)))))))
 
-(defun nnopds--request (connection method url &optional data callback request-headers authentication)
+(defun nnopds--request (connection method url &optional data callback request-headers authentication output-file)
   "Request URL with METHOD and optional JSON DATA using CONNECTION.
 With CALLBACK, return a request state and call it once with (RESPONSE ERROR).
 Without CALLBACK, wait for a response, allowing process output and quit.
 REQUEST-HEADERS specify the request's media types.  AUTHENTICATION, when
 non-nil, replaces the catalog credentials with its :headers, scoped to
-its :url origin.  Response bodies are
-unibyte strings, including EPUB downloads.  Redirects
+its :url origin.  With OUTPUT-FILE, curl writes directly there and the
+response contains :file instead of :body.  The caller owns this file,
+including cleanup on failure or quit.  Other response bodies are unibyte
+strings.  Redirects
 are bounded and credentials are only sent to the configured origin."
-  (let ((state (nnopds--make-request-state)))
+  (let ((state (nnopds--make-request-state))
+        (output-file (when output-file (expand-file-name output-file))))
     (cl-labels
         ((finish (response error)
            (unless (nnopds--request-state-done state)
@@ -159,7 +164,7 @@ are bounded and credentials are only sent to the configured origin."
                (progn
                  (when (nnopds--connection-closed connection)
                    (error "OPDS server is closed"))
-                 (let* ((body-file (make-temp-file "nnopds-body-"))
+                 (let* ((body-file (or output-file (make-temp-file "nnopds-body-")))
                         (head-file (make-temp-file "nnopds-head-"))
                         (buffer (generate-new-buffer " *nnopds-http*"))
                         (headers (append request-headers
@@ -205,7 +210,7 @@ are bounded and credentials are only sent to the configured origin."
                                             (if (not (and (eq (process-status proc) 'exit)
                                                           (zerop (process-exit-status proc))))
                                                 (finish nil "HTTP request failed or timed out")
-                                              (let* ((response (nnopds--response head-file body-file))
+                                              (let* ((response (nnopds--response head-file body-file output-file))
                                                      (status (plist-get response :status))
                                                      (location (cdr (assoc "location" (plist-get response :headers)))))
                                                 (if (and location (memq status '(301 302 303 307 308)))
@@ -216,7 +221,8 @@ are bounded and credentials are only sent to the configured origin."
                                                       (start (nnopds--url location target) (1+ redirects)))
                                                   (finish (plist-put response :url target) nil))))
                                           (error (finish nil (error-message-string failure))))
-                                      (delete-file body-file) (delete-file head-file)
+                                      (unless output-file (delete-file body-file))
+                                      (delete-file head-file)
                                       (kill-buffer buffer))))))
                          (setf (nnopds--request-state-process state) process)
                          (push process (nnopds--connection-processes connection))
@@ -225,7 +231,7 @@ are bounded and credentials are only sent to the configured origin."
                          (setq started t))
                      (unless started
                        (when (and process (process-live-p process)) (delete-process process))
-                       (when (file-exists-p body-file) (delete-file body-file))
+                       (when (and (not output-file) (file-exists-p body-file)) (delete-file body-file))
                        (when (file-exists-p head-file) (delete-file head-file))
                        (when (buffer-live-p buffer) (kill-buffer buffer))))))
              (error (finish nil (error-message-string err))))))
@@ -510,25 +516,32 @@ SERVER defaults to the current OPDS server."
         (progn
           (when temporary
             (nnopds-progress-before-download connection publication)
-            (let ((response (nnopds--request connection "GET" (nnopds--publication-acquisition publication)
-                                             nil nil '(("Accept" . "application/epub+zip, application/octet-stream;q=0.9, */*;q=0.1"))))
-                  (coding-system-for-write 'binary))
+            (message "nnopds: Downloading %s..." (nnopds--publication-title publication))
+            (let* ((started (float-time))
+                   (response (nnopds--request connection "GET" (nnopds--publication-acquisition publication)
+                                              nil nil '(("Accept" . "application/epub+zip, application/octet-stream;q=0.9, */*;q=0.1"))
+                                              nil temporary)))
               (unless (= (plist-get response :status) 200)
                 (error "EPUB download: HTTP %s" (plist-get response :status)))
-              (with-temp-file temporary
-                (set-buffer-multibyte nil) (insert (plist-get response :body)))))
+              (message "nnopds: Downloaded %s (%.2fs)" (nnopds--publication-title publication)
+                       (- (float-time) started))))
+          (message "nnopds: Validating %s EPUB..." (if temporary "downloaded" "cached"))
           (setq digest (nnepub--fingerprint (or temporary file)))
           (when (and (plist-get index :digest) (not (equal (plist-get index :digest) digest)))
             (error "EPUB content changed within the same OPDS version"))
-          (setq book (nnepub--load-book (or temporary file) (nnepub--file-signature (or temporary file))))
+          ;; Checkpoint the edition identity and the completed download before
+          ;; extraction/indexing, so a crash there never loses the EPUB cache.
+          (unless (equal (plist-get index :digest) digest)
+            (setq index (plist-put index :digest digest))
+            (nnopds--write-json index-file index))
+          (when temporary (rename-file temporary file t))
+          (setq book (nnepub--load-book file (nnepub--file-signature file) digest))
           (setf (nnepub--book-group book) group
                 (nnepub--book-title book) (nnopds--publication-title publication))
           (unless (string-empty-p (nnopds--publication-author publication))
             (setf (nnepub--book-author book) (nnopds--publication-author publication)))
           (let ((value (list :count (length (nnepub--book-chapters book)) :digest digest)))
             (unless (equal index value) (nnopds--write-json index-file value)))
-          (when temporary (rename-file temporary file t))
-          (setf (nnepub--book-file book) file)
           (setq success t)
           book)
       (unless success (when book (nnepub--dispose-book book)))
