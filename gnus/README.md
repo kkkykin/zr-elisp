@@ -57,6 +57,9 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 取书链接的 publication；不提供 EPUB 下载的条目暂不列出。阅读使用 Gnus
 原有命令，图片、跨章链接和脚注沿用 `nnepub`。
 
+取书请求优先接受 EPUB 媒体类型，也接受通用二进制响应；下载内容按 EPUB
+解析，支持将附件标为 `application/octet-stream` 的接口。
+
 目录和 EPUB 保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
 不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
 没有缓存时也不联网；首次浏览才请求根目录，进入未缓存的目录或分页时请求

@@ -317,6 +317,31 @@
                               :key (lambda (request) (plist-get request :path)) :test #'equal)))
       (should-not (nnopds-test--requests opds-root "PUT")))))
 
+(ert-deftest nnopds-test-octet-stream-epub-download-and-cache-reopen ()
+  (nnopds-test--with-server
+    (skip-unless (and (or (executable-find "7zz") (executable-find "7z")) (libxml-available-p)))
+    (nnopds-test--write opds-root "download-media-type.txt" "application/octet-stream")
+    (let ((response (nnopds--request connection "GET" (nnopds--url "/content/one.epub" opds-url)
+                                     nil nil '(("Accept" . "application/epub+zip")))))
+      (should (= 406 (plist-get response :status)))
+      (should (equal (cdr (assoc "accept" (plist-get response :headers))) "application/octet-stream")))
+    (let* ((publication (nnopds-test--publication connection))
+           (group (nnopds--publication-group publication))
+           (book (nnopds--publication-data publication))
+           (requests (cl-remove-if-not
+                      (lambda (request) (equal "/content/one.epub" (plist-get request :path)))
+                      (nnopds-test--requests opds-root))))
+      (should (= 4 (length (nnopds--chapters 'epub book))))
+      (should (equal (nnopds--read-bytes (nnepub--book-file book))
+                     (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
+      (should (= 2 (length requests)))
+      (should (string-match-p "application/octet-stream" (plist-get (cadr requests) :accept)))
+      (nnopds-close-server "library")
+      (should (nnopds-open-server "library" `((nnopds-url ,opds-url) (nnopds-headers (("X-API-Key" . "test-key"))))))
+      (should (nnopds-request-group group "library"))
+      (should (= 2 (cl-count "/content/one.epub" (nnopds-test--requests opds-root)
+                            :key (lambda (request) (plist-get request :path)) :test #'equal))))))
+
 (ert-deftest nnopds-test-cache-writes-stay-within-windows-path-limit ()
   (nnopds-test--with-server
     (let ((gnus-cache-directory

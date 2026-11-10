@@ -132,6 +132,15 @@ class Handler(BaseHTTPRequestHandler):
                                      "sync_key": self.headers.get("X-Auth-Key"),
                                      "body": body}) + "\n")
 
+    def download(self, file):
+        media_type = root / "download-media-type.txt"
+        content_type = media_type.read_text().strip() if media_type.exists() else "application/epub+zip"
+        accepted = {value.split(";", 1)[0].strip() for value in self.headers.get("Accept", "*/*").split(",")}
+        if content_type not in accepted and "*/*" not in accepted:
+            self.respond(406, headers={"Accept": content_type})
+        else:
+            self.respond(200, file.read_bytes(), content_type)
+
     def authenticated(self):
         if (root / "digest-auth.txt").exists():
             authorization = self.headers.get("Authorization", "")
@@ -285,11 +294,11 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/publication/"):
             self.json_response(publication(path.rsplit("/", 1)[-1]), content_type="application/opds-publication+json")
         elif path.startswith("/content/"):
-            self.respond(200, (root / path.rsplit("/", 1)[-1]).read_bytes(), "application/epub+zip")
+            self.download(root / path.rsplit("/", 1)[-1])
         elif path == "/calibre/get/epub/1/main":
             if (root / "kosync-enabled.txt").exists():
                 (root / "kosync-registered.txt").write_text(partial_md5(root / "one.epub"))
-            self.respond(200, (root / "one.epub").read_bytes(), "application/epub+zip")
+            self.download(root / "one.epub")
         else:
             self.respond(404)
 

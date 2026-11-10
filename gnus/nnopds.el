@@ -511,7 +511,7 @@ SERVER defaults to the current OPDS server."
           (when temporary
             (nnopds-progress-before-download connection publication)
             (let ((response (nnopds--request connection "GET" (nnopds--publication-acquisition publication)
-                                             nil nil '(("Accept" . "application/epub+zip"))))
+                                             nil nil '(("Accept" . "application/epub+zip, application/octet-stream;q=0.9, */*;q=0.1"))))
                   (coding-system-for-write 'binary))
               (unless (= (plist-get response :status) 200)
                 (error "EPUB download: HTTP %s" (plist-get response :status)))
