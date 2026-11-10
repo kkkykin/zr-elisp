@@ -8,6 +8,13 @@
 是 articles。首次进入书籍时下载 EPUB，章节、图片及脚注处理复用 `nnepub`。
 需要支持 libxml 的 Emacs、`curl` 和 `7zz`/`7z`。
 
+更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译三个
+模块；它们共享的结构体访问器会在编译时内联：
+
+```sh
+make byte-compile FILE='gnus/nnopds.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
+```
+
 ```elisp
 (add-to-list 'load-path "/path/to/zr-elisp/gnus")
 (require 'nnopds)

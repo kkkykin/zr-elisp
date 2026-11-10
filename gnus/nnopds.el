@@ -54,8 +54,9 @@ Zero always refreshes it.  A first fetch is required without a cache."
 (defvoo nnopds--connection nil)
 (defvoo nnopds--group nil)
 
+;; Protocol modules inline accessors; append fields to keep their offsets stable.
 (cl-defstruct (nnopds--connection (:constructor nnopds--make-connection))
-  name url headers directory catalog publications counts processes readers fetched closed progress auth-method)
+  name url headers directory catalog publications processes readers fetched closed progress auth-method counts)
 
 (cl-defstruct (nnopds--publication (:constructor nnopds--make-publication))
   group title author modified source acquisition format progress document data count)

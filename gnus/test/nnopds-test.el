@@ -296,6 +296,56 @@
       (should (equal catalog (nnopds--connection-catalog nnopds--connection)))
       (should (= 6 (length (nnopds-test--requests opds-root)))))))
 
+(ert-deftest nnopds-test-precompiled-koreader-keeps-server-open-across-sessions ()
+  (nnopds-test--with-server
+    (let ((adapter (expand-file-name "nnopds-koreader.el" opds-root)))
+      (copy-file (expand-file-name "nnopds-koreader.el" nnopds-test--load-path) adapter)
+      ;; Reproduce a separately compiled adapter from before counts were added.
+      ;; Struct accessors inline their field offsets into the adapter bytecode.
+      (with-temp-buffer
+        (let* ((form `(progn
+                       (require 'nnopds)
+                       (cl-defstruct (nnopds--connection (:constructor nnopds--make-connection))
+                         name url headers directory catalog publications processes readers fetched
+                         closed progress auth-method)
+                       (unless (byte-compile-file ,adapter) (error "Could not compile adapter"))))
+               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+                                     "--eval" (prin1-to-string form))))
+          (ert-info ((buffer-string)) (should (= status 0)))))
+      (dotimes (session 2)
+        (with-temp-buffer
+          (let* ((form
+                  `(progn
+                     (require 'gnus) (require 'gnus-group) (require 'nnopds)
+                     (load ,(concat adapter "c") nil t)
+                     (setq gnus-directory ,(expand-file-name "News" opds-root)
+                           gnus-home-directory ,opds-root gnus-startup-file ,(expand-file-name ".newsrc" opds-root)
+                           gnus-init-file nil gnus-site-init-file nil gnus-use-dribble-file nil
+                           gnus-select-method '(nnnil "") gnus-cache-directory ,gnus-cache-directory
+                           gnus-check-new-newsgroups nil gnus-save-newsrc-file nil
+                           gnus-secondary-select-methods
+                           '((nnopds "komga" (nnopds-url ,(nnopds--url "/komga/opds/v2/catalog" opds-url))
+                                    (nnopds-headers (("X-API-Key" . "komga-key")))
+                                    (nnopds-koreader-url ,(nnopds--url "/komga/koreader" opds-url))
+                                    (nnopds-koreader-user "komga-key")
+                                    (nnopds-koreader-password "test-password"))))
+                     (gnus)
+                     (unless (gnus-group-browse-foreign-server (car gnus-secondary-select-methods))
+                       (error "Could not browse Komga"))
+                     (when (nnopds--connection-closed nnopds--connection) (error "Komga connection is closed"))
+                     (unless (eq (plist-get (nnopds--connection-progress nnopds--connection) :protocol) 'koreader)
+                       (error "KOReader settings were lost"))
+                     (unless (= 1 (length (nnopds--connection-catalog nnopds--connection)))
+                       (error "Book missing"))
+                     (nnopds-refresh-catalog "komga")
+                     (nnopds-request-close)))
+                 (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+                                       "--eval" (prin1-to-string form))))
+            (ert-info ((format "Session %d: %s" session (buffer-string))) (should (= status 0)))))
+        ;; First startup fetches once; subsequent startup and browsing use cache.
+        ;; The explicit refresh in each session still makes one HTTP request.
+        (should (= (+ 2 session) (length (nnopds-test--requests opds-root))))))))
+
 (ert-deftest nnopds-test-http-binary-redirect-and-credential-scope ()
   (nnopds-test--with-server
     (let ((response (nnopds--request connection "GET" (nnopds--url "/redirect" opds-url))))
