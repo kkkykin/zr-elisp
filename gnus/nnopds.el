@@ -763,6 +763,7 @@ SERVER defaults to the current OPDS server."
                '("\\`nnopds[+:]"
                  (display . all)
                  (gnus-large-newsgroup nil)
+                 (gnus-summary-goto-unread 'never)
                  (mm-text-html-renderer 'nnepub--render-html)
                  (gnus-show-threads nil)
                  (gnus-article-sort-functions '(gnus-article-sort-by-number))

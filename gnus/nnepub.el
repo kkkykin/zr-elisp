@@ -642,7 +642,14 @@ Use numbered chapter links when BY-NUMBER is non-nil."
                     (user-error "EPUB chapter belongs to another group"))
                   (unless (gnus-summary-goto-article (string-to-number id) nil t)
                     (user-error "EPUB chapter not found: %s" id)))
-              (gnus-select-group-with-message-id group id))
+              ;; Gnus restores an absent display parameter as explicit nil,
+              ;; which would mask this backend's default on the next visit.
+              (let ((display (assq 'display (gnus-info-params (gnus-get-info group)))))
+                (unwind-protect
+                    (gnus-select-group-with-message-id group id)
+                  (if display
+                      (gnus-group-set-parameter group 'display (cdr display))
+                    (gnus-group-remove-parameter group 'display)))))
             (with-current-buffer gnus-article-buffer (nnepub--goto-fragment fragment))))
       (shr-browse-url event))))
 
@@ -654,6 +661,8 @@ Use numbered chapter links when BY-NUMBER is non-nil."
 (with-eval-after-load 'gnus-sum
   (add-to-list 'gnus-parameters
                '("\\`nnepub[+:]"
+                 (display . all)
+                 (gnus-summary-goto-unread 'never)
                  (mm-text-html-renderer 'nnepub--render-html)
                  (gnus-show-threads nil)
                  (gnus-article-sort-functions '(gnus-article-sort-by-number))

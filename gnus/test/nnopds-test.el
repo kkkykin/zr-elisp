@@ -242,9 +242,15 @@
             (nnopds-browse-read)
             (with-current-buffer gnus-summary-buffer
               (should (equal (mapcar #'mail-header-number gnus-newsgroup-headers) '(1 2 3 4)))
+              (should (eq gnus-summary-goto-unread 'never))
               (should (= gnus-current-article 1))
               (with-current-buffer gnus-article-buffer
                 (should (string-match-p "中文内容 α" (buffer-string))))
+              (save-excursion (gnus-summary-mark-as-read 2 gnus-read-mark))
+              (gnus-summary-next-unread-article)
+              (should (= gnus-current-article 2))
+              (gnus-summary-prev-unread-article)
+              (should (= gnus-current-article 1))
               (gnus-summary-exit)))
           (should (= loads 1))
           (should (= hashes 1)))

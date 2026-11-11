@@ -357,6 +357,7 @@
                  (with-current-buffer gnus-summary-buffer
                    (unless (and (derived-mode-p 'gnus-summary-mode)
                                 (not gnus-show-threads)
+                                (eq gnus-summary-goto-unread 'never)
                                 (eq mm-text-html-renderer 'nnepub--render-html))
                      (error "EPUB group parameters: mode=%S threads=%S renderer=%S group=%S params=%S"
                             major-mode gnus-show-threads mm-text-html-renderer
@@ -407,6 +408,20 @@
                                (unless (cl-subsetp '(1 2) (range-uncompress
                                                           (gnus-info-read (gnus-get-info group))))
                                  (error "Read marks were not restored after restarting Gnus"))
+                               (with-current-buffer gnus-summary-buffer
+                                 (unless (equal (mapcar #'mail-header-number gnus-newsgroup-headers)
+                                                '(1 2 3 4))
+                                   (error "Read chapters after restarting Gnus: %S"
+                                          (mapcar #'mail-header-number gnus-newsgroup-headers)))
+                                 (gnus-summary-goto-subject 1 t)
+                                 (gnus-summary-select-article nil nil nil 1)
+                                 (gnus-summary-next-unread-article)
+                                 (unless (= gnus-current-article 2)
+                                   (error "Navigation skipped the read chapter"))
+                                 (gnus-summary-prev-unread-article)
+                                 (unless (= gnus-current-article 1)
+                                   (error "Backward navigation skipped the read chapter"))
+                                 (gnus-summary-exit))
                                (nnepub-request-close)
                                (princ "nnepub-integration-ok"))))))
         (with-temp-buffer

@@ -107,6 +107,7 @@
 ;;;###autoload
 (defun zr-gnus-article-follow-next-page (&optional lines)
   "Show the next screen of Follow columns, or select the next Gnus article.
+Article selection follows `gnus-summary-goto-unread' in the summary.
 With a prefix argument, scroll LINES display lines and stop at the
 article boundary.  This command also works in the article's summary
 when the visible article has `zr-gnus-article-follow-mode' enabled."
@@ -120,6 +121,7 @@ when the visible article has `zr-gnus-article-follow-mode' enabled."
 ;;;###autoload
 (defun zr-gnus-article-follow-prev-page (&optional lines)
   "Show the previous screen of Follow columns, or select the previous article.
+Article selection follows `gnus-summary-goto-unread' in the summary.
 With a prefix argument, scroll LINES display lines and stop at the
 article boundary.  This command also works in the article's summary
 when the visible article has `zr-gnus-article-follow-mode' enabled."

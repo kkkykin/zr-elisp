@@ -277,68 +277,80 @@
                           (1+ article) (1+ article)))
           (dotimes (line 100) (insert (format "Article %d line %03d\n" (1+ article) line)))
           (insert "\n")))
-      (with-temp-buffer
-        (let* ((form
-                `(progn
-                   (require 'gnus)
-                   (require 'gnus-group)
-                   (require 'gnus-sum)
-                   (require 'nndoc)
-                   (require 'zr-gnus-article-follow-test)
-                   (setq gnus-directory ,(expand-file-name "News")
-                         gnus-home-directory ,default-directory
-                         gnus-startup-file ,(expand-file-name ".newsrc")
-                         gnus-init-file nil gnus-site-init-file nil
-                         gnus-select-method '(nnnil "")
-                         gnus-secondary-select-methods nil
-                         gnus-use-dribble-file nil
-                         gnus-save-newsrc-file nil
-                         gnus-show-threads nil
-                         gnus-summary-goto-unread 'never)
-                   (gnus-no-server)
-                   (gnus-group-read-ephemeral-group
-                    "follow-test" '(nndoc ,mailbox (nndoc-article-type mbox)) t)
-                   (with-current-buffer gnus-summary-buffer
-                     (gnus-summary-goto-subject 1 t)
-                     (gnus-summary-select-article nil nil nil 1))
-                   (select-window (get-buffer-window gnus-article-buffer))
-                   (delete-other-windows)
-                   (split-window-right)
-                   (zr-gnus-article-follow-test--with-display
-                     (zr-gnus-article-follow-mode 1)
-                     (follow-redisplay)
-                     (let ((windows (follow-all-followers)))
-                       (dotimes (_ 8)
-                         (when (= (zr-gnus-article-follow-test--article) 1)
-                           (zr-gnus-article-follow-next-page)))
-                       (should (= (zr-gnus-article-follow-test--article) 2))
-                       (should (equal windows (follow-all-followers)))
-                       (should-not (get-buffer-window gnus-summary-buffer))
-                       (should (= (window-start (car windows)) (point-min)))
-                       (should (> (window-start (cadr windows)) (point-min)))
-                       (zr-gnus-article-follow-prev-page)
-                       (should (= (zr-gnus-article-follow-test--article) 1))
-                       (should (equal windows (follow-all-followers)))
-                       ;; Paging from a visible summary uses the same group.
-                       (let ((summary-window (split-window (car windows) nil 'below)))
-                         (set-window-buffer summary-window gnus-summary-buffer)
-                         (select-window (car windows))
-                         (follow-redisplay)
-                         (dotimes (_ 12)
+      (dolist (setting '(never nil t))
+        (with-temp-buffer
+          (let* ((next (if (eq setting 'never) 2 3))
+                 (form
+                  `(progn
+                     (require 'gnus)
+                     (require 'gnus-group)
+                     (require 'gnus-sum)
+                     (require 'nndoc)
+                     (require 'zr-gnus-article-follow-test)
+                     (setq gnus-directory ,(expand-file-name "News")
+                           gnus-home-directory ,default-directory
+                           gnus-startup-file ,(expand-file-name ".newsrc")
+                           gnus-init-file nil gnus-site-init-file nil
+                           gnus-select-method '(nnnil "")
+                           gnus-secondary-select-methods nil
+                           gnus-use-dribble-file nil
+                           gnus-save-newsrc-file nil
+                           gnus-show-threads nil
+                           ;; Only the summary's local setting should apply.
+                           gnus-summary-goto-unread ',(if (eq setting 'never) t 'never))
+                     (gnus-no-server)
+                     (gnus-group-read-ephemeral-group
+                      "follow-test" '(nndoc ,mailbox (nndoc-article-type mbox)) t)
+                     (with-current-buffer gnus-summary-buffer
+                       (setq-local gnus-summary-goto-unread ',setting)
+                       (gnus-summary-goto-subject 1 t)
+                       (gnus-summary-select-article nil nil nil 1)
+                       (save-excursion (gnus-summary-mark-as-read 2 gnus-read-mark)))
+                     (select-window (get-buffer-window gnus-article-buffer))
+                     (delete-other-windows)
+                     (split-window-right)
+                     (zr-gnus-article-follow-test--with-display
+                       (zr-gnus-article-follow-mode 1)
+                       (follow-redisplay)
+                       (let ((windows (follow-all-followers)))
+                         (dotimes (_ 8)
                            (when (= (zr-gnus-article-follow-test--article) 1)
-                             (with-selected-window summary-window
-                               (zr-gnus-article-follow-next-page))))
-                         (should (= (zr-gnus-article-follow-test--article) 2))
-                         (should (equal windows (follow-all-followers (car windows)))))))
-                   (princ "article-follow-integration-ok")))
-               (status (call-process invocation-name nil t nil "--batch" "-Q"
-                                     "-L" workspace "-L" root
-                                     "-L" (expand-file-name "test" workspace)
-                                     "-L" zr-gnus-article-follow-test--directory
-                                     "--eval" (prin1-to-string form))))
-          (ert-info ((buffer-string))
-            (should (eq status 0))
-            (should (string-match-p "article-follow-integration-ok" (buffer-string)))))))))
+                             (zr-gnus-article-follow-next-page)))
+                         (should (= (zr-gnus-article-follow-test--article) ,next))
+                         (should (equal windows (follow-all-followers)))
+                         (should-not (get-buffer-window gnus-summary-buffer))
+                         (should (= (window-start (car windows)) (point-min)))
+                         (should (> (window-start (cadr windows)) (point-min)))
+                         (with-current-buffer gnus-summary-buffer
+                           (unless (eq gnus-summary-goto-unread 'never)
+                             (save-excursion
+                               (gnus-summary-mark-article 1 gnus-unread-mark))))
+                         (zr-gnus-article-follow-prev-page)
+                         (should (= (zr-gnus-article-follow-test--article) 1))
+                         (should (equal windows (follow-all-followers)))
+                         (with-current-buffer gnus-summary-buffer
+                           (save-excursion
+                             (gnus-summary-mark-article 3 gnus-unread-mark)))
+                         ;; Paging from a visible summary uses the same group.
+                         (let ((summary-window (split-window (car windows) nil 'below)))
+                           (set-window-buffer summary-window gnus-summary-buffer)
+                           (select-window (car windows))
+                           (follow-redisplay)
+                           (dotimes (_ 12)
+                             (when (= (zr-gnus-article-follow-test--article) 1)
+                               (with-selected-window summary-window
+                                 (zr-gnus-article-follow-next-page))))
+                           (should (= (zr-gnus-article-follow-test--article) ,next))
+                           (should (equal windows (follow-all-followers (car windows)))))))
+                     (princ "article-follow-integration-ok")))
+                 (status (call-process invocation-name nil t nil "--batch" "-Q"
+                                       "-L" workspace "-L" root
+                                       "-L" (expand-file-name "test" workspace)
+                                       "-L" zr-gnus-article-follow-test--directory
+                                       "--eval" (prin1-to-string form))))
+            (ert-info ((format "goto-unread=%S: %s" setting (buffer-string)))
+              (should (eq status 0))
+              (should (string-match-p "article-follow-integration-ok" (buffer-string))))))))))
 
 (provide 'zr-gnus-article-follow-test)
 ;;; zr-gnus-article-follow-test.el ends here
