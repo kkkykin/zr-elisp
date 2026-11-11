@@ -147,6 +147,9 @@ Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest �
 curl 直接写入文件，避免把整个 EPUB 在 Emacs 内存中来回复制；同一次打开只计算
 一次完整文件摘要。Messages 显示下载、缓存校验、解压和章节索引阶段及耗时，
 便于区分网络等待与本地处理。`nnopds-request-timeout` 限制每个 HTTP 请求。
+打开书籍失败时，Messages 会显示具体 HTTP 状态或 curl 错误；Gnus 的
+“group couldn't be activated” 是后续的通用报错。最近一次 backend 错误也可用
+`M-: (nnheader-get-report-string 'nnopds) RET` 查看。
 
 EPUB 和单书索引使用书籍 ID 的摘要作短文件名，临时文件使用固定短前缀，
 避免 Windows 用户目录较深时超出路径长度限制。

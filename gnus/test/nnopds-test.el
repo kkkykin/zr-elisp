@@ -257,6 +257,25 @@
         (should (equal (mapcar (lambda (request) (plist-get request :path)) (nnopds-test--requests opds-root))
                        '("/catalog" "/content/one.epub")))))))
 
+(ert-deftest nnopds-test-browser-logs-download-failures ()
+  (dolist (subscribe '(nil t))
+    (nnopds-test--with-server
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (when subscribe (nnopds-browse-subscribe))
+        (nnopds-test--write opds-root "download-failure.txt" "503")
+        (let ((message-log-max t)
+              (start (with-current-buffer (messages-buffer) (copy-marker (point-max))))
+              (reason "EPUB download: HTTP 503"))
+          (unwind-protect
+              (progn
+                (should-error (nnopds-browse-select))
+                (should (equal reason (nnheader-get-report-string 'nnopds)))
+                (with-current-buffer (messages-buffer)
+                  (should (string-match-p (regexp-quote (concat "nnopds: " reason))
+                                          (buffer-substring-no-properties start (point-max))))))
+            (set-marker start nil)))))))
+
 (ert-deftest nnopds-test-directory-only-catalog-is-browsed-one-level-at-a-time ()
   (nnopds-test--with-server
     (nnopds-test--write opds-root "directory-only.txt" "enabled")
@@ -856,6 +875,7 @@
                        (lambda (_response error) (cl-incf calls) (setq failure error)))
       (nnopds-test--wait (lambda () failure))
       (should (= calls 1))
+      (should (string-match-p "curl: (28)" failure))
       (should-not (nnopds--connection-processes connection)))))
 
 (ert-deftest nnopds-test-http-file-output-redirects-and-ownership ()

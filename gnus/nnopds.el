@@ -71,10 +71,13 @@ visited pages.  Gnus startup only reads the local publication index."
 (nnoo-define-basics nnopds)
 
 (defmacro nnopds--report-errors (&rest body)
-  "Run BODY and report failures to Gnus."
+  "Run BODY, returning nil and reporting failures to Gnus and Messages."
   (declare (indent 0) (debug t))
   `(condition-case err (progn ,@body)
-     (error (nnheader-report 'nnopds "%s" (error-message-string err)))))
+     (error
+      (let ((reason (error-message-string err)))
+        (message "nnopds: %s" reason)
+        (nnheader-report 'nnopds "%s" reason)))))
 
 (defun nnopds--url (href &optional base)
   "Resolve HTTP HREF against BASE, without its fragment."
@@ -211,7 +214,11 @@ are bounded and credentials are only sent to the configured origin."
                                         (condition-case failure
                                             (if (not (and (eq (process-status proc) 'exit)
                                                           (zerop (process-exit-status proc))))
-                                                (finish nil "HTTP request failed or timed out")
+                                                (let ((detail (with-current-buffer buffer
+                                                                (string-trim (buffer-string)))))
+                                                  (finish nil (if (string-empty-p detail)
+                                                                  "HTTP request failed or timed out"
+                                                                (concat "HTTP request failed: " detail))))
                                               (let* ((response (nnopds--response head-file body-file output-file))
                                                      (status (plist-get response :status))
                                                      (location (cdr (assoc "location" (plist-get response :headers)))))
