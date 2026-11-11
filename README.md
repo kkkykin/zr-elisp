@@ -39,6 +39,15 @@ Minor mode 用参数 `-1` 关闭。路径、快捷键及站点配置由个人初
 `zr-windows-powershell-program` 可指定 PowerShell 的名称或路径，默认自动查找；
 `zr-windows-powershell-arguments` 可调整快捷方式注册和 TTS 共用的启动参数。
 
+`M-x zr-window-follow-columns` 按 `fill-column` 将当前 buffer 分栏，并启用
+Follow 连续显示。栏数按实际可显示的字符数计算，包含边缘、滚动条等占用的
+空间；窗口较窄时保留单栏。已有分栏和其他 buffer 的窗口会保留，重复调用
+不再拆分现有栏。`C-u M-x zr-window-follow-columns` 先占满 frame，再重新
+计算栏数。无效的 `fill-column` 或分栏失败不会改变原有窗口布局。
+
+`zr-window-arrange-follow-columns` 提供同样的布局操作，返回分栏窗口列表，
+供其他模块复用；Follow 状态由调用方管理。
+
 `zr-terminal` 提供公共 OSC 编码、发送和 OSC 777 通知，`zr-wezterm` 负责
 `ZRTransport` JSON 分块传输。发送接口默认使用当前终端 frame，也可传入明确的
 frame，适合 daemon 的多个终端连接。目标必须是存活的终端 frame。

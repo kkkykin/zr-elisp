@@ -7,6 +7,7 @@
 ;;; Commentary:
 
 ;; Set `tab-line-tabs-buffer-group-function' to `zr-window-tab-group' as desired.
+;; Use `zr-window-follow-columns' to read a buffer in adjacent columns.
 
 ;;; Code:
 
@@ -30,21 +31,62 @@
                      zr-window-excluded-buffers)
       (tab-line-tabs-buffer-group-by-mode buffer))))
 
-(defun zr-window-follow-columns (&optional only)
-  "Split into columns of at least `fill-column' characters and enable Follow.
-With ONLY, first delete other windows."
-  (interactive "P")
-  (when only
-    (delete-other-windows))
-  (unless (> fill-column 0)
-    (user-error "fill-column must be positive"))
+(defun zr-window--create-follow-columns ()
+  "Split the selected window, keeping at least `fill-column' text columns."
   (let* ((width (window-total-width))
-         (count (max 1 (/ width (max fill-column window-min-width))))
-         (column (/ width count))
-         (window (selected-window)))
-    (dotimes (_ (1- count))
-      (setq window (split-window window column 'right))))
-  (follow-mode 1))
+         (count (max 1 (min (/ width (window-min-size nil t))
+                           (floor (/ (window-max-chars-per-line) fill-column)))))
+         (configuration (current-window-configuration))
+         (done (= count 1)))
+    (while (not done)
+      (let ((window (selected-window)))
+        (dotimes (i (1- count))
+          (setq window
+                (split-window window
+                              (ceiling (window-total-width window) (- count i))
+                              'right))))
+      ;; Each new column has its own margins, fringes and divider.  Measure
+      ;; the resulting text area rather than guessing their combined cost.
+      (if (cl-every (lambda (window)
+                      (>= (window-max-chars-per-line window) fill-column))
+                    (follow-all-followers))
+          (setq done t)
+        (set-window-configuration configuration)
+        (setq count (1- count)
+              done (= count 1))))))
+
+(defun zr-window-arrange-follow-columns (&optional only)
+  "Arrange the current buffer's Follow columns and return their windows.
+Split a single window into columns with at least `fill-column' visible
+text characters each, accounting for window decorations.  Keep a narrow
+window as one column.  Preserve existing columns and other buffers' windows.
+With ONLY, delete other windows before arranging new columns.
+This function leaves `follow-mode' unchanged."
+  (unless (and (integerp fill-column) (> fill-column 0))
+    (user-error "fill-column must be positive"))
+  (let ((configuration (current-window-configuration))
+        complete)
+    (unwind-protect
+        (progn
+          (when only
+            (delete-other-windows))
+          (unless (cdr (follow-all-followers))
+            (zr-window--create-follow-columns))
+          (setq complete t))
+      (unless complete
+        (set-window-configuration configuration))))
+  (follow-all-followers))
+
+;;;###autoload
+(defun zr-window-follow-columns (&optional only)
+  "Arrange columns based on `fill-column' and enable Follow.
+Preserve existing columns and other buffers' windows.  With ONLY (the
+prefix argument), delete other windows and calculate the columns anew.
+A narrow window stays as one column."
+  (interactive "P")
+  (let ((windows (zr-window-arrange-follow-columns only)))
+    (unless follow-mode (follow-mode 1))
+    (follow-redisplay windows)))
 
 (provide 'zr-window)
 ;;; zr-window.el ends here

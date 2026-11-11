@@ -273,18 +273,22 @@ group。类型会自动识别，EPUB 2/3 的章节、图片和脚注处理复用
 
 ## zr-gnus-article-follow
 
-`zr-gnus-article-follow-mode` 让 Gnus 按整个 Follow 窗口组翻页，适用于普通
-文章和 EPUB 章节。在 article buffer 中启用，再手动分栏，或使用已有的
-`zr-window-follow-columns`：
+`zr-gnus-article-follow` 一步进入分栏阅读，适用于普通文章和 EPUB 章节：
 
 ```elisp
 (require 'zr-gnus-article-follow)
-(require 'zr-window)
 ```
 
-在正文窗口执行 `M-x zr-gnus-article-follow-mode` 和
-`M-x zr-window-follow-columns`。后者按 `fill-column` 决定栏数；带前缀参数
-时先删除其他窗口。已有分栏可以直接启用新模式，无需重新分栏。
+在 Summary 或正文窗口执行 `M-x zr-gnus-article-follow`。在 Summary 中调用
+时打开光标所在文章并切到正文，自动启用模式，按正文的 `fill-column` 决定
+栏数；已有正文分栏会保留，重复调用不会增加栏数。窗口较窄时保留单栏。
+选择另一篇文章时从开头显示，同一篇文章重复调用时保留当前阅读位置。
+`C-u M-x zr-gnus-article-follow` 先让正文占满 frame，再重新分栏。
+布局复用 `zr-window-arrange-follow-columns`，按实际可显示字符数计算栏宽，
+包含边缘、滚动条等开销；加载 Gnus Follow 模块时会自动加载 `zr-window`。
+
+也可以在正文中单独启用 `zr-gnus-article-follow-mode`，只开启 Follow 和翻页
+按键，分栏由自己安排；适合已有布局或通过 hook 启用。
 
 模式通过局部 keymap 将正文的 `SPC` / `C-v` 映射到
 `zr-gnus-article-follow-next-page`，将 `DEL` / `S-SPC` / `M-v` 映射到

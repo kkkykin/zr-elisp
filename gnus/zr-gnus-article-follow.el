@@ -5,9 +5,9 @@
 
 ;;; Commentary:
 
-;; Enable `zr-gnus-article-follow-mode' in a Gnus article buffer, then split
-;; it into columns, manually or with `zr-window-follow-columns'.  Its local
-;; keymap makes SPC and DEL page through the entire Follow window group.
+;; Run `zr-gnus-article-follow' in a summary or article buffer to enable
+;; Follow paging and arrange the article into columns.  Its local keymap
+;; makes SPC and DEL page through the entire Follow window group.
 ;; The paging commands switch articles through Gnus and restore the column
 ;; layout afterwards.  They can also be called from the article's summary.
 ;; This works with any Gnus article, including EPUB chapters.
@@ -16,6 +16,7 @@
 
 (require 'follow)
 (require 'gnus-art)
+(require 'zr-window)
 
 (defgroup zr-gnus-article-follow nil
   "Read Gnus articles in Follow windows."
@@ -25,6 +26,39 @@
 (defvar zr-gnus-article-follow-mode)
 (defvar-local zr-gnus-article-follow--previous-follow nil)
 (defvar shr-width)
+
+;;;###autoload
+(defun zr-gnus-article-follow (&optional only)
+  "Read the current Gnus article in Follow columns.
+In a summary, select the article at point and switch to its window.
+Enable `zr-gnus-article-follow-mode' and split a single article window
+into columns based on `fill-column'.  Keep existing article columns.
+Show a newly selected article from its beginning.
+With ONLY (the prefix argument), delete other windows before splitting."
+  (interactive "P" gnus-summary-mode gnus-article-mode)
+  (let ((previous gnus-article-current))
+    (cond
+     ((derived-mode-p 'gnus-summary-mode)
+      (let* ((buffer (get-buffer gnus-article-buffer))
+             (windows (and buffer (get-buffer-window-list buffer nil (selected-frame)))))
+        (if windows
+            (save-window-excursion (gnus-summary-select-article))
+          (gnus-summary-select-article))
+        (let ((article (get-buffer gnus-article-buffer)))
+          (unless article
+            (user-error "No article to display"))
+          (dolist (window windows)
+            (set-window-buffer window article))
+          (if-let* ((window (get-buffer-window article (selected-frame))))
+              (select-window window)
+            (pop-to-buffer article)))))
+     ((not (derived-mode-p 'gnus-article-mode))
+      (user-error "Use this command in a Gnus summary or article buffer")))
+    (zr-window-arrange-follow-columns only)
+    (zr-gnus-article-follow-mode 1)
+    (if (equal previous gnus-article-current)
+        (follow-redisplay)
+      (zr-gnus-article-follow--align))))
 
 (defun zr-gnus-article-follow--window ()
   "Return the current article's visible Follow window, or signal an error."
@@ -89,14 +123,13 @@
 
 (defun zr-gnus-article-follow--change-article (key)
   "Execute Gnus' summary KEY and restore this article's column layout."
-  (let ((configuration (current-window-configuration))
-        (buffer (current-buffer))
+  (let ((buffer (current-buffer))
         (article gnus-article-current)
         (shr-width (or (bound-and-true-p shr-width)
                        (max 1 (1- (window-body-width))))))
     (unwind-protect
-        (gnus-article-read-summary-keys nil key)
-      (set-window-configuration configuration)
+        (save-window-excursion
+          (gnus-article-read-summary-keys nil key))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (when (and zr-gnus-article-follow-mode follow-mode)
@@ -146,8 +179,8 @@ when the visible article has `zr-gnus-article-follow-mode' enabled."
 ;;;###autoload
 (define-minor-mode zr-gnus-article-follow-mode
   "Read a Gnus article using its entire Follow window group.
-This enables `follow-mode'; split the article window into as many
-columns as desired, for example with `zr-window-follow-columns'.
+This enables `follow-mode' without changing the window layout.
+Use `zr-gnus-article-follow' to select an article and arrange columns.
 SPC/C-v and DEL/S-SPC/M-v use the mode's own paging commands.
 Disabling the mode restores the previous state of `follow-mode'
 and leaves the window layout in place."
