@@ -15,9 +15,11 @@
   "Ordered display rules for speaker names and message text.
 Rules are evaluated in order.  When a rule yields a replacement,
 evaluation stops if that rule specifies :break non-nil; otherwise
-subsequent rules continue to be evaluated.  The first effective rule
-specifying :replace-sender sets the displayed nickname.  Multiple rules
-yielding text replacements are applied in order, skipping overlapping ranges.
+subsequent rules continue to be evaluated.  Each regexp rule processes all
+non-overlapping matches from left to right before :break takes effect.
+The first effective sender replacement sets the displayed nickname.
+Text replacements are applied in rule and match order, skipping overlapping
+ranges.  All rules match the original source, before display changes.
 Each rule supports :selector (a `zr-erc-selector-match-p' selector),
 :source (sender, body, text, or (:tag TAG), default text), :break (default nil),
 and an optional :regexp.
@@ -25,8 +27,9 @@ and an optional :regexp.
 Strings use `replace-match' backreferences, with case preserved.  Functions
 receive the original context plus :source, :value and a :groups vector
 (group 0 is the full match), and return a literal string or nil.
-Nil leaves that part unchanged; an empty string hides it.  :replace-text
-replaces the entire regexp match using its original source offsets.
+Functions are called for each match.  Nil leaves that part unchanged; an
+empty string hides it.  :replace-text replaces the entire regexp match using
+its original source offsets.
 Text changes require a verified correspondence with the displayed body or
 message; they never locate a match by searching for the captured fragment.
 Tag and sender sources support nickname replacement only.  Without :regexp,
@@ -55,8 +58,9 @@ Nil disables display changes.  This option supports buffer-local values."
   "Return replacement descriptors for matching rules in `zr-erc-display-rules'.
 Evaluate rules in order.  When a rule yields a sender or text replacement,
 stop evaluating further rules if the rule has :break non-nil; otherwise
-continue matching.  The first effective rule specifying :replace-sender sets
-:sender.  All effective text replacements are collected."
+continue matching.  Process all non-overlapping matches of each rule before
+stopping.  The first effective sender replacement sets :sender.
+All effective text replacements are collected in rule and match order."
   (save-match-data
     (let ((case-fold-search nil)
           sender sender-info texts stopped)
@@ -69,9 +73,11 @@ continue matching.  The first effective rule specifying :replace-sender sets
                      (plist-get context (intern (concat ":" (symbol-name source)))))
        when (and value (zr-erc-selector-match-p (plist-get rule :selector) context))
        do
-       (let ((regexp (plist-get rule :regexp)))
-         (when (if regexp (string-match regexp value)
-                 (set-match-data (list 0 (length value))) t)
+       (let ((regexp (plist-get rule :regexp))
+             (pos 0))
+         (while (and (<= pos (length value))
+                     (if regexp (string-match regexp value pos)
+                       (set-match-data (list 0 (length value))) t))
            (let* ((groups (vconcat
                            (cl-loop for group below
                                     (max (/ (length (match-data)) 2)
@@ -86,6 +92,8 @@ continue matching.  The first effective rule specifying :replace-sender sets
                          (plist-get rule :replace-sender) data value))
                   (text (zr-erc-display--replacement
                          (plist-get rule :replace-text) data value)))
+             ;; Advance past empty matches; without a regexp, match only once.
+             (setq pos (if (and regexp (< begin end)) end (1+ end)))
              (setq name (and name
                              (or (string-empty-p name) (not (string-blank-p name)))
                              (not (string-match-p "[[:cntrl:]]" name)) name))

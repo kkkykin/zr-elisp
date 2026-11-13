@@ -195,7 +195,7 @@ the conversation buffer; no rejoin is needed:
 ```elisp
 (setq-local zr-erc-display-rules
             '((:selector (:sender "\\`nichi_bot\\'")
-               :source body :regexp "\\[\\([^]]+\\)\\][ \t]*"
+               :source body :regexp "\\`\\[\\([^]]+\\)\\][ \t]*"
                :replace-sender "\\1" :replace-text "")))
 (erc-zr-display-mode 1)
 ```
@@ -204,12 +204,15 @@ For `<nichi_bot> [nami.yti] 强大v5`, the nickname becomes `nami.yti` and
 the matched prefix `[nami.yti] ` is hidden, leaving `<nami.yti> 强大v5`.
 Both `:replace-sender` and `:replace-text` are optional: nil or omitted means
 no change, while an empty string hides that part. Rules are evaluated in order.
+Each regexp rule processes all non-overlapping matches from left to right
+against the original source. For example, a URL rule replaces every URL in
+the message. Use an anchored regexp when only a message prefix should match.
 By default, matching rules continue to be evaluated (`:break nil`), allowing
 separate rules for speaker renaming and text replacement. Specify `:break t` on
-a rule to stop evaluating further rules once it yields a replacement. The first
-effective rule specifying `:replace-sender` sets the nickname; multiple text
-replacements apply in order, skipping overlapping ranges. Matching rules with
-neither action are skipped.
+a rule to stop evaluating further rules after processing all of its matches,
+if it yields a replacement. The first effective sender replacement sets the
+nickname; text replacements apply in rule and match order, skipping overlapping
+ranges. Matching rules with neither action are skipped.
 
 String replacements use Emacs `replace-match` backreferences: `"\\1"` selects
 group 1, `"\\&"` selects the full match, and `"user: \\1"` adds a prefix.
@@ -229,8 +232,9 @@ Either replacement may instead be a function receiving a context plist. It
 contains the original `:sender`, `:body`, `:text`, `:tags`, `:target`, `:server`
 and `:network`, plus `:source` (the selected source), `:value` (its full string),
 and `:groups` (a vector of captures, starting with the complete match at 0).
-Unmatched optional groups are nil. Each callback receives its own context
-copy and need not depend on dynamic match data. Return nil for no change or
+Unmatched optional groups are nil. Callbacks run for each match, using that
+match's captures. Each callback receives its own context copy and need not
+depend on dynamic match data. Return nil for no change or
 a string for literal display; backreferences in returned strings are not
 expanded. For example:
 

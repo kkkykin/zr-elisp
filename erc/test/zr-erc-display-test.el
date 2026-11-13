@@ -313,11 +313,12 @@
         (insert "[Next line]\n")
         (setq erc-insert-marker (copy-marker (point-max)))
         (erc-zr-display-mode 1)
+        (should (equal (get-char-property speaker 'display) "First"))
         (goto-char speaker)
         (search-forward "[First]")
         (should (equal (get-char-property (- (point) 7) 'display) ""))
         (search-forward "[Second]")
-        (should-not (get-char-property (- (point) 8) 'display))
+        (should (equal (get-char-property (- (point) 8) 'display) ""))
         (search-forward "[Next line]")
         (should-not (get-char-property (- (point) 11) 'display))
         ;; No successful extraction means no body hiding.
@@ -562,11 +563,14 @@
         (goto-char (point-min))
         (search-forward "[Name]")
         (should (equal (get-char-property (- (point) 6) 'display) ""))
-        ;; A match inside color syntax must not move to the literal digits later.
+        ;; Skip the match inside color syntax, but replace the literal digits.
         (setq-local zr-erc-display-rules
-                    '((:source body :regexp "11" :replace-text "wrong")))
+                    '((:source body :regexp "11" :replace-text "LITERAL")))
         (zr-erc-display-refresh)
-        (should-not (overlays-in (point-min) (point-max))))
+        (should-not (get-char-property (- (point) 6) 'display))
+        (search-forward "11")
+        (should (equal (get-char-property (- (point) 2) 'display) "LITERAL"))
+        (should (= (length (overlays-in (point-min) (point-max))) 1)))
       (setq-local zr-erc-display-rules
                   '((:source body :regexp "\\[Same\\]" :replace-text "wrong")))
       (let ((start (zr-erc-display-test--formatted
@@ -965,6 +969,95 @@ Measure a separate buffer containing the literal rendered text."
         (should (equal (get-char-property 2 'display) "Alice"))
         (search-backward "https")
         (should (equal (get-char-property (point) 'display) "[看看]"))))))
+
+(ert-deftest zr-erc-display-repeated-rule-matches ()
+  (let ((zr-erc-display-rules
+         '((:source body :regexp "\\[\\([^]]+\\)\\]"
+            :replace-sender "\\1" :replace-text "<\\1>"))))
+    (let* ((body "[First][Second] [First]")
+           (result (zr-erc-display--match (list :body body)))
+           (texts (plist-get result :texts)))
+      (should (equal (plist-get result :sender) "First"))
+      (should (equal (mapcar (lambda (item) (plist-get item :text)) texts)
+                     '("<First>" "<Second>" "<First>")))
+      (should (equal (mapcar (lambda (item)
+                              (list (plist-get item :begin) (plist-get item :end)))
+                            texts)
+                     '((0 7) (7 15) (16 23))))
+      (should (cl-every (lambda (item) (equal (plist-get item :value) body)) texts)))))
+
+(ert-deftest zr-erc-display-repeated-matches-break-after-rule ()
+  (let ((zr-erc-display-rules
+         '((:source body :regexp "\\[[^]]+\\]" :replace-text "" :break t)
+           (:source sender :replace-sender "fallback"))))
+    (let ((result (zr-erc-display--match '(:sender "bot" :body "[One] [Two]"))))
+      (should-not (plist-get result :sender))
+      (should (equal (mapcar (lambda (item) (plist-get item :text))
+                            (plist-get result :texts))
+                     '("" ""))))))
+
+(ert-deftest zr-erc-display-repeated-match-callbacks ()
+  (let* ((context '(:sender "bot" :body "[skip] [Name] [Other]"))
+         (calls nil)
+         (zr-erc-display-rules
+          (list (list :source 'body :regexp "\\[\\([^]]+\\)\\]" :break t
+                      :replace-sender
+                      (lambda (data)
+                        (let ((name (aref (plist-get data :groups) 1)))
+                          (push name calls)
+                          ;; A callback's searches must not disturb the next match.
+                          (string-match "unrelated" "unrelated")
+                          (unless (equal name "skip") name)))
+                      :replace-text "<\\1>")
+                '(:source sender :replace-sender "fallback"))))
+    (let ((result (zr-erc-display--match context)))
+      (should (equal (nreverse calls) '("skip" "Name" "Other")))
+      (should (equal (plist-get result :sender) "Name"))
+      (should (equal (mapcar (lambda (item) (plist-get item :text))
+                            (plist-get result :texts))
+                     '("<skip>" "<Name>" "<Other>"))))))
+
+(ert-deftest zr-erc-display-repeated-matches-empty-and-whole-source ()
+  (let ((zr-erc-display-rules
+         '((:source body :regexp "x*" :replace-text "X"))))
+    (let ((result (zr-erc-display--match '(:body "axbxx"))))
+      (should (equal (mapcar (lambda (item)
+                              (list (plist-get item :begin) (plist-get item :end)))
+                            (plist-get result :texts))
+                     '((1 2) (3 5)))))
+    (should-not (zr-erc-display--match '(:body ""))))
+  (let ((zr-erc-display-rules
+         '((:source body :replace-text "whole"))))
+    (should (equal (zr-erc-display--match '(:body "one two"))
+                   '(:sender nil :text "whole" :source body :value "one two" :begin 0 :end 7)))
+    (should-not (zr-erc-display--match '(:body "")))))
+
+(ert-deftest zr-erc-display-repeated-text-overlays-and-replies ()
+  (let ((erc-modules nil)
+        (erc-zr-reply-mode t))
+    (dolist (source '(body text))
+      (let ((zr-erc-display-rules
+             (list (list :source source :regexp "\\[Same\\]" :replace-text "ALL")
+                   ;; Later overlapping candidates must not override this rule.
+                   (list :source source :regexp "Same" :replace-text "LATER"))))
+        (with-temp-buffer
+          (erc-mode)
+          (erc-zr-display-mode 1)
+          (zr-erc-display-test--formatted "[Same] then [Same]" "[Same] then [Same]" "a")
+          (let ((child (zr-erc-display-test--relay "b" "Reply" "a"))
+                (original (buffer-string)))
+            (dotimes (_ 2)
+              (goto-char (point-min))
+              (dotimes (_ 4)
+                (search-forward "[Same]")
+                (should (equal (get-char-property (- (point) 6) 'display) "ALL"))
+                (should (equal (get-char-property (- (point) 5) 'display) "ALL")))
+              (should (equal (buffer-string) original))
+              (button-activate (button-at child))
+              (should (= (point) (point-min)))
+              (erc-zr-display-mode -1)
+              (should-not (overlays-in (point-min) (point-max)))
+              (erc-zr-display-mode 1))))))))
 
 (provide 'zr-erc-display-test)
 ;;; zr-erc-display-test.el ends here
