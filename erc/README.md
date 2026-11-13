@@ -369,7 +369,8 @@ display replacements and do not get this alignment update.
 ```
 
 In a connected channel or query, `M-x yank-media` uploads a clipboard image
-or local files copied from a file manager, then sends each resulting link.
+or local files copied from a file manager, then appends each resulting link
+to the input area for review and manual sending, adding a space when needed.
 Supported file selections are `text/uri-list` and GNOME, KDE and MATE copied
 files. A clipboard “cut” operation uploads a copy and leaves the source intact.
 `M-x zr-erc-upload-file` selects a local file directly and also works without
@@ -377,14 +378,16 @@ enabling the module. With a prefix argument, it prompts for the backend.
 
 The default backend uses curl to upload to Litterbox with `reqtype=fileupload`,
 `time=1h` and `fileToUpload=@FILE`. Curl must be installed. Uploads run
-asynchronously; successful links are sent as literal chat messages in the
-originating conversation through ERC's normal send pipeline. Draft input is
-preserved. If the connection or conversation target changes while uploading,
-the link is reported in the error message instead of being sent.
+asynchronously. Set `zr-erc-upload-auto-send` to non-nil to send each link
+as a literal chat message through ERC's normal send pipeline, preserving
+draft input. If the connection or conversation target changes while
+uploading, the link is reported in the error message instead of being
+inserted or sent.
 
 These settings also support `setq-local` in a conversation:
 
 ```elisp
+(setq zr-erc-upload-auto-send t) ; Optional: send links directly.
 (setq zr-erc-upload-litterbox-time "1h") ; Also 12h, 24h or 72h.
 (setq zr-erc-upload-link-format "[%f](%u)") ; Default: "%u"; %% means %.
 (setq zr-erc-upload-curl-arguments '("--proxy" "http://127.0.0.1:7890"))
@@ -394,8 +397,9 @@ These settings also support `setq-local` in a conversation:
         (format "%s: %s" (file-name-nondirectory file) url)))
 ```
 
-The formatter is captured when uploading starts and must return a nonempty
-single line. `zr-erc-upload-timeout` defaults to 120 seconds.
+The formatter and auto-send setting are captured when uploading starts.
+The formatter must return a nonempty single line.
+`zr-erc-upload-timeout` defaults to 120 seconds.
 `M-x zr-erc-upload-cancel` cancels pending uploads in the current buffer.
 Closing the buffer or disabling the module also cancels its uploads.
 Temporary clipboard images and curl response buffers are cleaned up on

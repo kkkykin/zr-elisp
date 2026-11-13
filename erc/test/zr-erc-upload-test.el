@@ -21,7 +21,8 @@
            (with-current-buffer ,buffer
              (setq major-mode 'erc-mode)
              (setq-local erc-default-recipients '("#uploads")
-                         erc-server-process 'test-connection)
+                         erc-server-process 'test-connection
+                         erc-input-marker (copy-marker (point)))
              (cl-letf (((symbol-function 'erc-server-process-alive) (lambda () t)))
                ,@body))
          (when (buffer-live-p ,buffer) (kill-buffer ,buffer))))))
@@ -102,7 +103,43 @@
     (dolist (bad '("" " \t " "%u\nother" "%u\r" "%u\0" "%z"))
       (should-error (zr-erc-upload--message url file bad)))))
 
-(ert-deftest zr-erc-upload-custom-backend-origin-and-draft ()
+(ert-deftest zr-erc-upload-inserts-in-origin-input ()
+  (let ((file (make-temp-file "erc-upload-source-")) callback sent)
+    (unwind-protect
+        (zr-erc-upload-test--conversation
+          (insert "history\n")
+          (erc-display-prompt nil nil "ERC> ")
+          (insert "draft")
+          (let* ((zr-erc-upload-backend 'custom)
+                 (zr-erc-upload-backends
+                  `((custom . ,(lambda (_path done)
+                                 (setq callback done)
+                                 #'ignore))))
+                 (job (zr-erc-upload-file file)))
+            ;; Use the latest draft but the setting from upload startup.
+            (setq-local zr-erc-upload-auto-send t)
+            (insert " more")
+            (goto-char 4)
+            (setq buffer-read-only t)
+            (save-restriction
+              (narrow-to-region (point-min) 5)
+              (cl-letf (((symbol-function 'erc-send-input)
+                         (lambda (&rest _) (setq sent t))))
+                (with-temp-buffer (funcall callback "https://example.test/a" nil))
+                (funcall callback "https://example.test/duplicate" nil))
+              (should (= (point) 4))
+              (should (= (point-max) 5)))
+            (should-not sent)
+            (should (equal (erc-user-input) "draft more https://example.test/a"))
+            (should (equal (buffer-substring-no-properties (point-min) erc-input-marker)
+                           "history\nERC> "))
+            (should buffer-read-only)
+            (should (zr-erc-upload--job-done job))
+            (should-not zr-erc-upload--jobs)
+            (should (file-exists-p file))))
+      (delete-file file))))
+
+(ert-deftest zr-erc-upload-auto-send-origin-and-draft ()
   (let ((file (make-temp-file "erc-upload-source-")) callback origin sent
         (cancellations 0))
     (unwind-protect
@@ -111,6 +148,7 @@
           (insert "draft text")
           (goto-char 4)
           (setq buffer-read-only t)
+          (setq-local zr-erc-upload-auto-send t)
           (let* ((zr-erc-upload-backend 'custom)
                  (zr-erc-upload-link-format "/say %f %u")
                  (zr-erc-upload-backends
@@ -121,6 +159,7 @@
                                  (lambda () (cl-incf cancellations))))))
                  (job (zr-erc-upload-file file)))
             (setq zr-erc-upload-link-format "changed")
+            (setq-local zr-erc-upload-auto-send nil)
             (cl-letf (((symbol-function 'erc-send-input)
                        (lambda (text &rest _)
                          (should (eq (current-buffer) origin))
@@ -156,7 +195,8 @@
           (zr-erc-upload--start file nil t)
           (should-not (file-exists-p file))
           (should (= cancellations 1))
-          (should (equal sent '("https://example.test/a"))))))
+          (should-not sent)
+          (should (equal (erc-user-input) "https://example.test/a")))))
     (dolist (backend '(missing failure))
       (let ((file (make-temp-file "erc-upload-owned-"))
             (zr-erc-upload-backend backend)
@@ -187,6 +227,7 @@
           (zr-erc-upload-cancel)
           (funcall callback "https://example.test/late" nil)
           (should-not sent)
+          (should (equal (erc-user-input) ""))
           (should-not (file-exists-p file))
           (should (= cancellations 1))
           ;; Killing the originating buffer also cancels and deletes the image.
@@ -198,19 +239,21 @@
   (let* ((directory (make-temp-file "erc-upload-files-" t))
          (file (expand-file-name "a b.txt" directory))
          (uri (concat "file://" (string-replace " " "%20" file)))
-         uploaded)
+         uploaded sent)
     (unwind-protect
         (progn
           (write-region "source" nil file nil 'silent)
           (zr-erc-upload-test--conversation
             (zr-erc-upload--install)
+            (insert "draft ")
             (let ((zr-erc-upload-backend 'custom)
                   (zr-erc-upload-backends
                    `((custom . ,(lambda (path done)
                                   (push path uploaded)
                                   (funcall done "https://example.test/a" nil)
                                   #'ignore)))))
-              (cl-letf (((symbol-function 'erc-send-input) (lambda (&rest _) t)))
+              (cl-letf (((symbol-function 'erc-send-input)
+                         (lambda (&rest _) (setq sent t))))
                 (dolist (type zr-erc-upload--file-types)
                   (let ((data (concat (if (eq type 'text/uri-list) "# comment\r\n" "cut\n")
                                       uri "\n" uri "\0")))
@@ -219,6 +262,10 @@
                                  (if (eq requested 'TARGETS) (vector type) data))))
                       (yank-media))))
                 (should (= (length uploaded) 4))
+                (should-not sent)
+                (should (equal (erc-user-input)
+                               (concat "draft "
+                                       (string-join (make-list 4 "https://example.test/a") " "))))
                 (should (cl-every (lambda (path) (equal path file)) uploaded))
                 (should (equal (zr-erc-upload-test--read file) "source"))
                 (setq uploaded nil)
@@ -228,10 +275,13 @@
                 (should-not uploaded)))))
       (delete-directory directory t))))
 
-(ert-deftest zr-erc-upload-changed-conversation-does-not-send ()
-  (dolist (change '(target connection disconnected))
+(ert-deftest zr-erc-upload-changed-conversation-does-not-deliver ()
+  (dolist (case '((nil target) (nil connection) (nil disconnected)
+                  (t target) (t connection) (t disconnected)))
     (zr-erc-upload-test--conversation
-      (let* ((file (make-temp-file "erc-upload-owned-")) callback sent
+      (let* ((zr-erc-upload-auto-send (car case))
+             (change (cadr case))
+             (file (make-temp-file "erc-upload-owned-")) callback sent
              (zr-erc-upload-backend 'custom)
              (zr-erc-upload-backends
               `((custom . ,(lambda (_file done) (setq callback done) #'ignore)))))
@@ -244,6 +294,7 @@
                   ((symbol-function 'erc-send-input) (lambda (&rest _) (setq sent t))))
           (funcall callback "https://example.test/a" nil))
         (should-not sent)
+        (should (equal (erc-user-input) ""))
         (should-not (file-exists-p file))
         (should-not zr-erc-upload--jobs)))))
 
@@ -291,7 +342,8 @@
                             (lambda (text &rest _) (push text sent) t)))
                    (let ((job (zr-erc-upload-file file)))
                      (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job))))
-                   (should (equal sent '("https://example.test/cutie.png")))
+                   (should-not sent)
+                   (should (equal (erc-user-input) "https://example.test/cutie.png"))
                    (should-not zr-erc-upload--jobs)
                    (should-not (zr-erc-upload-test--buffers))
                    (let ((request (car (funcall requests))))
@@ -321,6 +373,7 @@
                  (zr-erc-upload-cancel))
                (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job))))
              (should-not sent)
+             (should (equal (erc-user-input) ""))
              (should-not (file-exists-p file))
              (should-not zr-erc-upload--jobs)
              (should-not (zr-erc-upload-test--buffers)))))))))

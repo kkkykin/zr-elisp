@@ -1,4 +1,4 @@
-;;; zr-erc-upload.el --- Upload files and send links in ERC -*- lexical-binding: t; -*-
+;;; zr-erc-upload.el --- Upload files and share links in ERC -*- lexical-binding: t; -*-
 
 ;; Package-Requires: ((emacs "31.1"))
 ;; Keywords: comm
@@ -7,8 +7,9 @@
 
 ;; Enable `erc-zr-upload-mode' to use `yank-media' for clipboard images
 ;; and files copied from a file manager.  `zr-erc-upload-file' also works
-;; without enabling the module.  Uploads run asynchronously and send a
-;; literal message in the originating conversation, preserving draft input.
+;; without enabling the module.  Uploads run asynchronously and append links
+;; to the originating conversation's input.  Set `zr-erc-upload-auto-send'
+;; to send them directly instead, preserving draft input.
 ;; See `zr-erc-upload-backends' and `zr-erc-upload-link-format' to customize.
 
 ;;; Code:
@@ -23,7 +24,7 @@
 (require 'format-spec)
 
 (defgroup zr-erc-upload nil
-  "Upload files and send their links in ERC."
+  "Upload files and share their links in ERC."
   :group 'erc :prefix "zr-erc-upload-")
 
 (defcustom zr-erc-upload-backends '((litterbox . zr-erc-upload-litterbox))
@@ -39,8 +40,16 @@ originating ERC buffer, so they can use buffer-local configuration."
   "Backend selected from `zr-erc-upload-backends'."
   :type 'symbol)
 
+(defcustom zr-erc-upload-auto-send nil
+  "Whether to send upload links directly instead of inserting them in input.
+By default, append each link to the originating conversation's draft,
+separated by a space when needed.  Non-nil sends each link as a literal
+message through ERC, preserving draft input.  The setting is captured
+when uploading starts and can be buffer-local."
+  :type 'boolean)
+
 (defcustom zr-erc-upload-link-format "%u"
-  "Format of the literal message sent after uploading.
+  "Format of the link inserted or sent after uploading.
 A string template supports %u for the URL, %f for the file's basename,
 and %% for a percent sign.  Alternatively, a function receives the URL
 and original filename and returns the message.  The format is captured
@@ -69,7 +78,7 @@ when uploading starts.  The result must be a nonempty single line."
   :type '(choice (const "1h") (const "12h") (const "24h") (const "72h")))
 
 (cl-defstruct zr-erc-upload--job
-  buffer target connection file temporary format cancel done)
+  buffer target connection file temporary format auto-send cancel done)
 
 (defvar-local zr-erc-upload--jobs nil)
 (defvar-local zr-erc-upload--yank-state nil)
@@ -180,7 +189,7 @@ Return a cancellation function.  See `zr-erc-upload-backends'."
     text))
 
 (defun zr-erc-upload--complete (job url reason)
-  "Send JOB's uploaded URL, or report failure REASON, and release JOB."
+  "Insert or send JOB's URL, or report failure REASON, and release JOB."
   (unless (zr-erc-upload--job-done job)
     (unwind-protect
         (condition-case err
@@ -201,8 +210,18 @@ Return a cancellation function.  See `zr-erc-upload-backends'."
                   (save-excursion
                     (save-restriction
                       (widen)
-                      (unless (erc-send-input text)
-                        (error "ERC did not send the upload link")))))))
+                      (if (zr-erc-upload--job-auto-send job)
+                          (unless (erc-send-input text)
+                            (error "ERC did not send the upload link"))
+                        (unless (and (markerp erc-input-marker)
+                                     (eq (marker-buffer erc-input-marker)
+                                         (current-buffer)))
+                          (error "ERC input area is unavailable"))
+                        (goto-char (point-max))
+                        (when (and (> (point) erc-input-marker)
+                                   (not (memq (char-before) '(?\s ?\t ?\n ?\r))))
+                          (insert " "))
+                        (insert text)))))))
           (error (message "ERC upload failed: %s%s"
                           (error-message-string err)
                           (if (and (stringp url) (string-match-p "\\`https?://" url))
@@ -210,12 +229,13 @@ Return a cancellation function.  See `zr-erc-upload-backends'."
       (zr-erc-upload--cleanup job))))
 
 (defun zr-erc-upload--start (file &optional backend temporary)
-  "Upload FILE through BACKEND and send its link in this conversation.
+  "Upload FILE through BACKEND and share its link in this conversation.
+Insert the link in input unless `zr-erc-upload-auto-send' is non-nil.
 If TEMPORARY is non-nil, take ownership of FILE and delete it afterwards."
   (let ((job (make-zr-erc-upload--job
               :buffer (current-buffer) :target (erc-default-target)
               :connection erc-server-process :file file :temporary temporary
-              :format zr-erc-upload-link-format)))
+              :format zr-erc-upload-link-format :auto-send zr-erc-upload-auto-send)))
     (condition-case err
         (progn
           (zr-erc-upload--check)
@@ -238,7 +258,8 @@ If TEMPORARY is non-nil, take ownership of FILE and delete it afterwards."
 
 ;;;###autoload
 (defun zr-erc-upload-file (file &optional backend)
-  "Upload local FILE and send its link in the current ERC conversation.
+  "Upload local FILE and insert its link in the current ERC conversation.
+If `zr-erc-upload-auto-send' is non-nil, send the link directly instead.
 With a prefix argument, choose BACKEND from `zr-erc-upload-backends'."
   (interactive
    (progn
@@ -310,7 +331,7 @@ With a prefix argument, choose BACKEND from `zr-erc-upload-backends'."
 
 ;;;###autoload (autoload 'erc-zr-upload-mode "zr-erc-upload" nil t)
 (define-erc-module zr-upload nil
-  "Upload clipboard images and files and send their links."
+  "Upload clipboard images and files and share their links."
   ((add-hook 'erc-mode-hook #'zr-erc-upload--install)
    (erc-buffer-list #'zr-erc-upload--install))
   ((remove-hook 'erc-mode-hook #'zr-erc-upload--install)
