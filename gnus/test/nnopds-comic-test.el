@@ -2,7 +2,9 @@
 
 ;;; Code:
 
-(require 'nnopds-test (expand-file-name "nnopds-test.el" (file-name-directory (or load-file-name buffer-file-name))))
+(require 'nnopds-test-helpers
+         (expand-file-name "nnopds-test-helpers.el"
+                           (file-name-directory (or load-file-name buffer-file-name))))
 (require 'nnopds-comic)
 
 (defmacro nnopds-comic-test--with-server (kind &rest body)
