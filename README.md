@@ -9,7 +9,7 @@
 | --- | --- | --- |
 | 仓库根目录 | 编辑、词典、进程、网络、媒体和平台工具 | `test/` |
 | [`org/`](org/README.md) | Org 编辑、Babel、Tangle、导出、链接、协议和 Org-srs | `org/test/` |
-| [`erc/`](erc/README.md) | ERC 消息显示、补全、链接和回复 | `erc/test/` |
+| [`erc/`](erc/README.md) | ERC 消息显示、补全、链接、回复和文件上传 | `erc/test/` |
 | [`gnus/`](gnus/README.md) | Gnus 后端和本地 EPUB 阅读 | `gnus/test/` |
 | [`scripts/`](scripts/) | 按模块存放的 PowerShell 等辅助脚本 | 随对应模块测试 |
 

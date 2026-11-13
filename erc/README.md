@@ -18,8 +18,8 @@ Alternatively, configure ERC's module list before connecting:
 (add-to-list 'erc-modules 'zr-reply)
 ```
 
-The other global module names are `zr-stitch`, `zr-completion`, `zr-link`
-and `zr-notifications`.
+The other global module names are `zr-stitch`, `zr-completion`, `zr-link`,
+`zr-upload` and `zr-notifications`.
 After changing `erc-modules` in an existing session, run
 `M-x erc-update-modules` to enable listed global modules. If they are already
 enabled through this list or earlier configuration, changing rules takes
@@ -359,6 +359,67 @@ their reserved width. Use `erc-fill-wrap-nudge` for interactive adjustments
 and `erc-fill-wrap-refill-buffer` after font-size changes. Ordinary
 `erc-fill-variable` and `erc-fill-static` still insert hard breaks before
 display replacements and do not get this alignment update.
+
+## File uploads
+
+```elisp
+(require 'zr-erc-upload)
+(erc-zr-upload-mode 1)
+;; Or add zr-upload to erc-modules before connecting.
+```
+
+In a connected channel or query, `M-x yank-media` uploads a clipboard image
+or local files copied from a file manager, then sends each resulting link.
+Supported file selections are `text/uri-list` and GNOME, KDE and MATE copied
+files. A clipboard “cut” operation uploads a copy and leaves the source intact.
+`M-x zr-erc-upload-file` selects a local file directly and also works without
+enabling the module. With a prefix argument, it prompts for the backend.
+
+The default backend uses curl to upload to Litterbox with `reqtype=fileupload`,
+`time=1h` and `fileToUpload=@FILE`. Curl must be installed. Uploads run
+asynchronously; successful links are sent as literal chat messages in the
+originating conversation through ERC's normal send pipeline. Draft input is
+preserved. If the connection or conversation target changes while uploading,
+the link is reported in the error message instead of being sent.
+
+These settings also support `setq-local` in a conversation:
+
+```elisp
+(setq zr-erc-upload-litterbox-time "1h") ; Also 12h, 24h or 72h.
+(setq zr-erc-upload-link-format "[%f](%u)") ; Default: "%u"; %% means %.
+(setq zr-erc-upload-curl-arguments '("--proxy" "http://127.0.0.1:7890"))
+;; A formatter may instead receive the URL and original filename:
+(setq zr-erc-upload-link-format
+      (lambda (url file)
+        (format "%s: %s" (file-name-nondirectory file) url)))
+```
+
+The formatter is captured when uploading starts and must return a nonempty
+single line. `zr-erc-upload-timeout` defaults to 120 seconds.
+`M-x zr-erc-upload-cancel` cancels pending uploads in the current buffer.
+Closing the buffer or disabling the module also cancels its uploads.
+Temporary clipboard images and curl response buffers are cleaned up on
+completion, cancellation and failure.
+
+`zr-erc-upload-backends` is an alist of names and upload functions; choose the
+default with `zr-erc-upload-backend`. To add a backend:
+
+```elisp
+(add-to-list 'zr-erc-upload-backends '(my-host . my-upload-function))
+(setq zr-erc-upload-backend 'my-host)
+```
+
+An upload function receives a local filename and a callback, runs in the
+originating ERC buffer, and returns a function that cancels and releases its
+resources. It calls the callback with `(URL nil)` on success or
+`(nil ERROR-STRING)` on failure; synchronous callbacks are also supported.
+Successful URLs must use HTTP or HTTPS. Litterbox is the supplied backend.
+Tests exercise curl against a local HTTP server without uploading to Litterbox:
+
+```sh
+make test TEST_FILE=erc/test/zr-erc-upload-test.el
+make check-parens byte-compile FILE=erc/zr-erc-upload.el
+```
 
 ## Link rules, images and downloads
 
