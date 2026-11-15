@@ -7,7 +7,8 @@
 
 ;; An OPDS 2 catalog is a server, a publication is a group, and its reading
 ;; resources are articles.  EPUB files are downloaded on first group entry
-;; and read using nnepub; Divina comics stream images page by page.
+;; and read using nnepub; Divina comics stream images page by page.  PDFs
+;; are downloaded before opening and rendered on demand with mutool.
 ;; Catalog directories and pagination are browsed
 ;; on demand, with visited pages cached locally.  Reading formats and
 ;; progress protocols have separate interfaces for future extensions.
@@ -283,7 +284,8 @@ are bounded and credentials are only sent to the configured origin."
   document)
 
 (defvar nnopds--formats '((comic "application/divina+json")
-                         (epub "application/epub+zip"))
+                         (epub "application/epub+zip")
+                         (pdf "application/pdf"))
   "Reading formats in preference order and their link media types.")
 
 (cl-defgeneric nnopds--load-publication (format connection publication)
@@ -520,8 +522,9 @@ SERVER defaults to the current OPDS server."
          (publication (or (gethash (or group nnopds--group) (nnopds--connection-publications connection))
                           (error "OPDS publication unavailable; browse its catalog directory: %s" group))))
     (when (and load (not (nnopds--publication-data publication)))
-      (when (eq (nnopds--publication-format publication) 'comic)
-        (require 'nnopds-comic))
+      (pcase (nnopds--publication-format publication)
+        ('comic (require 'nnopds-comic))
+        ('pdf (require 'nnopds-pdf)))
       (setf (nnopds--publication-data publication)
             (nnopds--load-publication (nnopds--publication-format publication) connection publication)
             (nnopds--publication-count publication)

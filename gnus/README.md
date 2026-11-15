@@ -6,15 +6,16 @@
 
 `nnopds` 将 OPDS 2 目录作为 Gnus server，每本书是一个 group，正文资源
 是 articles。首次进入 EPUB 时下载整本，章节、图片及脚注处理复用 `nnepub`。
-漫画通过 Divina manifest 按页取图，一张原始图片对应一篇 article。
-HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`，漫画阅读需要支持
-相应图片格式的图形 Emacs。
+漫画通过 Divina manifest 按页取图；PDF 首次打开时完整下载，再按需渲染。
+漫画和 PDF 的一张原始页面对应一篇 article，共用分页阅读器。
+HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`；PDF 需要提供
+`run` 和 `draw` 命令的 `mutool`；页图阅读需要支持相应图片格式的图形 Emacs。
 
 更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译这些
 模块；它们共享的结构体访问器会在编译时内联：
 
 ```sh
-make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-comic.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
+make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-paged.el gnus/nnopds-comic.el gnus/nnopds-pdf.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
 ```
 
 ```elisp
@@ -56,7 +57,7 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 的模板。支持 `{query}`、`{?query}`、`{&query}`，关键词按 UTF-8 编码，模板中
 未填写的可选字段会省略；服务器提供的库名、代理路径和其他参数会保留。
 搜索结果沿用目录的分页、订阅和阅读命令，`b` 返回搜索前的页面和光标位置，
-`g` 刷新结果。搜索只取书目，不下载 EPUB 或漫画图片。
+`g` 刷新结果。搜索只取书目，不下载 EPUB、PDF 或漫画图片。
 
 [Komga](https://github.com/gotson/komga/blob/master/komga/src/main/kotlin/org/gotson/komga/interfaces/api/opds/v2/Opds2Controller.kt)
 使用 `search{?query}`，搜索结果按系列、书籍、集合和阅读列表分组；当前每类
@@ -73,10 +74,10 @@ calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 
 可通过书籍的 group 参数覆盖。
 `gnus-large-newsgroup` 不限制书籍章节；目录按服务器提供的分页逐页加载。
 
-首次列出书籍时只取书目，章节数或漫画页数在首次打开后更新。支持直接 EPUB
-取书链接以及 `application/divina+json` 漫画 manifest 链接；两者都有时优先
-使用漫画流式入口。EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注沿用
-`nnepub`。
+首次列出书籍时只取书目，章节数或页数在首次打开后更新。支持
+`application/divina+json` 漫画 manifest、`application/epub+zip` 和
+`application/pdf` 取书链接；多个入口同时存在时按漫画、EPUB、PDF 的顺序选择。
+EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注沿用 `nnepub`。
 
 Komga 的 OPDS 2 目录在 `self` 链接提供漫画 manifest，用户需要页面流式阅读
 权限。calibre 9.18 及以上在 `/opds` 的 acquisition 链接提供 CBZ 漫画 manifest；
@@ -84,53 +85,62 @@ CBR/CB7 的整包下载链接不会作为流式漫画列出。后端沿 manifest
 读取图片，保留页 URL 的库名、版本等参数，并从原始和 alternate 链接中选择
 Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest 和 API key。
 
-漫画在 summary 和 article buffer 启用局部 `nnopds-comic-mode`：
+漫画和 PDF 在 summary 和 article buffer 启用局部 `nnopds-paged-mode`：
 
 | 按键 | 操作 |
 | --- | --- |
-| `1` / `2` | 单页 / 双页 |
-| `c` | 切换封面单页 |
+| `1` / `2` | 同屏最多一页 / 两页 |
+| `v` | 设置同屏最多 N 页 |
+| `c` | 切换封面独占 |
+| `l` | 切换横页独占 |
 | `r` | 切换左向右 / 右向左 |
-| `n` / `SPC` | 下一页或下一跨页 |
-| `p` / `DEL` | 上一页或上一跨页 |
-| 左右箭头 | 按阅读方向翻页 |
+| `n` / `SPC` | 按阅读顺序前进一屏 |
+| `p` / `DEL` | 按阅读顺序后退一屏 |
+| 左右箭头 | 按阅读方向移动一个原始页码 |
 | `j` | 跳到指定原始页码 |
-| `g` | 重试当前页的取图失败 |
+| `g` | 重试当前页面的下载或渲染失败 |
 
-默认单页，封面独占一跨页，方向使用 manifest 的 `readingProgression`；缺少方向
-时使用左向右。`M-x nnopds-comic-set-direction` 可选择 `auto`，恢复跟随书籍方向。
-这些设置可在阅读中切换，并按书保存。可配置未读漫画的初始布局：
+默认同屏一页。漫画默认封面、横页独占，方向跟随 manifest 的
+`readingProgression`；PDF 默认允许封面和横页与其他页并排，方向跟随 OPDS
+书目，缺少方向时使用左向右。`M-x nnopds-paged-set-direction` 可选择 `auto`。
+设置可在阅读中切换，并按书保存。可配置新书的初始显示：
 
 ```elisp
-(setq nnopds-comic-layout 'double
-      nnopds-comic-cover-single t
-      nnopds-comic-direction 'auto)
+(setq nnopds-paged-visible-pages 3
+      nnopds-paged-cover-single t
+      nnopds-paged-landscape-single t
+      nnopds-paged-direction 'auto)
 ```
 
-封面单页时按 `[1] [2,3] [4,5] …` 配对，关闭后按 `[1,2] [3,4] …` 配对；
-右向左只改变屏幕上的左右摆放，原始图片次序和 article 编号始终保持不变。
-切换布局会保留当前原始页，例如第 3 页切换双页后显示 `[2,3]`，切回仍是第 3 页。
-横向图片独占一跨页，末尾剩一页也单独显示。图片按窗口宽高等比缩放，双页使用
-相同显示高度；调整窗口大小后自动重新排版。calibre 未提供页尺寸时在显示图片后
-识别，并记录尺寸以保持后续会话的配对。
+当前原始页码是显示起点：N=3 时，`[2,3,4]` 按前进方向键变为 `[3,4,5]`，
+按 `SPC` 则变为 `[5,6,7]`。右向左只反转屏幕摆放和箭头含义，
+`SPC/DEL` 始终沿原始阅读顺序前后翻屏。切换 N 或方向保留当前原始页码。
+独占页会截断显示范围，末尾不足 N 页时显示剩余页面。页面按窗口宽高等比缩放，
+并排页使用相同高度，窗口调整后重新适配。漫画未提供尺寸时按需读取图片尺寸。
 
-打开漫画只取 manifest 和当前图片，列页目录或 Gnus 预取文章不会下载图片。
-`nnopds-comic-prefetch-pages` 默认预取后续 4 张图片，设为 0 可关闭预取；
-`nnopds-comic-max-requests` 默认限制每本漫画最多 2 个并发请求。
-图片以临时文件下载，成功后替换正式缓存，关闭阅读或服务器时取消待处理请求。
-已经读取的 manifest 和图片可跨会话、离线复用，缓存保存在同一账号的 `.comic/`
-目录中；内存中的解码图片只保留当前显示的一页或两页。
+打开漫画只取 manifest，列页目录或 Gnus 预取文章不会下载图片。PDF 首次进入
+group 时完整下载并验证文件，通过 `mutool run` 获取裁剪、旋转和 UserUnit
+生效后的页尺寸，再由 `mutool draw` 渲染 PNG。渲染按目标像素宽度向上取
+256、512、1024、2048 等档位，窗口变化跨越档位时重新渲染并复用已有缓存。
+可用 `nnopds-pdf-mutool-program` 指定可执行文件路径。
+PDF 当前采用页图阅读；文字选择、搜索和注释需要额外文本层，要求密码的 PDF
+会报告打开失败。
 
-漫画自动保存本地原始页码，重新进入 group 时恢复。完整显示当前阅读单元后才
-保存位置，并处理双页的两篇 article 的已读标记；预取、失败请求和布局重绘
-不会推进位置，Gnus 的收藏等手动标记保留。漫画目前使用本地位置，
-`nnopds-koreader-*`、`nnopds-resume` 和 `nnopds-save-position` 的服务器同步
-继续用于 EPUB。
+`nnopds-paged-prefetch-pages` 默认准备显示范围前后各 4 页，设为 0 可关闭；
+`nnopds-paged-max-requests` 默认限制每本书最多 2 个并发取图或渲染任务。
+任务写入临时文件，成功后替换正式缓存，关闭阅读或服务器时取消待处理任务。
+漫画 manifest 和图片缓存位于账号目录下的 `.comic/`，PDF 原文件、页尺寸索引
+和渲染图片位于 `.pdf/`，均可跨会话、离线复用。解码图片只保留当前显示的页面。
+
+漫画和 PDF 自动保存本地原始页码，重新进入 group 时恢复。完整显示当前页面
+范围后才保存位置、更新其中 articles 的已读标记；预取、失败任务和布局重绘
+不会推进位置，Gnus 的收藏等手动标记保留。`nnopds-koreader-*`、
+`nnopds-resume` 和 `nnopds-save-position` 的服务器同步继续用于 EPUB。
 
 取书请求优先接受 EPUB 媒体类型，也接受通用二进制响应；下载内容按 EPUB
 解析，支持将附件标为 `application/octet-stream` 的接口。
 
-目录、EPUB 和漫画缓存保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
+目录、EPUB、漫画和 PDF 缓存保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
 不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
 没有缓存时也不联网；首次浏览才请求根目录，进入未缓存的目录或分页时请求
 该页。默认重访目录和返回上级均使用缓存。新增书籍或版本更新后，在所在
@@ -194,7 +204,8 @@ spine 中的序号估算，实际跳转使用 XPointer。KOReader 没有条件�
 
 目录、阅读格式和同步协议分别处理。`nnopds-progress-protocol` 当前只支持
 `koreader`，配置项和协议读写接口保留，方便后续添加正式的 OPDS 同步协议。
-漫画的 Divina 读取和本地布局位于独立的 `nnopds-comic.el`，服务器漫画进度
+Divina 取图位于 `nnopds-comic.el`，PDF 下载和 MuPDF 适配位于 `nnopds-pdf.el`，
+共用布局、导航、调度与本地位置位于 `nnopds-paged.el`。服务器漫画和 PDF 进度
 协议可在现有位置接口上另行适配。
 
 ## nnepub
@@ -314,7 +325,7 @@ Gnus 的原有命令及函数保持不变。
 ## 检查
 
 ```sh
-make test TEST_FILE='gnus/test/nnepub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el'
+make test TEST_FILE='gnus/test/nnepub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el gnus/test/nnopds-pdf-test.el'
 make check-parens byte-compile FILE='$(wildcard gnus/*.el)'
 make clean
 ```
@@ -329,6 +340,7 @@ OPDS 测试启动本地 Python HTTP 服务，验证导航、分页、下载缓�
 无需外部服务器。
 漫画测试使用 Komga 与 calibre 的两种 manifest 链接形式、相对页 URL 和 Digest
 认证，验证流式缓存、并发预取、实时布局切换、已读标记、失败重试和本地恢复。
+PDF 测试使用真实 `mutool` 验证有效页尺寸、下载校验、按需渲染、分辨率缓存、
+整屏与逐页导航、失败重试、取消和离线重开。
 图像解码和显示能力在 nox Emacs 中使用替身，网络、图片文件和 Gnus 会话实际运行。
-未安装 `7zz`/`7z` 或 Emacs 不支持 libxml 时，
-需要这些依赖的测试会跳过。
+未安装 `7zz`/`7z`、`mutool` 或 Emacs 不支持 libxml 时，需要相应依赖的测试会跳过。

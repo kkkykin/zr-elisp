@@ -62,6 +62,46 @@ for name in ("one", "two"):
         archive.writestr("OEBPS/tiny.png", png)
 
 
+def pdf_document():
+    """A valid PDF with inherited boxes, crop, rotation and UserUnit."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Count 7 /MediaBox [0 0 200 300] /Kids ["
+        + b" ".join(f"{number} 0 R".encode() for number in range(3, 10)) + b"] >>",
+    ]
+    for number in range(1, 8):
+        extra = {2: "/CropBox [10 20 190 280] /Rotate 90",
+                 3: "/UserUnit 2", 4: "/MediaBox [0 0 400 200]"}.get(number, "")
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /Resources << >> /Contents {number + 9} 0 R {extra} >>".encode()
+        )
+    for number in range(1, 8):
+        content = f"0.{number} 0.3 0.4 rg 0 0 400 600 re f\n".encode()
+        objects.append(f"<< /Length {len(content)} >>\nstream\n".encode() + content + b"endstream")
+    result = bytearray(b"%PDF-1.7\n")
+    offsets = [0]
+    for number, obj in enumerate(objects, 1):
+        offsets.append(len(result))
+        result.extend(f"{number} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref = len(result)
+    result.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        result.extend(f"{offset:010d} 00000 n \n".encode())
+    result.extend(f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode())
+    return bytes(result)
+
+
+(root / "book.pdf").write_bytes(pdf_document())
+
+
+def pdf_publication():
+    return {"metadata": {"title": "测试 PDF", "author": "PDF 作者", "modified": "2026-11-15T00:00:00Z"},
+            "links": [
+                {"rel": "self", "href": "/publication/pdf", "type": "application/opds-publication+json"},
+                {"rel": "acquisition", "href": "/content/book.pdf", "type": "application/pdf"},
+            ]}
+
+
 def publication(name):
     revision = root / "revision.txt"
     modified = revision.read_text().strip() if revision.exists() else "2026-01-01T00:00:00Z"
@@ -206,7 +246,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(int(value), b"Download failed")
             return
         media_type = root / "download-media-type.txt"
-        content_type = media_type.read_text().strip() if media_type.exists() else "application/epub+zip"
+        content_type = (media_type.read_text().strip() if media_type.exists()
+                        else "application/pdf" if file.suffix == ".pdf" else "application/epub+zip")
         accepted = {value.split(";", 1)[0].strip() for value in self.headers.get("Accept", "*/*").split(",")}
         if content_type not in accepted and "*/*" not in accepted:
             self.respond(406, headers={"Accept": content_type})
@@ -322,6 +363,9 @@ class Handler(BaseHTTPRequestHandler):
         elif path in ("/catalog", "/komga/opds/v2/catalog", "/calibre/opds"):
             if path != "/catalog" and self.headers.get("Accept") != "application/opds+json":
                 self.respond(200, b"<feed>OPDS 1</feed>", "application/atom+xml")
+                return
+            if (root / "pdf-catalog.txt").exists():
+                self.json_response({"metadata": {"title": "PDF Library"}, "publications": [pdf_publication()]})
                 return
             if (root / "comic-catalog.txt").exists():
                 kind = (root / "comic-catalog.txt").read_text().strip()
