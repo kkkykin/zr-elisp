@@ -13,6 +13,7 @@
 (require 'url)
 (require 'url-http)
 (require 'iso8601)
+(require 'image)
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
 (defvar url-http-after-change-function)
@@ -227,6 +228,22 @@ When ONLY-RULE is non-nil, only consider that rule."
                      "[?#]")))))
     (if (string-empty-p name) "media" name)))
 
+(defun zr-erc-link--image-suffix (file)
+  "Give cached FILE a content-derived image suffix when it lacks one.
+Return its possibly renamed path.  Leave non-images unchanged."
+  (let ((case-fold-search t))
+    (unless (cl-some (lambda (entry) (string-match-p (car entry) file))
+                     image-type-file-name-regexps)
+      (when-let* ((type (with-temp-buffer
+                         (set-buffer-multibyte nil)
+                         (insert-file-contents-literally file nil 0 8192)
+                         (image-type-from-data (buffer-string))))
+                  (suffix (if (eq type 'postscript) "ps" (symbol-name type)))
+                  (name (concat file "." suffix)))
+        (rename-file file name)
+        (setq file name))))
+  file)
+
 (defun zr-erc-link--open-file (file item)
   "Open fetched FILE for ITEM in a separate buffer using its native mode."
   (let* ((enable-local-variables nil)
@@ -266,6 +283,9 @@ When ONLY-RULE is non-nil, only consider that rule."
                 (let ((coding-system-for-write 'no-conversion))
                   (write-region (1+ url-http-end-of-headers) (point-max)
                                 (zr-erc-link--job-raw job) nil 'silent))
+                (unless (zr-erc-link--job-destination job)
+                  (setf (zr-erc-link--job-raw job)
+                        (zr-erc-link--image-suffix (zr-erc-link--job-raw job))))
                 (cond
                  ((zr-erc-link--job-destination job)
                   (copy-file (zr-erc-link--job-raw job) (zr-erc-link--job-destination job)

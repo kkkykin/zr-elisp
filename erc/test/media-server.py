@@ -42,7 +42,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if self.path == "/slow":
             time.sleep(2)
-        body = (PNG if self.path == "/image.png" else
+        body = (PNG if (self.path == "/image.png"
+                       or self.path.startswith("/download?")) else
                 str(Handler.leaks).encode() if self.path == "/leak-count" else FILE)
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
