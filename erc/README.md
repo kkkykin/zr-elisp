@@ -425,7 +425,7 @@ make test TEST_FILE=erc/test/zr-erc-upload-test.el
 make check-parens byte-compile FILE=erc/zr-erc-upload.el
 ```
 
-## Link rules, images and downloads
+## Link rules, files and downloads
 
 ```elisp
 (require 'zr-erc-link)
@@ -449,40 +449,35 @@ inherits its value; an explicit nil overrides it. Values such as `:headers`
 and `:auth-source` are replaced as a whole. Defaults only affect rules that
 follow them. Parameters are captured when the message button is created.
 
-For example, prepend image and file defaults to the recognition rules:
+For example, prepend file defaults to the recognition rules:
 
 ```elisp
 (setq-local zr-erc-link-rules
-            (append
-             '((:type image
-                :headers (("X-Client" . "erc"))
-                :auth-source (:user "bridge") :auth-scheme bearer
-                :auto-show t :ffmpeg t :max-width 0.85 :max-height 0.6)
-               (:type file
-                :auth-source (:user "bridge") :auth-scheme bearer
-                :proxy inherit :dir "~/downloads/"
-                :headers (("X-Client" . "curl"))))
+            (cons
+             '(:type file
+               :headers (("X-Client" . "erc"))
+               :auth-source (:user "bridge") :auth-scheme bearer
+               :proxy inherit :dir "~/downloads/")
              zr-erc-link-rules))
 ```
 
-These entries configure all subsequent image/file rules in this buffer.
-A later image rule can use `:auto-show nil` or `:auth-source nil` to disable
-those inherited settings for its matches. Org and command rules do not
-inherit image/file settings. Keep matching rules in the list: a list
-containing only default entries does not create buttons.
+This entry configures all subsequent file rules in this buffer, including
+images. A later rule can use `:auth-source nil` to disable inherited
+credentials for its matches. Org and command rules do not inherit file
+settings. Keep matching rules in the list: a list containing only default
+entries does not create buttons.
 
 | `:type` | Action on RET/mouse-2 |
 | --- | --- |
-| `image` | Toggle an inline image from an HTTP(S) target |
-| `file` | Download an HTTP(S) target |
+| `file` | Fetch an HTTP(S) target and open it in a separate Emacs buffer |
 | `command` | Execute the target as one ERC slash command in the clicked buffer |
 | `org` | Pass the target to `org-link-open-from-string` from `ol` |
 
-The default rules recognize common image/file extensions and send ordinary
-HTTP(S) and `file:` links to Org. Org handles opening links using its existing
+The default file rule recognizes common image and other file extensions.
+Ordinary HTTP(S) and `file:` links go to Org, which uses its existing
 configuration; this module does not install or modify `org-link-parameters`.
-Custom Org link types need an appropriate `org` rule. Only image previews
-can run automatically; `command` and `org` always require activation.
+Custom Org link types need an appropriate `org` rule. All actions require
+explicit activation; receiving a message never fetches or opens its links.
 
 For a bridge's merged-forward message, put a command rule before the defaults:
 
@@ -507,52 +502,52 @@ An Org rule can also extract a target from surrounding text:
 '(:regexp "文档(\\([^)]*\\))" :replace "\\1" :type org)
 ```
 
-Recognized media links become buttons. RET/mouse-2 toggles an image preview or prompts
-for a file destination. `M-x zr-erc-link-show` toggles the image at point, or
-all image links overlapping the active region. With a prefix argument
-(`C-u M-x zr-erc-link-show`), it toggles images in the selected window's
-visible range, taking precedence over the region. If any targeted image is
-displayed or loading, all targeted previews are hidden and pending image
-requests canceled; otherwise, they are fetched and shown. This also hides
-automatically displayed images, even after their links have expired. Range
-previews skip file links and continue if an image has expired or a request
-fails. These manual previews work with automatic image fetching disabled.
+`M-x zr-erc-link-open` opens the recognized link at point, or searches backward
+for the nearest recognized link. It uses the same action as RET/mouse-2.
+File links fetch the original data asynchronously into a temporary file and
+open it with Emacs's native file logic. Emacs chooses the mode and displays
+images in that file's buffer. Nothing is inserted into the ERC buffer.
 
-`M-x zr-erc-link-download` saves either type. Downloads
-run asynchronously, and overwriting a file requires confirmation. Automatic
-image fetching is off by default; it can be enabled globally, per buffer, or
-per matching rule with `:auto-show t` in `zr-erc-link-rules`. Inline images
-need an Emacs display with image support; downloads
-also work in terminal Emacs.
+With an active region, `zr-erc-link-open` fetches every overlapping file link.
+With a prefix argument, it uses the selected window's visible range instead,
+even when the region is active. Command and Org links are skipped in ranges.
+After all requests finish, only the first successfully fetched file in message
+order opens in a buffer. The other files stay on disk without creating buffers.
+Expired links and failed requests do not stop the remaining files.
+
+All fetched files share one dedicated temporary directory for the Emacs
+session. In Image mode, native `n`/`p` browse images in this directory and skip
+non-image filenames. Other files can be opened manually from its Dired buffer.
+
+`M-x zr-erc-link-download` saves the file link at point, including images,
+without opening it. Downloads run asynchronously, and overwriting a file
+requires confirmation.
 
 Set `:max-age` to an age limit in seconds in a default entry or matching rule
 to avoid requesting expired links. The default is nil (unlimited). An
 explicit `:max-age nil` disables an inherited limit for that rule. For
-example, only request these image links for one hour:
+example, only request these files for one hour:
 
 ```elisp
 (setq-local zr-erc-link-rules
             '((:regexp "https://multimedia\\.nt\\.qq\\.com\\.cn/download\\?[^[:space:]]+"
-               :type image :auto-show t :max-age 3600)))
+               :type file :max-age 3600)))
 ```
 
 Age uses the IRC `time` tag supplied by servers with `server-time`, falling
 back to local receipt time when the tag is absent or invalid. Without that
 tag, the original age of replayed history cannot be determined. Expired
-links remain buttons but skip automatic previews; manual previews and
-downloads report expiration before starting a request or asking for a save
-destination. Age is checked again for each request. Existing previews and
-requests already in progress are retained. This is separate from
-`:timeout`, which limits how long a request may run.
+links remain buttons; opening and downloading report expiration before
+starting a request or asking for a save destination. Age is checked again
+for each request. Open buffers and requests already in progress are retained.
+This is separate from `:timeout`, which limits how long a request may run.
 
-Use `:proxy` to select an HTTP proxy for both previews and downloads.
-For example, prepend a default for each media type:
+Use `:proxy` to select an HTTP proxy for opening and downloading files:
 
 ```elisp
 (setq-local zr-erc-link-rules
-            (append '((:type image :proxy "http://127.0.0.1:7890")
-                      (:type file :proxy "http://127.0.0.1:7890"))
-                    zr-erc-link-rules))
+            (cons '(:type file :proxy "http://127.0.0.1:7890")
+                  zr-erc-link-rules))
 ```
 
 The default, `inherit`, uses Emacs's existing URL proxy settings. A nil
@@ -561,21 +556,19 @@ value forces a direct connection, including `:proxy nil` in a rule.
 accept `host:port` or `http://host:port`, including bracketed IPv6 hosts;
 credentials and paths in proxy URLs are not supported. Explicit proxies
 bypass `no_proxy` exclusions. HTTP links use the proxy directly, and HTTPS
-links use CONNECT tunnels. These settings affect only media requests and
+links use CONNECT tunnels. These settings affect only file requests and
 do not alter the proxy configuration used by other Emacs packages.
 
-Example for an authenticated image proxy and ordinary downloadable files:
+Example for an authenticated file proxy, including images:
 
 ```elisp
 (setq-local zr-erc-link-rules
             '((:regexp "https://cdn\\.example/images/\\([^[:space:]]+\\)"
                :replace "https://gateway.example/media/\\1"
-               :type image
+               :type file
                :headers (("X-Client" . "erc"))
                :auth-source (:user "bridge")
-               :auth-scheme bearer
-               :auto-show t :ffmpeg t
-               :max-width 0.85 :max-height 0.6)
+               :auth-scheme bearer)
               (:regexp "https?://[^[:space:]]+\\.\\(?:pdf\\|zip\\)\\(?:[?#][^[:space:]]*\\)?" :type file)))
 ```
 
@@ -599,34 +592,25 @@ come from a tag rather than the body:
 ```elisp
 (setq-local zr-erc-link-rules
             '((:selector (:tags (("+media-kind" . "^image$")))
-               :url-tag "+media-url" :regexp "\\`https://" :type image)))
+               :url-tag "+media-url" :regexp "\\`https://" :type file)))
 ```
 
-`:ffmpeg t` enables FFmpeg conversion, `:ffmpeg nil` disables it, and a string
-such as `:ffmpeg "/usr/local/bin/ffmpeg"` selects the executable. Conversion
-produces a single-frame PNG preview,
-preserves aspect ratio and does not enlarge small images. Downloads always
-save the original data. `:max-width` / `:max-height` accept integer
-pixels or floating-point fractions of the current window. Preview again to
-fit a changed window size.
-
-All media settings live in `zr-erc-link-rules`. Omitted settings use these defaults:
+All file settings live in `zr-erc-link-rules`. Omitted settings use these defaults:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `:auto-show` | nil | Automatically fetch and show images |
 | `:max-age` | nil | Maximum message age in seconds; nil means unlimited |
 | `:proxy` | `inherit` | Emacs proxy settings; nil connects directly |
-| `:ffmpeg` | nil | nil disables conversion, t uses `ffmpeg`, a string selects an executable |
-| `:max-width` | 0.85 | Integer pixels or fraction of the current window |
-| `:max-height` | 0.6 | Integer pixels or fraction of the current window |
-| `:timeout` | 30 | Maximum seconds for each HTTP request or FFmpeg conversion |
+| `:timeout` | 30 | Maximum seconds for each HTTP request |
 | `:max-bytes` | 67108864 | Maximum response body size in bytes (64 MiB) |
 | `:dir` | `"~/Downloads/"` | Initial directory offered when downloading |
 
-Responses larger than `:max-bytes` are rejected. Temporary previews and pending requests
-are cleaned when the module is disabled or the buffer is killed; removing a
-link from scrollback also removes its preview.
+Responses larger than `:max-bytes` are rejected. Pending requests are canceled
+when the module is disabled or the ERC buffer is killed. Successfully fetched
+files remain independent of ERC scrollback and are retained when their file
+buffers are closed or replaced during image navigation. The shared temporary
+directory is created on first use and removed when Emacs exits. Saved downloads
+are retained.
 
 ## Configuration scope
 
@@ -656,8 +640,7 @@ work independently of the reply module.
 
 Run all ERC tests with `make test TEST_FILE="$(echo erc/test/*-test.el)"`.
 The link tests start a temporary loopback HTTP server when Python 3 is
-available and exercise actual FFmpeg conversion when FFmpeg/ffprobe are
-available. Proxy tests use a loopback HTTP proxy; HTTPS CONNECT tests also
-require OpenSSL and Emacs GnuTLS support. The current terminal test environment
-substitutes only image creation, then checks the generated PNG dimensions and
-inline display property.
+available and check batch fetching, native file opening, image navigation,
+temporary-directory cleanup and downloads.
+Proxy tests use a loopback HTTP proxy; HTTPS CONNECT tests also require
+OpenSSL and Emacs GnuTLS support.

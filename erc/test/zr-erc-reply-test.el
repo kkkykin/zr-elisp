@@ -370,7 +370,7 @@
            (lambda () (zr-erc-reply-test--position a "https://example.test/erc-image.png")))
           (with-current-buffer a
             (goto-char (zr-erc-reply-test--position a "https://example.test/erc-image.png"))
-            (should (eq (plist-get (button-get (button-at (point)) 'zr-erc-link-item) :type) 'image))
+            (should (eq (plist-get (button-get (button-at (point)) 'zr-erc-link-item) :type) 'file))
             (should-not zr-erc-link--jobs))
           (let ((body (concat (make-string 700 ?x) "\nlast-fragment-test")) original)
             (with-current-buffer b
