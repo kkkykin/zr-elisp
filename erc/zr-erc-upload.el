@@ -20,6 +20,7 @@
 (require 'erc)
 (require 'yank-media)
 (require 'mailcap)
+(require 'image)
 (require 'dnd)
 (require 'url-parse)
 (require 'zr-http)
@@ -38,6 +39,8 @@
 Each function receives a local FILE and a CALLBACK, and returns a
 function of no arguments that cancels the upload and releases resources.
 Call CALLBACK with (URL nil) on success, or (nil ERROR-STRING) on failure.
+URL must point directly to file content suitable for browser display,
+without an intermediate page or forced download.
 The callback may run synchronously.  Backend functions run in the
 originating ERC buffer, so they can use buffer-local configuration."
   :type '(alist :key-type symbol :value-type function))
@@ -106,6 +109,20 @@ DURATIONS is an alist of hours and API values."
                        "Upload rejected")))
     data))
 
+(defun zr-erc-upload--check-preview-file (file)
+  "Require FILE to be an image supported by the inline preview backends."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil 0 8192)
+    (unless (memq (image-type-from-data (buffer-string)) '(png jpeg gif webp svg))
+      (error "Direct links require a PNG, JPEG, GIF, WebP or SVG image"))))
+
+(defun zr-erc-upload--preview-url (base id)
+  "Build a direct image URL from BASE and the uploaded file ID."
+  (unless (and (stringp id) (string-match-p "\\`[A-Za-z0-9]+\\'" id))
+    (error "Upload response did not return a file ID"))
+  (concat base id "/preview"))
+
 (defun zr-erc-upload--request (url form callback &optional parser)
   "Upload multipart FORM to URL, returning a cancellation function.
 PARSER extracts a link from the response text; nil uses the trimmed text."
@@ -147,7 +164,9 @@ for 24 hours."
    (list (cons "file" (list :file file))) callback))
 
 (defun zr-erc-upload-tempfile (file callback)
-  "Upload local FILE to TempFile, returning a cancellation function."
+  "Upload image FILE to TempFile, returning a cancellation function.
+Return its inline image URL; other file types fail before uploading."
+  (zr-erc-upload--check-preview-file file)
   (zr-erc-upload--request
    "https://tempfile.org/api/upload/local"
    (list (cons "files" (list :file file))
@@ -155,18 +174,24 @@ for 24 hours."
                               '((1 . "1") (6 . "6") (24 . "24") (48 . "48")))))
    callback
    (lambda (text)
-     (alist-get 'url (car (alist-get 'files (zr-erc-upload--json text)))))))
+     (zr-erc-upload--preview-url
+      "https://tempfile.org/"
+      (alist-get 'id (car (alist-get 'files (zr-erc-upload--json text))))))))
 
 (defun zr-erc-upload-tmp0 (file callback)
-  "Upload local FILE to tmp0, returning a cancellation function.
-Share the download page: the API's direct download URL requires POST."
+  "Upload image FILE to tmp0, returning a cancellation function.
+Return its inline image URL; other file types fail before uploading."
+  (zr-erc-upload--check-preview-file file)
   (zr-erc-upload--request
    "https://tmp0.cc/api/v1/upload"
    (list (cons "file" (list :file file))
          (cons "expires" (zr-erc-upload--expiry
                           '((1 . "1h") (6 . "6h") (12 . "12h") (24 . "1d")
                             (72 . "3d") (168 . "7d") (336 . "14d") (720 . "30d")))))
-   callback (lambda (text) (alist-get 'fullUrl (zr-erc-upload--json text)))))
+   callback
+   (lambda (text)
+     (zr-erc-upload--preview-url
+      "https://tmp0.cc/api/file/" (alist-get 'fileId (zr-erc-upload--json text))))))
 
 (defun zr-erc-upload--check ()
   "Require a connected ERC conversation."

@@ -384,6 +384,11 @@ draft input. If the connection or conversation target changes while
 uploading, the link is reported in the error message instead of being
 inserted or sent.
 
+Built-in backends share direct file URLs suitable for browser display.
+TempFile and tmp0 provide these only for PNG, JPEG, GIF, WebP and SVG images.
+For other files they fail before uploading, allowing fallback to Litterbox
+or Beacon. Image types are detected from file contents rather than extensions.
+
 These settings also support `setq-local` in a conversation:
 
 ```elisp
@@ -428,13 +433,17 @@ whose maximum lifetime is too short fails without uploading, allowing fallback.
 | --- | --- | --- | --- |
 | `litterbox` | — | 1, 12, 24 or 72 hours | Direct file |
 | [`beacon`](https://beacon.host/file-upload-api) | 4 MB per anonymous request | 24 hours | Direct file |
-| [`tempfile`](https://tempfile.org/api) | 100 MB per file | 1, 6, 24 or 48 hours | File page |
-| [`tmp0`](https://tmp0.cc/blog/the-api-written-down) | 2 GB per file | 1, 6, 12 hours; 1, 3, 7, 14 or 30 days | Download page |
+| [`tempfile`](https://tempfile.org/api) | 100 MB per file | 1, 6, 24 or 48 hours | Direct image |
+| [`tmp0`](https://tmp0.cc/blog/the-api-written-down) | 2 GB per file | 1, 6, 12 hours; 1, 3, 7, 14 or 30 days | Direct image |
 
-Beacon uses the single-request `/v1/upload` API. TempFile shares the returned
-`files[0].url`; tmp0 shares `fullUrl`, because its `directDownloadUrl` requires
-POST and cannot be opened as a normal link. API endpoints and form fields are
-handled by the built-in functions without per-service configuration options.
+Beacon uses the single-request `/v1/upload` API. TempFile uses `files[0].id`
+to build `https://tempfile.org/{id}/preview`; tmp0 uses `fileId` to build
+`https://tmp0.cc/api/file/{id}/preview`. Both endpoints return the image itself
+with an image content type and no forced download. API endpoints and form fields
+are handled by the built-in functions without per-service configuration options.
+tmp0 may remove image metadata during upload without re-encoding the image.
+Its direct image URL preserves pixels and dimensions, but the stored bytes may
+differ from the original file.
 
 `zr-erc-upload-backends` is an alist of names and upload functions. To add one:
 
@@ -447,7 +456,8 @@ An upload function receives a local filename and a callback, runs in the
 originating ERC buffer, and returns a function that cancels and releases its
 resources. It calls the callback with `(URL nil)` on success or
 `(nil ERROR-STRING)` on failure; synchronous callbacks are also supported.
-Successful URLs must use HTTP or HTTPS. Tests exercise multipart uploads,
+Successful URLs must use HTTP or HTTPS and point directly to file content,
+without an intermediate page or forced download. Tests exercise multipart uploads,
 fallback and cancellation against a local HTTP server without contacting
 public services:
 

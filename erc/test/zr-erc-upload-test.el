@@ -12,6 +12,11 @@
                                buffer-file-name)))
         nil 'nomessage))
 
+(defconst zr-erc-upload-test--image-bytes
+  (base64-decode-string
+   "iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAAGUlEQVR4nGPQWHAHghgCFtyBIIaKBXcgCADkZhAtDLUN4QAAAABJRU5ErkJggg==")
+  "A valid PNG used for binary uploads and image type detection.")
+
 (defmacro zr-erc-upload-test--conversation (&rest body)
   "Run BODY in a connected conversation without contacting an IRC server."
   (declare (indent 0) (debug t))
@@ -94,9 +99,9 @@ URL may be a function mapping each original URL to a local endpoint."
                                                ((string-prefix-p "POST /bad " data)
                                                 "Not a URL")
                                                ((string-prefix-p "POST /tempfile " data)
-                                                "{\"success\":true,\"files\":[{\"url\":\"https://example.test/file/\"}]}")
+                                                "{\"success\":true,\"files\":[{\"id\":\"file42\",\"url\":\"https://example.test/file/\"}]}")
                                                ((string-prefix-p "POST /tmp0 " data)
-                                                "{\"success\":true,\"url\":\"/d/file\",\"fullUrl\":\"https://example.test/d/file\",\"directDownloadUrl\":\"https://example.test/api/file/file/download\"}")
+                                                "{\"success\":true,\"fileId\":\"file42\",\"url\":\"/d/file\",\"fullUrl\":\"https://example.test/d/file\",\"directDownloadUrl\":\"https://example.test/api/file/file/download\"}")
                                                ((string-prefix-p "POST /json-error " data)
                                                 "{\"success\":false,\"error\":\"File rejected\"}")
                                                ((string-prefix-p "POST /json-bad " data)
@@ -475,7 +480,7 @@ URL may be a function mapping each original URL to a local endpoint."
   (skip-unless (executable-find "curl"))
   (let* ((directory (make-temp-file "erc-upload-http-" t))
          (file (expand-file-name "cutie,semi;quote\"slash\\猫.png" directory))
-         (bytes (unibyte-string 0 1 137 255 10)) sent)
+         (bytes zr-erc-upload-test--image-bytes) sent)
     (unwind-protect
         (progn
           (let ((coding-system-for-write 'no-conversion))
@@ -486,8 +491,8 @@ URL may be a function mapping each original URL to a local endpoint."
                  (`(,backend ,path ,url ,field ,expiry-field ,expiry)
                   '((litterbox "/upload" "https://example.test/cutie.png" "fileToUpload" "time" "12h")
                     (beacon "/beacon" "https://example.test/cutie.png" "file" nil nil)
-                    (tempfile "/tempfile" "https://example.test/file/" "files" "expiryHours" "24")
-                    (tmp0 "/tmp0" "https://example.test/d/file" "file" "expires" "12h")))
+                    (tempfile "/tempfile" "https://tempfile.org/file42/preview" "files" "expiryHours" "24")
+                    (tmp0 "/tmp0" "https://tmp0.cc/api/file/file42/preview" "file" "expires" "12h")))
                (zr-erc-upload-test--conversation
                  (let ((zr-erc-upload-backend-order (list backend))
                        (zr-erc-upload-http-options '(:headers (("X-Test" . "erc-upload")) :proxy nil))
@@ -552,7 +557,8 @@ URL may be a function mapping each original URL to a local endpoint."
                    (backup . zr-erc-upload-beacon)))
                 (zr-erc-upload-http-options '(:timeout 1 :proxy nil))
                 (before (length (funcall requests))))
-           (write-region "fallback payload" nil file nil 'silent)
+           (let ((coding-system-for-write 'no-conversion))
+             (write-region zr-erc-upload-test--image-bytes nil file nil 'silent))
            (zr-erc-upload-test--endpoint
                (lambda (url) (concat base (if (string-search "beacon.host" url) "/beacon" path)))
              (let ((job (zr-erc-upload--start file nil t)))
@@ -561,7 +567,7 @@ URL may be a function mapping each original URL to a local endpoint."
            (should (= (length (funcall requests)) (+ before 2)))
            (should (equal (erc-user-input) "https://example.test/cutie.png"))
            (dolist (request (seq-take (funcall requests) 2))
-             (should (string-search "fallback payload" request)))
+             (should (string-search zr-erc-upload-test--image-bytes request)))
            (should-not (file-exists-p file))
            (should-not zr-erc-upload--jobs)
            (should-not (zr-erc-upload-test--buffers))))))))
@@ -573,6 +579,8 @@ URL may be a function mapping each original URL to a local endpoint."
      (zr-erc-upload-test--conversation
        (let ((file (make-temp-file "erc-upload-owned-"))
              (zr-erc-upload-http-options '(:proxy nil)))
+         (let ((coding-system-for-write 'no-conversion))
+           (write-region zr-erc-upload-test--image-bytes nil file nil 'silent))
          (zr-erc-upload-test--endpoint
              (lambda (url)
                (concat base
@@ -603,14 +611,35 @@ URL may be a function mapping each original URL to a local endpoint."
              (zr-erc-upload-backend-order '(beacon tempfile tmp0))
              (zr-erc-upload-expiry-hours 72)
              (zr-erc-upload-http-options '(:proxy nil)))
+         (let ((coding-system-for-write 'no-conversion))
+           (write-region zr-erc-upload-test--image-bytes nil file nil 'silent))
          (zr-erc-upload-test--endpoint (concat base "/tmp0")
            (let ((job (zr-erc-upload--start file nil t)))
              (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job)))
              (should (= (length (zr-erc-upload--job-errors job)) 2))))
          (should (= (length (funcall requests)) 1))
          (should (string-search "name=\"expires\"\r\n\r\n3d\r\n" (car (funcall requests))))
-         (should (equal (erc-user-input) "https://example.test/d/file"))
+         (should (equal (erc-user-input) "https://tmp0.cc/api/file/file42/preview"))
          (should-not (file-exists-p file))
+         (should-not (zr-erc-upload-test--buffers)))))))
+
+(ert-deftest zr-erc-upload-real-curl-non-image-fallback ()
+  (skip-unless (executable-find "curl"))
+  (zr-erc-upload-test--server
+   (lambda (base requests)
+     (zr-erc-upload-test--conversation
+       (let ((file (make-temp-file "erc-upload-owned-" nil ".png"))
+             (zr-erc-upload-backend-order '(tempfile tmp0 beacon))
+             (zr-erc-upload-http-options '(:proxy nil)))
+         (write-region "Not an image despite the extension" nil file nil 'silent)
+         (zr-erc-upload-test--endpoint (concat base "/beacon")
+           (let ((job (zr-erc-upload--start file nil t)))
+             (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job)))
+             (should (= (length (zr-erc-upload--job-errors job)) 2))))
+         (should (= (length (funcall requests)) 1))
+         (should (equal (erc-user-input) "https://example.test/cutie.png"))
+         (should-not (file-exists-p file))
+         (should-not zr-erc-upload--jobs)
          (should-not (zr-erc-upload-test--buffers)))))))
 
 (provide 'zr-erc-upload-test)
