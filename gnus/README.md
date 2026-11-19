@@ -178,7 +178,10 @@ Group 身份由书目的稳定 URL 和 `metadata.modified` 确定，书目版本
 - calibre 的地址通常是 `/kosync`，`nnopds-koreader-user` 填 Content server
   用户名。密码从同步 URL 对应的 `auth-source` 记录获取，也可显式设置
   `nnopds-koreader-password`；请求发送 UTF-8 密码的 MD5。
-- 同步请求头仅发送到配置的同步服务器 origin，取书认证不会随之发送。
+- 同步服务器和目录的 origin（协议、主机和端口）相同时，同步请求也携带
+  `nnopds-headers`，可通过 Caddy 等反向代理的自定义请求头校验。同步账号仍用
+  `nnopds-koreader-user/password`；取书账号生成的 Basic/Digest 认证不会随之发送。
+  同步请求头仅发送到配置的同步服务器 origin。
   calibre 首次下载前会先登录同步接口，让服务器关联下载文件与原书的哈希。
 
 书籍标识使用 KOReader 的 partial MD5，设备端应选择默认的 Binary 匹配方式。

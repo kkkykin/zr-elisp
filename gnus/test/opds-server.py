@@ -229,6 +229,7 @@ class Handler(BaseHTTPRequestHandler):
                                      "content_type": self.headers.get("Content-Type"),
                                      "sync_user": self.headers.get("X-Auth-User"),
                                      "sync_key": self.headers.get("X-Auth-Key"),
+                                     "proxy_token": self.headers.get("X-Proxy-Token"),
                                      "body": body}) + "\n")
 
     def download(self, file):
@@ -280,6 +281,10 @@ class Handler(BaseHTTPRequestHandler):
                           self.headers.get("X-Auth-Key") == hashlib.md5(b"test-password").hexdigest())
         else:
             return False
+        proxy_token = root / "ko-proxy-header.txt"
+        if proxy_token.exists() and self.headers.get("X-Proxy-Token") != proxy_token.read_text():
+            self.respond(403)
+            return True
         if not authorized:
             self.json_response({"code": 2001, "message": "Unauthorized"}, 403 if kind == "komga" else 401)
             return True

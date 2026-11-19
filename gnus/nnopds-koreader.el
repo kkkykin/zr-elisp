@@ -26,7 +26,10 @@
       (error "Configure nnopds-koreader-user or an auth-source account for the sync server"))
     (setf (nnopds--connection-progress connection)
           (list :protocol 'koreader :url url
-                :headers (append (list (cons "X-Auth-User" user))
+                :headers (append (when (equal (nnopds--origin url)
+                                             (nnopds--origin (nnopds--connection-url connection)))
+                                   (copy-tree nnopds-headers))
+                                 (list (cons "X-Auth-User" user))
                                  (when password
                                    (list (cons "X-Auth-Key" (secure-hash 'md5 (encode-coding-string password 'utf-8))))))))))
 

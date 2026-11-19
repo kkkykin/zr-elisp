@@ -882,7 +882,7 @@
           (should (equal (plist-get request :sync_key) (unless (eq kind 'komga) (secure-hash 'md5 "test-password"))))
           (should (equal (plist-get request :accept) "application/vnd.koreader.v1+json"))
           (should (equal (plist-get request :content_type) "application/json"))
-          (should-not (plist-get request :key))
+          (should (equal (plist-get request :key) (when (eq kind 'komga) "komga-key")))
           (should-not (plist-get request :authorization))
           (should (= (car (nnopds-progress--location state progression)) 2))
           (should (eq (not (null (plist-get progression :timestamp))) (eq kind 'calibre))))
@@ -926,6 +926,57 @@
       (should-not (nnopds--publication-progress publication))
       (should-not (nnopds-test--requests opds-root "PUT")))))
 
+(ert-deftest nnopds-test-calibre-proxy-header-and-manual-resume ()
+  (nnopds-test--with-server
+    (skip-unless (and (or (executable-find "7zz") (executable-find "7z")) (libxml-available-p)))
+    (nnopds-close-server "library")
+    (nnopds-test--write opds-root "digest-auth.txt" "enabled")
+    (nnopds-test--write opds-root "ko-proxy-header.txt" "proxy-key")
+    (let* ((opds-url (nnopds--url "/calibre/opds" opds-url))
+           (nnopds-test--server-definitions
+            `((nnopds-url ,opds-url)
+              (nnopds-user "reader") (nnopds-password "test-password") (nnopds-auth-method digest)
+              (nnopds-headers (("X-Proxy-Token" . "proxy-key")))
+              (nnopds-koreader-url ,(nnopds--url "/calibre/kosync" opds-url))
+              (nnopds-koreader-user "reader") (nnopds-koreader-password "test-password"))))
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (nnopds-browse-read)
+        (with-current-buffer gnus-summary-buffer
+          (should nnopds-progress--state)
+          (should (= gnus-current-article 1))
+          (gnus-summary-goto-article 2 nil t)
+          (nnopds-save-position)
+          (nnopds-test--wait (lambda () (not (nnopds-progress--state-in-flight nnopds-progress--state))))
+          (should (= 1 (length (nnopds-test--requests opds-root "PUT"))))
+          (gnus-summary-goto-article 1 nil t)
+          (should (nnopds-progress--state-pending nnopds-progress--state))
+          (dolist (number '(1 2))
+            (nnopds-test--write
+             opds-root "koreader-progress.json"
+             (json-serialize
+              (list :document (nnopds-koreader--digest (expand-file-name "one.epub" opds-root))
+                    :progress (format "/body/DocFragment[%d]/body/p[1]/text().20" number)
+                    :percentage (if (= number 1) 0.1 0.7) :device "Kobo" :device_id "phone")))
+            (let ((requests (length (nnopds-test--requests opds-root))))
+              (if (= number 1)
+                  (with-current-buffer gnus-article-buffer (nnopds-resume))
+                (nnopds-resume))
+              (should (= (1+ requests) (length (nnopds-test--requests opds-root)))))
+            (should (= gnus-current-article number))
+            (should-not (nnopds-progress--state-pending nnopds-progress--state))
+            (should-not (nnopds-progress--state-timer nnopds-progress--state))
+            (with-current-buffer gnus-article-buffer
+              (should (string-match-p (if (= number 1) "中文内容 α" "脚注目标") (buffer-string)))))
+          (gnus-summary-exit))
+        (should (= 1 (length (nnopds-test--requests opds-root "PUT"))))
+        (dolist (request (nnopds-test--requests opds-root))
+          (should (equal (plist-get request :proxy_token) "proxy-key"))
+          (when (string-prefix-p "/calibre/kosync/" (plist-get request :path))
+            (should (equal (plist-get request :sync_user) "reader"))
+            (should (equal (plist-get request :sync_key) (secure-hash 'md5 "test-password")))
+            (should-not (plist-get request :authorization))))))))
+
 (ert-deftest nnopds-test-koreader-credentials-have-a-separate-origin ()
   (nnopds-test--with-koreader 'calibre
     (let* ((endpoint (nnopds--connection-progress connection))
@@ -942,7 +993,14 @@
         (should-not (plist-get response :X-Auth-User))
         (should-not (plist-get response :X-Auth-Key))
         (should-not (plist-get response :X-API-Key))
-        (should-not (plist-get response :Authorization))))))
+        (should-not (plist-get response :Authorization)))
+      (let ((nnopds-headers '(("X-Proxy-Token" . "proxy-key")))
+            (nnopds-koreader-url sync-origin))
+        (nnopds-koreader-configure connection)
+        (let* ((endpoint (nnopds--connection-progress connection))
+               (response (nnopds--json (nnopds--request connection "GET" echo nil nil nil endpoint))))
+          (should (equal (plist-get response :X-Auth-User) "reader"))
+          (should-not (plist-get response :X-Proxy-Token)))))))
 
 (ert-deftest nnopds-test-koreader-serialized-writes-drain-newest ()
   (nnopds-test--with-koreader 'calibre

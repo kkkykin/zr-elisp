@@ -52,7 +52,9 @@ visited pages.  Gnus startup only reads the local publication index."
 (defvoo nnopds-user nil "HTTP user, optionally looked up in auth-source.")
 (defvoo nnopds-password nil "HTTP password.  Prefer auth-source.")
 (defvoo nnopds-auth-method 'basic "HTTP authentication method: basic or digest.")
-(defvoo nnopds-headers nil "Additional HTTP headers, for example an API key.")
+(defvoo nnopds-headers nil
+  "Additional HTTP headers, for example an API key or a reverse proxy token.
+Also sent to the KOReader sync server when it shares the catalog's origin.")
 (defvoo nnopds-progress-protocol 'koreader "Reading position protocol.  Currently supports koreader.")
 (defvoo nnopds-koreader-url nil "Explicit KOReader sync base URL.  Nil keeps reading positions local.")
 (defvoo nnopds-koreader-user nil "KOReader username, or a Komga API key; optionally looked up in auth-source.")
