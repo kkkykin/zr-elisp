@@ -21,6 +21,7 @@
 (require 'mailcap)
 (require 'dnd)
 (require 'url-parse)
+(require 'zr-http)
 (require 'format-spec)
 
 (defgroup zr-erc-upload nil
@@ -56,17 +57,9 @@ and original filename and returns the message.  The format is captured
 when uploading starts.  The result must be a nonempty single line."
   :type '(choice string function))
 
-(defcustom zr-erc-upload-curl-program "curl"
-  "Curl executable used by the Litterbox backend."
-  :type 'string)
-
-(defcustom zr-erc-upload-curl-arguments nil
-  "Extra curl arguments, for example proxy or certificate options."
-  :type '(repeat string))
-
-(defcustom zr-erc-upload-timeout 120
-  "Maximum duration of a Litterbox upload in seconds."
-  :type 'natnum)
+(defcustom zr-erc-upload-http-options '(:timeout 120)
+  "HTTP options overriding `zr-http-default-options' for uploads."
+  :type 'sexp)
 
 (defcustom zr-erc-upload-litterbox-url
   "https://litterbox.catbox.moe/resources/internals/api.php"
@@ -87,64 +80,21 @@ when uploading starts.  The result must be a nonempty single line."
     x-special/KDE-copied-files x-special/mate-copied-files))
 
 (defun zr-erc-upload-litterbox (file callback)
-  "Upload local FILE to Litterbox and call CALLBACK with its URL or error.
-Return a cancellation function.  See `zr-erc-upload-backends'."
-  (let ((output (generate-new-buffer " *erc-upload-response*"))
-        (errors (generate-new-buffer " *erc-upload-errors*"))
-        process finished)
-    (cl-labels
-        ((cleanup ()
-           (setq finished t)
-           (when (and process (process-live-p process))
-             (delete-process process))
-           (dolist (buffer (list output errors))
-             (when (buffer-live-p buffer)
-               (when-let* ((auxiliary (get-buffer-process buffer))
-                           ((process-live-p auxiliary)))
-                 (delete-process auxiliary))
-               (kill-buffer buffer)))))
-      (condition-case err
-          (let ((default-directory temporary-file-directory))
-            (setq process
-                  (make-process
-                   :name "erc-upload-litterbox" :buffer output :stderr errors
-                   :connection-type 'pipe :coding 'utf-8-unix :noquery t
-                   :command
-                   (append
-                    (list zr-erc-upload-curl-program "--disable" "--silent"
-                          "--show-error" "--fail" "--max-time"
-                          (number-to-string zr-erc-upload-timeout))
-                    zr-erc-upload-curl-arguments
-                    (list "--form-string" "reqtype=fileupload"
-                          "--form-string" (concat "time=" zr-erc-upload-litterbox-time)
-                          ;; Curl's form grammar interprets commas and semicolons
-                          ;; in unquoted filenames, even without a shell.
-                          "--form" (concat "fileToUpload=@\""
-                                           (replace-regexp-in-string
-                                            "[\\\\\"]" "\\\\\\&" file t)
-                                           "\"")
-                          zr-erc-upload-litterbox-url))
-                   :sentinel
-                   (lambda (proc event)
-                     (when (and (not finished)
-                                (memq (process-status proc) '(exit signal)))
-                       (let ((response (with-current-buffer output
-                                         (string-trim (buffer-string))))
-                             (reason (with-current-buffer errors
-                                       (string-trim (buffer-string))))
-                             (success (and (eq (process-status proc) 'exit)
-                                           (zerop (process-exit-status proc)))))
-                         (cleanup)
-                         (if success
-                             (funcall callback response nil)
-                           (funcall callback nil
-                                    (truncate-string-to-width
-                                     (if (string-empty-p reason)
-                                         (string-trim event) reason)
-                                     400 nil nil "…"))))))))
-            (set-process-sentinel (get-buffer-process errors) #'ignore))
-        (error (cleanup) (signal (car err) (cdr err))))
-      #'cleanup)))
+  "Upload local FILE to Litterbox, returning a cancellation function."
+  (let ((request
+         (zr-http-request
+          zr-erc-upload-litterbox-url :options zr-erc-upload-http-options
+          :form (list '("reqtype" . "fileupload")
+                      (cons "time" zr-erc-upload-litterbox-time)
+                      (cons "fileToUpload" (list :file file)))
+          :callback
+          (lambda (response error)
+            (cond
+             (error (funcall callback nil error))
+             ((not (<= 200 (plist-get response :status) 299))
+              (funcall callback nil (format "Upload failed: HTTP %s" (plist-get response :status))))
+             (t (funcall callback (string-trim (decode-coding-string (plist-get response :body) 'utf-8)) nil)))))))
+    (lambda () (zr-http-cancel request))))
 
 (defun zr-erc-upload--check ()
   "Require a connected ERC conversation."

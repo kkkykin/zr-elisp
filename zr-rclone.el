@@ -24,10 +24,9 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)
-(require 'url)
-(require 'url-http)
+(require 'url-parse)
+(require 'zr-http)
 (require 'zr-tramp-rcrc)
-(defvar url-http-response-status)
 
 (defgroup zr-rclone nil
   "Rclone remote control."
@@ -45,8 +44,12 @@
   "Initial RC endpoint, including any reverse proxy path."
   :type 'string)
 
-(defcustom zr-rclone-timeout 60
-  "Timeout in seconds for an individual RC request."
+(defcustom zr-rclone-http-options nil
+  "HTTP options overriding `zr-http-default-options' for RC requests."
+  :type 'sexp)
+
+(defcustom zr-rclone-cli-timeout 60
+  "Timeout in seconds for an individual CLI RC request."
   :type 'number)
 
 (defcustom zr-rclone-poll-interval 2
@@ -159,71 +162,30 @@ The first entry is the default."
     password))
 
 (defun zr-rclone--http-request (connection method params callback)
-  "Send METHOD and PARAMS over HTTP; call CALLBACK with (RESULT ERROR).
-Return a cancellation function.  ERROR is nil or a readable string."
-  (let (buffer timer done)
-    (cl-labels
-        ((finish (result error)
-           (unless done
-             (setq done t)
-             (when timer (cancel-timer timer))
-             (when (buffer-live-p buffer)
-               (when-let* ((process (get-buffer-process buffer)))
-                 (delete-process process))
-               (kill-buffer buffer))
-             (funcall callback result error))))
-      (condition-case err
-          (let ((default-directory temporary-file-directory)
-                (url-request-method "POST")
-                (url-request-extra-headers
-                 (list '("Content-Type" . "application/json")
-                       (cons "Authorization"
-                             (or (zr-tramp-rcrc-basic-header
-                                  (zr-rclone--credentials connection)) ""))))
-                (url-request-data
-                 (encode-coding-string (zr-rclone--json params) 'utf-8))
-                (url-request-noninteractive t)
-                (url-show-status nil)
-                (url-max-redirections 0)
-                (url-http-attempt-keepalives nil))
-            (setq buffer
-                  (url-retrieve
-                   (concat (zr-rclone-connection-url connection) method)
-                   (lambda (status)
-                     (let ((response-buffer (current-buffer)))
-                       (unwind-protect
-                           (condition-case error
-                               (progn
-                                 (goto-char (point-min))
-                                 (unless (re-search-forward "\r?\n\r?\n" nil t)
-                                   (error "Incomplete HTTP response: %s" status))
-                                 (let* ((code (or url-http-response-status 0))
-                                        (body (decode-coding-string
-                                               (buffer-substring-no-properties
-                                                (point) (point-max)) 'utf-8))
-                                        (result
-                                         (condition-case nil
-                                             (zr-rclone--parse-json body)
-                                           (error
-                                            (error "HTTP %s: invalid RC JSON" code)))))
-                                   (if (<= 200 code 299)
-                                       (finish result nil)
-                                     (finish nil
-                                             (format "HTTP %s: %s" code
-                                                     (or (alist-get 'error result)
-                                                         "RC request failed"))))))
-                             (error (finish nil (error-message-string error))))
-                         (when (buffer-live-p response-buffer)
-                           (kill-buffer response-buffer)))))
-                   nil t t))
-            (unless (or done (buffer-live-p buffer))
-              (finish nil "Cannot create HTTP request"))
-            (unless done
-              (setq timer
-                    (run-at-time zr-rclone-timeout nil
-                                 (lambda () (finish nil "RC request timed out"))))))
-        (error (finish nil (error-message-string err))))
-      (lambda () (finish nil "RC request cancelled")))))
+  "Send METHOD and PARAMS over HTTP, returning a cancellation function."
+  (let ((request
+         (zr-http-request
+          (concat (zr-rclone-connection-url connection) method)
+          :options zr-rclone-http-options :method "POST"
+          :headers (list '("Content-Type" . "application/json")
+                         (cons "Authorization"
+                               (or (zr-tramp-rcrc-basic-header
+                                    (zr-rclone--credentials connection)) "")))
+          :body (encode-coding-string (zr-rclone--json params) 'utf-8 t)
+          :callback
+          (lambda (response failure)
+            (if failure
+                (funcall callback nil failure)
+              (let (result error)
+                (condition-case err
+                    (let ((code (plist-get response :status)))
+                      (setq result (zr-rclone--parse-json
+                                    (decode-coding-string (plist-get response :body) 'utf-8)))
+                      (unless (<= 200 code 299)
+                        (error "HTTP %s: %s" code (or (alist-get 'error result) "RC request failed"))))
+                  (error (setq error (error-message-string err))))
+                (funcall callback (unless error result) error)))))))
+    (lambda () (zr-http-cancel request))))
 
 (defun zr-rclone--cli-request (connection method params callback)
   "Send METHOD and PARAMS through rclone rc, then call CALLBACK."
@@ -275,7 +237,7 @@ Return a cancellation function.  ERROR is nil or a readable string."
                                         (error-message-string error)
                                       message)))))))))
             (setq timer
-                  (run-at-time zr-rclone-timeout nil
+                  (run-at-time zr-rclone-cli-timeout nil
                                (lambda () (finish nil "RC request timed out")))))
         (error (finish nil (error-message-string err))))
       (lambda () (finish nil "RC request cancelled")))))
@@ -609,7 +571,8 @@ The password is determined by `zr-rclone-password'."
     (let ((deadline (+ (float-time) 10)) ready)
       (while (and (not ready) (< (float-time) deadline)
                   (process-live-p (zr-rclone-connection-process connection)))
-        (let ((zr-rclone-timeout 0.5))
+        (let ((zr-rclone-cli-timeout 0.5)
+              (zr-rclone-http-options (zr-http-options zr-rclone-http-options '(:timeout 0.5))))
           (setq ready (ignore-errors (zr-rclone--probe connection))))
         (unless ready (accept-process-output nil 0.1)))
       (unless ready

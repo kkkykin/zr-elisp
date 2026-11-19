@@ -50,17 +50,16 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'tramp)
-(require 'url)
-(require 'url-http)
-(defvar url-http-response-status)
+(require 'url-util)
+(require 'zr-http)
 
 (defgroup zr-tramp-rcrc nil
   "TRAMP file access through rclone rc."
   :group 'tramp)
 
-(defcustom zr-tramp-rcrc-timeout 60
-  "Maximum number of seconds to wait for one RC or object request."
-  :type 'number)
+(defcustom zr-tramp-rcrc-http-options nil
+  "HTTP options overriding `zr-http-default-options' for RC and objects."
+  :type 'sexp)
 
 (defvar zr-tramp-rcrc--endpoints (make-hash-table :test #'equal)
   "Registered rcd endpoints, keyed by \"HOST#PORT\".
@@ -222,45 +221,15 @@ connected, so background completion may contact it."
 (defun zr-tramp-rcrc--retrieve (vec method path headers data)
   "Send METHOD for PATH below VEC's rcd URL with HEADERS and byte DATA.
 Return (STATUS . BODY), where BODY holds the response bytes."
-  (let* ((url (concat (plist-get (zr-tramp-rcrc--endpoint vec) :url) path))
-         (default-directory temporary-file-directory)
-         (url-request-method method)
-         ;; An explicit empty field keeps url-http from prompting for auth.
-         (url-request-extra-headers
-          (cons (cons "Authorization" (or (zr-tramp-rcrc--authorization vec) ""))
-                headers))
-         (url-request-data data)
-         (url-request-noninteractive t)
-         (url-show-status nil)
-         (url-max-redirections 0)
-         (url-http-attempt-keepalives nil)
-         (url-mime-encoding-string nil)
-         (url-automatic-caching nil)
-         (coding-system-for-read 'no-conversion)
-         (coding-system-for-write 'no-conversion)
-         (deadline (+ (float-time) zr-tramp-rcrc-timeout))
-         buffer done)
-    ;; Timers and process output handled while waiting run in the caller's
-    ;; buffer.  Restore its point, which fido relies on while completing.
-    (save-excursion
-      (unwind-protect
-          (progn
-            (setq buffer (url-retrieve url (lambda (_status) (setq done t)) nil t t))
-            (unless (buffer-live-p buffer)
-              (signal 'file-error (list "Cannot connect to rcd" url)))
-            (while (and (not done) (< (float-time) deadline))
-              (accept-process-output nil 0.05))
-            (unless done (signal 'file-error (list "rcd request timed out" url)))
-            (with-current-buffer buffer
-              (goto-char (point-min))
-              (unless (re-search-forward "\r?\n\r?\n" nil t)
-                (signal 'file-error (list "Incomplete rcd response" url)))
-              (cons (or url-http-response-status 0)
-                    (buffer-substring-no-properties (point) (point-max)))))
-        (when (buffer-live-p buffer)
-          (when-let* ((process (get-buffer-process buffer)))
-            (delete-process process))
-          (kill-buffer buffer))))))
+  (condition-case err
+      (let ((response
+             (zr-http-request-sync
+              (concat (plist-get (zr-tramp-rcrc--endpoint vec) :url) path)
+              :options zr-tramp-rcrc-http-options :method method :body data
+              :headers (cons (cons "Authorization" (or (zr-tramp-rcrc--authorization vec) ""))
+                             headers))))
+        (cons (plist-get response :status) (plist-get response :body)))
+    (zr-http-error (signal 'file-error (cdr err)))))
 
 (defun zr-tramp-rcrc--http (vec method path &optional headers data)
   "Like `zr-tramp-rcrc--retrieve' for VEC, METHOD, PATH, HEADERS and DATA.

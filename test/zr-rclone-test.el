@@ -60,7 +60,8 @@
   "Run BODY with a real authenticated CONNECTION and isolated directory."
   (declare (indent 0) (debug body))
   `(let* ((zr-rclone-program (or (getenv "RCLONE_TEST_PROGRAM") "rclone"))
-          (zr-rclone-timeout 5)
+          (zr-rclone-cli-timeout 5)
+          (zr-rclone-http-options '(:timeout 5 :proxy nil))
           (zr-rclone-poll-interval 0.05)
           (url-proxy-services '(("no_proxy" . ".*")))
           (auth-sources nil)
@@ -431,21 +432,13 @@
 
 (defun zr-rclone-test--get (url credentials &optional range)
   "Fetch URL with CREDENTIALS and optional RANGE, returning (STATUS . BODY)."
-  (let* ((url-request-method "GET")
-         (url-request-extra-headers
-          (append (when credentials
-                    (list (cons "Authorization" (zr-tramp-rcrc-basic-header credentials))))
-                  (when range (list (cons "Range" range)))))
-         (url-show-status nil)
-         (buffer (url-retrieve-synchronously url t t 5)))
-    (unless buffer (ert-fail "No HTTP response"))
-    (unwind-protect
-        (with-current-buffer buffer
-          (goto-char (point-min))
-          (should (re-search-forward "\r?\n\r?\n" nil t))
-          (cons url-http-response-status
-                (buffer-substring-no-properties (point) (point-max))))
-      (kill-buffer buffer))))
+  (let ((response
+         (zr-http-request-sync
+          url :proxy nil :timeout 5
+          :headers (append (when credentials
+                             (list (cons "Authorization" (zr-tramp-rcrc-basic-header credentials))))
+                           (when range (list (cons "Range" range)))))))
+    (cons (plist-get response :status) (plist-get response :body))))
 
 (ert-deftest zr-rclone-real-webdav-and-http-playback-urls ()
   (zr-rclone-test--with-server
@@ -541,7 +534,7 @@
                   :log (lambda (_server client _message) (push client clients))))
          (connection (zr-rclone--make-connection
                       :url (format "http://127.0.0.1:%s/" (process-contact server :service))))
-         (zr-rclone-timeout 0.1)
+         (zr-rclone-http-options '(:timeout 0.1 :proxy nil))
          (url-proxy-services '(("no_proxy" . ".*")))
          (auth-sources nil))
     (unwind-protect

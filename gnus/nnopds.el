@@ -21,6 +21,7 @@
 (require 'url-expand)
 (require 'url-parse)
 (require 'auth-source)
+(require 'zr-http)
 (require 'nnepub)
 
 (autoload 'nnopds-progress-prepare "nnopds-progress")
@@ -35,9 +36,9 @@
 
 (defgroup nnopds nil "OPDS 2 publications in Gnus." :group 'gnus)
 
-(defcustom nnopds-request-timeout 30
-  "Maximum seconds for each HTTP request."
-  :type 'natnum :group 'nnopds)
+(defcustom nnopds-http-options nil
+  "HTTP options overriding `zr-http-default-options' for OPDS requests."
+  :type 'sexp :group 'nnopds)
 
 (defcustom nnopds-catalog-cache-ttl nil
   "Seconds before a visited OPDS page is fetched again.
@@ -61,13 +62,13 @@ visited pages.  Gnus startup only reads the local publication index."
 
 ;; Protocol modules inline accessors; append fields to keep their offsets stable.
 (cl-defstruct (nnopds--connection (:constructor nnopds--make-connection))
-  name url headers directory catalog publications processes readers fetched closed progress auth-method counts)
+  name url headers directory catalog publications requests readers fetched closed progress auth-method counts)
 
 (cl-defstruct (nnopds--publication (:constructor nnopds--make-publication))
   group title author modified source acquisition format progress document data count)
 
 (cl-defstruct (nnopds--request-state (:constructor nnopds--make-request-state))
-  process done response error)
+  request done response error)
 
 (nnoo-define-basics nnopds)
 
@@ -128,36 +129,15 @@ visited pages.  Gnus startup only reads the local publication index."
     (insert-file-contents-literally file)
     (buffer-string)))
 
-(defun nnopds--response (headers body &optional output-file)
-  "Parse curl's HEADERS and BODY files into a response plist."
-  (with-temp-buffer
-    (insert-file-contents headers)
-    (goto-char (point-min))
-    (let (status fields)
-      ;; A proxy may prepend its own HTTP status and headers.
-      (while (re-search-forward "^HTTP/[^ ]+ \\([0-9]+\\)[^\n]*\n" nil t)
-        (setq status (string-to-number (match-string 1)) fields nil)
-        (while (looking-at "\\([^:\r\n]+\\):[ \t]*\\([^\r\n]*\\)\r?\n")
-          (push (cons (downcase (match-string 1)) (match-string 2)) fields)
-          (goto-char (match-end 0))))
-      (unless status (error "No HTTP response"))
-      (append (list :status status :headers fields)
-              (if output-file (list :file output-file)
-                (list :body (nnopds--read-bytes body)))))))
-
 (defun nnopds--request (connection method url &optional data callback request-headers authentication output-file)
   "Request URL with METHOD and optional JSON DATA using CONNECTION.
 With CALLBACK, return a request state and call it once with (RESPONSE ERROR).
-Without CALLBACK, wait for a response, allowing process output and quit.
-REQUEST-HEADERS specify the request's media types.  AUTHENTICATION, when
-non-nil, replaces the catalog credentials with its :headers, scoped to
-its :url origin.  With OUTPUT-FILE, curl writes directly there and the
-response contains :file instead of :body.  The caller owns this file,
-including cleanup on failure or quit.  Other response bodies are unibyte
-strings.  Redirects
-are bounded and credentials are only sent to the configured origin."
+Without CALLBACK, wait while allowing process output and quit.
+AUTHENTICATION replaces catalog credentials with :headers scoped to :url.
+With OUTPUT-FILE the response contains :file instead of the byte :body.
+Redirects are bounded; credentials only go to their configured origin."
   (let ((state (nnopds--make-request-state))
-        (output-file (when output-file (expand-file-name output-file))))
+        (options (copy-tree nnopds-http-options)))
     (cl-labels
         ((finish (response error)
            (unless (nnopds--request-state-done state)
@@ -168,94 +148,61 @@ are bounded and credentials are only sent to the configured origin."
          (start (target redirects)
            (condition-case err
                (progn
-                 (when (nnopds--connection-closed connection)
-                   (error "OPDS server is closed"))
-                 (let* ((body-file (or output-file (make-temp-file "nnopds-body-")))
-                        (head-file (make-temp-file "nnopds-head-"))
-                        (buffer (generate-new-buffer " *nnopds-http*"))
-                        (headers (append request-headers
-                                         (when (equal (nnopds--origin target)
-                                                      (nnopds--origin (if authentication (plist-get authentication :url)
-                                                                       (nnopds--connection-url connection))))
-                                           (if authentication (plist-get authentication :headers)
-                                             (nnopds--connection-headers connection)))))
-                        (digest-header (when (and (not authentication)
-                                                  (eq (nnopds--connection-auth-method connection) 'digest))
-                                         (assoc-string "Authorization" headers t)))
-                        (digest-user (when (and digest-header (string-prefix-p "Basic " (cdr digest-header)))
-                                       (decode-coding-string (base64-decode-string (substring (cdr digest-header) 6)) 'utf-8)))
+                 (when (nnopds--connection-closed connection) (error "OPDS server is closed"))
+                 (let* ((headers
+                         (append request-headers
+                                 (when (equal (nnopds--origin target)
+                                              (nnopds--origin (if authentication (plist-get authentication :url)
+                                                               (nnopds--connection-url connection))))
+                                   (if authentication (plist-get authentication :headers)
+                                     (nnopds--connection-headers connection)))))
+                        (digest-header
+                         (when (and (not authentication)
+                                    (eq (nnopds--connection-auth-method connection) 'digest))
+                           (assoc-string "Authorization" headers t)))
+                        (digest-user
+                         (when (and digest-header (string-prefix-p "Basic " (cdr digest-header)))
+                           (decode-coding-string (base64-decode-string (substring (cdr digest-header) 6)) 'utf-8)))
                         (headers (if digest-user (remq digest-header headers) headers))
-                        (args (append (list "--silent" "--show-error" "--max-time"
-                                            (number-to-string (max 1 nnopds-request-timeout))
-                                            "--request" method "--dump-header" head-file
-                                            "--output" body-file)
-                                      (when digest-user (list "--digest" "--user" digest-user))
-                                      (mapcan (lambda (header)
-                                                (list "--header" (concat (car header) ": " (cdr header))))
-                                              headers)
-                                      (when data
-                                        (append (unless (assoc-string "Content-Type" headers t)
-                                                  (list "--header" "Content-Type: application/json"))
-                                                (list "--data-binary" "@-")))
-                                      (list "--url" target)))
-                        process started)
-                   (unwind-protect
-                       (progn
-                         (setq process
-                               (make-process
-                                :name "nnopds-http" :buffer buffer :noquery t
-                                :connection-type 'pipe :coding 'binary
-                                :command (cons "curl" args)
-                                :sentinel
-                                (lambda (proc _event)
-                                  (unless (process-live-p proc)
-                                    (setf (nnopds--connection-processes connection)
-                                          (delq proc (nnopds--connection-processes connection)))
-                                    (unwind-protect
-                                        (condition-case failure
-                                            (if (not (and (eq (process-status proc) 'exit)
-                                                          (zerop (process-exit-status proc))))
-                                                (let ((detail (with-current-buffer buffer
-                                                                (string-trim (buffer-string)))))
-                                                  (finish nil (if (string-empty-p detail)
-                                                                  "HTTP request failed or timed out"
-                                                                (concat "HTTP request failed: " detail))))
-                                              (let* ((response (nnopds--response head-file body-file output-file))
-                                                     (status (plist-get response :status))
-                                                     (location (cdr (assoc "location" (plist-get response :headers)))))
-                                                (if (and location (memq status '(301 302 303 307 308)))
-                                                    (if (or (>= redirects 5)
-                                                            (and (not (equal method "GET"))
-                                                                 (not (memq status '(307 308)))))
-                                                        (finish nil "Unsupported or excessive HTTP redirects")
-                                                      (start (nnopds--url location target) (1+ redirects)))
-                                                  (finish (plist-put response :url target) nil))))
-                                          (error (finish nil (error-message-string failure))))
-                                      (unless output-file (delete-file body-file))
-                                      (delete-file head-file)
-                                      (kill-buffer buffer))))))
-                         (setf (nnopds--request-state-process state) process)
-                         (push process (nnopds--connection-processes connection))
-                         (when data (process-send-string process (encode-coding-string data 'utf-8)))
-                         (process-send-eof process)
-                         (setq started t))
-                     (unless started
-                       (when (and process (process-live-p process)) (delete-process process))
-                       (when (and (not output-file) (file-exists-p body-file)) (delete-file body-file))
-                       (when (file-exists-p head-file) (delete-file head-file))
-                       (when (buffer-live-p buffer) (kill-buffer buffer))))))
+                        request)
+                   (when (and data (not (assoc-string "Content-Type" headers t)))
+                     (push '("Content-Type" . "application/json") headers))
+                   (setq request
+                         (zr-http-request
+                          target :options options :method method :headers headers
+                          :body (when data (encode-coding-string data 'utf-8 t))
+                          :output-file output-file
+                          :auth (when digest-user
+                                  (let ((separator (string-search ":" digest-user)))
+                                    (list :scheme 'digest :user (substring digest-user 0 separator)
+                                          :password (substring digest-user (1+ separator)))))
+                          :callback
+                          (lambda (response failure)
+                            (setf (nnopds--connection-requests connection)
+                                  (delq request (nnopds--connection-requests connection)))
+                            (if failure
+                                (finish nil failure)
+                              (let ((status (plist-get response :status))
+                                    (location (cdr (assoc "location" (plist-get response :headers)))))
+                                (if (and location (memq status '(301 302 303 307 308)))
+                                    (if (or (>= redirects 5)
+                                            (and (not (equal method "GET")) (not (memq status '(307 308)))))
+                                        (finish nil "Unsupported or excessive HTTP redirects")
+                                      (start (nnopds--url location target) (1+ redirects)))
+                                  (finish response nil)))))))
+                   (setf (nnopds--request-state-request state) request)
+                   (push request (nnopds--connection-requests connection))))
              (error (finish nil (error-message-string err))))))
       (start (nnopds--url url) 0))
     (if callback state
-      (unwind-protect
-          (progn
-            (while (not (nnopds--request-state-done state))
-              (accept-process-output nil 0.05))
-            (when-let* ((error (nnopds--request-state-error state))) (error "%s" error))
-            (nnopds--request-state-response state))
-        (when-let* ((process (nnopds--request-state-process state))
-                    ((process-live-p process)))
-          (delete-process process))))))
+      (save-excursion
+        (unwind-protect
+            (progn
+              (while (not (nnopds--request-state-done state)) (accept-process-output nil 0.05))
+              (when-let* ((error (nnopds--request-state-error state))) (error "%s" error))
+              (nnopds--request-state-response state))
+          (when-let* ((request (nnopds--request-state-request state)))
+            (zr-http-cancel request)))))))
 
 (defun nnopds--json (response)
   "Parse a successful HTTP RESPONSE as JSON."
@@ -654,8 +601,7 @@ SERVER defaults to the current OPDS server."
                    (nnopds--close-reader (nnopds--publication-format publication) data)))
                (nnopds--connection-publications connection))
       (setf (nnopds--connection-closed connection) t)
-      (dolist (process (copy-sequence (nnopds--connection-processes connection)))
-        (when (process-live-p process) (delete-process process)))
+      (mapc #'zr-http-cancel (copy-sequence (nnopds--connection-requests connection)))
       (maphash (lambda (_group publication)
                  (when-let* ((data (nnopds--publication-data publication)))
                    (nnopds--dispose (nnopds--publication-format publication) data)))

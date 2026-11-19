@@ -8,8 +8,7 @@
 ;; WebDAV file access without GVFS, FUSE, or a remote shell:
 ;;
 ;;   (require 'zr-tramp-webdav)
-;;   (setq zr-tramp-webdav-backend 'curl) ; Default; alternatively `url'.
-;;   (setq zr-tramp-webdav-curl-arguments '("--ipv4"))
+;;   (setq zr-tramp-webdav-http-options '(:curl-arguments ("--ipv4")))
 ;;   (find-file "/webdavs:alice@example.org:/dav/notes.txt")
 ;;   (dired "/webdav:alice@localhost#8080:/dav/")
 ;;
@@ -23,7 +22,7 @@
 ;;   machine example.org port 443 login alice password APP_PASSWORD
 ;; A port named webdav/webdavs is also accepted.  If no entry is found,
 ;; an interactive request prompts after a Basic authentication challenge.
-;; `zr-tramp-webdav-extra-headers' also accepts a function of the remote
+;; `zr-tramp-webdav-http-options' also accepts a function of the remote
 ;; file name, useful for bearer tokens and per-server configuration.
 ;; `zr-tramp-webdav-http-request' gives other HTTP clients, such as
 ;; FFmpeg or curl, the URL and headers of a file.
@@ -43,8 +42,8 @@
 ;; server enforcing access on each request.  Setting modes/times is a
 ;; no-op.  DAV LOCK, trash, file notifications, TRAMP multi-hop, and
 ;; cross-server directory renames are not implemented.  Requests are
-;; synchronous and file contents pass through memory.  Both transports
-;; support Basic/custom-header authentication, not Digest/NTLM negotiation.
+;; synchronous and file contents pass through memory.  Requests use `zr-http'
+;; and support Basic/custom-header authentication.
 
 ;;; Code:
 
@@ -52,39 +51,20 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'tramp)
-(require 'url)
-(require 'url-http)
+(require 'url-expand)
+(require 'url-util)
+(require 'zr-http)
 (require 'xml)
 
 (defgroup zr-tramp-webdav nil
   "Portable WebDAV file access through TRAMP."
   :group 'tramp)
 
-(defcustom zr-tramp-webdav-backend 'curl
-  "HTTP transport used for WebDAV requests."
-  :type '(choice (const :tag "curl executable" curl)
-                 (const :tag "Emacs URL library" url)))
-
-(defcustom zr-tramp-webdav-curl-program "curl"
-  "Executable used when `zr-tramp-webdav-backend' is `curl'."
-  :type 'file)
-
-(defcustom zr-tramp-webdav-curl-arguments nil
-  "Extra command-line arguments for curl, as a list or a function.
-The function is called with the remote file name and must return
-a list of strings.  Arguments are inserted before the request URL."
-  :type '(choice (repeat string) function))
-
-(defcustom zr-tramp-webdav-timeout 30
-  "Maximum number of seconds to wait for one HTTP request."
-  :type 'number)
-
-(defcustom zr-tramp-webdav-extra-headers nil
-  "Extra HTTP headers, as an alist or a function of the remote file name.
-The function must return an alist of (NAME . VALUE) strings.  An
-Authorization header takes precedence over Basic authentication.
-Headers are never forwarded to a different origin on redirects."
-  :type '(choice (alist :key-type string :value-type string) function))
+(defcustom zr-tramp-webdav-http-options nil
+  "HTTP options overriding `zr-http-default-options'.
+An option plist, or a function of the remote file name returning one.
+Use :headers for additional fields, including per-server bearer tokens."
+  :type '(choice sexp function))
 
 (defvar zr-tramp-webdav--passwords (make-hash-table :test #'equal)
   "Credentials entered interactively, keyed by remote identity.")
@@ -196,73 +176,12 @@ error, an authentication failure, or `zr-tramp-webdav-clear-cache'.")
                (encode-coding-string
                 (concat (car credentials) ":" (cdr credentials)) 'utf-8) t)))))
 
-(defun zr-tramp-webdav--parse-headers (text)
-  "Parse HTTP header TEXT, returning (:status CODE :headers ALIST).
-Use the final header block, skipping proxy and informational responses."
-  (let (status headers)
-    (dolist (line (split-string text "\r?\n"))
-      (cond
-       ((string-match "\\`HTTP/[0-9.]+ +\\([0-9][0-9][0-9]\\)\\(?: \\|\\'\\)" line)
-        (setq status (string-to-number (match-string 1 line)) headers nil))
-       ((string-match "\\`\\([^: \t]+\\):[ \t]*\\(.*\\)" line)
-        (push (cons (downcase (match-string 1 line))
-                    (string-trim (match-string 2 line))) headers))))
-    (unless status
-      (signal 'file-error '("Invalid HTTP response from WebDAV server")))
-    (list :status status :headers (nreverse headers))))
-
-(defun zr-tramp-webdav--url-request (_file method url headers data)
-  "Send METHOD to URL with HEADERS and byte string DATA using `url'."
-  (let ((default-directory tramp-compat-temporary-file-directory)
-        (url-request-method method)
-        (url-request-extra-headers
-         ;; An explicit empty field prevents url-http from independently
-         ;; prompting/retrying authentication.  Both transports use our
-         ;; common auth-source and challenge handling instead.
-         (if (assoc-string "Authorization" headers t) headers
-           (cons '("Authorization" . "") headers)))
-        (url-request-data data)
-        (url-request-noninteractive t)
-        (url-max-redirections 0)
-        (url-http-attempt-keepalives nil)
-        (url-mime-encoding-string nil)
-        (url-automatic-caching nil)
-        (coding-system-for-read 'no-conversion)
-        (coding-system-for-write 'no-conversion)
-        (deadline (+ (float-time) zr-tramp-webdav-timeout))
-        buffer done callback-status)
-    ;; Timers and process output handled while waiting run in the caller's
-    ;; buffer.  Restore its point, which fido relies on while completing.
-    (save-excursion
-      (unwind-protect
-          (progn
-            (setq buffer
-                  (url-retrieve
-                   url (lambda (status)
-                         (setq callback-status status done t)) nil t t))
-            (unless (buffer-live-p buffer)
-              (signal 'file-error (list "Cannot open WebDAV URL" url)))
-            (while (and (not done) (< (float-time) deadline))
-              (accept-process-output nil 0.05))
-            (unless done
-              (signal 'file-error (list "WebDAV request timed out" url)))
-            (with-current-buffer buffer
-              (goto-char (point-min))
-              (unless (re-search-forward "\r?\n\r?\n" nil t)
-                (signal 'file-error (list "Incomplete WebDAV HTTP response" url)))
-              (let* ((body-start (point))
-                     (response (zr-tramp-webdav--parse-headers
-                                (buffer-substring-no-properties
-                                 (point-min) body-start))))
-                (when (and (plist-get callback-status :error)
-                           (< (plist-get response :status) 300))
-                  (signal 'file-error (list "WebDAV transport failed" url)))
-                (plist-put response :body
-                           (buffer-substring-no-properties body-start (point-max))))))
-        (when (buffer-live-p buffer)
-          (when-let* ((process (get-buffer-process buffer)))
-            (delete-process process))
-          (kill-buffer buffer))))))
+(defun zr-tramp-webdav--http-request (file method url headers data)
+  "Send METHOD to URL with HEADERS and byte DATA for FILE."
+  (condition-case err
+      (zr-http-request-sync url :options (zr-tramp-webdav--http-options file)
+                            :method method :headers headers :body data)
+    (zr-http-error (signal 'file-error (cdr err)))))
 
 (defun zr-tramp-webdav--read-bytes (file)
   "Read FILE as an unibyte string."
@@ -279,57 +198,6 @@ Use the final header block, skipping proxy and informational responses."
         (write-region-post-annotation-function nil)
         (create-lockfiles nil))
     (write-region data nil file nil 'silent)))
-
-(defun zr-tramp-webdav--curl-arguments (file)
-  "Return extra curl command-line arguments for FILE."
-  (let ((args (if (functionp zr-tramp-webdav-curl-arguments)
-                  (funcall zr-tramp-webdav-curl-arguments file)
-                zr-tramp-webdav-curl-arguments)))
-    (unless (and (listp args) (cl-every #'stringp args))
-      (signal 'file-error '("WebDAV curl arguments must be a list of strings")))
-    args))
-
-(defun zr-tramp-webdav--curl-request (file method url headers data)
-  "Send METHOD to URL with HEADERS and byte string DATA using curl."
-  (let* ((default-directory tramp-compat-temporary-file-directory)
-         (request-file (make-temp-file "zr-webdav-headers-"))
-         (response-file (make-temp-file "zr-webdav-response-"))
-         (error-file (make-temp-file "zr-webdav-error-"))
-         (data-file (and data (make-temp-file "zr-webdav-data-")))
-         (coding-system-for-read 'no-conversion)
-         (coding-system-for-write 'no-conversion))
-    (unwind-protect
-        (with-temp-buffer
-          (set-buffer-multibyte nil)
-          ;; Private header files keep credentials out of the process list.
-          (zr-tramp-webdav--write-bytes
-           (encode-coding-string
-            (mapconcat (lambda (h) (concat (car h) ": " (cdr h))) headers "\n")
-            'utf-8) request-file)
-          (when data (zr-tramp-webdav--write-bytes data data-file))
-          (let ((status
-                 (apply #'call-process zr-tramp-webdav-curl-program
-                        nil (list t error-file) nil
-                        (append
-                         (list "--disable" "--silent" "--show-error" "--globoff"
-                               "--proto" "=http,https" "--request" method
-                               "--max-time" (number-to-string zr-tramp-webdav-timeout)
-                               "--header" (concat "@" request-file)
-                               "--dump-header" response-file)
-                         ;; -X HEAD alone still makes curl expect a body.
-                         (when (equal method "HEAD") '("--head"))
-                         (when data (list "--data-binary" (concat "@" data-file)))
-                         (zr-tramp-webdav--curl-arguments file)
-                         (list "--url" url)))))
-            (unless (equal status 0)
-              (signal 'file-error
-                      (list "WebDAV curl request failed"
-                            (string-trim (zr-tramp-webdav--read-bytes error-file)))))
-            (plist-put (zr-tramp-webdav--parse-headers
-                        (zr-tramp-webdav--read-bytes response-file))
-                       :body (buffer-string))))
-      (dolist (temp-file (list request-file response-file error-file data-file))
-        (when temp-file (delete-file temp-file))))))
 
 (defun zr-tramp-webdav--request (file method &optional headers data)
   "Send a WebDAV METHOD request for FILE with HEADERS and DATA.
@@ -350,16 +218,20 @@ Background requests only contact endpoints that have already answered."
       (error (remhash key zr-tramp-webdav--connected)
              (signal (car err) (cdr err))))))
 
+(defun zr-tramp-webdav--http-options (file)
+  "Return HTTP option overrides for FILE."
+  (if (functionp zr-tramp-webdav-http-options)
+      (funcall zr-tramp-webdav-http-options file)
+    zr-tramp-webdav-http-options))
+
 (defun zr-tramp-webdav--extra-headers (file)
-  "Return `zr-tramp-webdav-extra-headers' for FILE."
-  (if (functionp zr-tramp-webdav-extra-headers)
-      (funcall zr-tramp-webdav-extra-headers file)
-    zr-tramp-webdav-extra-headers))
+  "Return HTTP headers configured for FILE."
+  (zr-http--check-headers
+   (plist-get (zr-http-options zr-http-default-options
+                              (zr-tramp-webdav--http-options file)) :headers)))
 
 (defun zr-tramp-webdav--retrieve (file method headers data)
   "Send METHOD for FILE with HEADERS and DATA, handling auth and redirects."
-  (unless (and (numberp zr-tramp-webdav-timeout) (> zr-tramp-webdav-timeout 0))
-    (signal 'file-error '("WebDAV timeout must be positive")))
   (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
          (url (zr-tramp-webdav--url vec))
          (origin (zr-tramp-webdav--origin url))
@@ -368,17 +240,14 @@ Background requests only contact endpoints that have already answered."
                    '(("Accept-Encoding" . "identity"))))
          (authorization (or (zr-tramp-webdav--header headers "Authorization")
                             (zr-tramp-webdav--authorization vec)))
-         (transport (pcase zr-tramp-webdav-backend
-                      ('url #'zr-tramp-webdav--url-request)
-                      ('curl #'zr-tramp-webdav--curl-request)
-                      (_ (signal 'file-error '("Unknown WebDAV backend")))))
+
          (redirects 0)
          response finished)
     (when (and authorization (not (assoc-string "Authorization" headers t)))
       (push (cons "Authorization" authorization) headers))
     (zr-tramp-webdav--check-headers headers)
     (while (not finished)
-      (setq response (funcall transport file method url headers data))
+      (setq response (zr-tramp-webdav--http-request file method url headers data))
       (let ((status (plist-get response :status)))
         (cond
          ((and (= status 401) (not authorization)
@@ -407,8 +276,8 @@ Background requests only contact endpoints that have already answered."
 
 (defun zr-tramp-webdav-http-request (file &optional resolve)
   "Return (URL . HEADERS) for another HTTP client to access WebDAV FILE.
-A GET of URL reads FILE and a PUT replaces it.  HEADERS holds
-`zr-tramp-webdav-extra-headers' and known Basic credentials.
+A GET of URL reads FILE and a PUT replaces it.  HEADERS holds :headers
+from `zr-tramp-webdav-http-options' and known Basic credentials.
 With RESOLVE, send a HEAD request first, following same-origin redirects
 and allowing authentication.  Otherwise nothing prompts.  Clients must
 still prevent subsequent redirects from forwarding these headers."

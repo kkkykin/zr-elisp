@@ -24,7 +24,7 @@
 (require 'cl-lib)
 (require 'subr-x)
 (require 'url-util)
-(require 'url)
+(require 'zr-http)
 (require 'auth-source)
 
 (declare-function dired-get-marked-files "dired"
@@ -127,10 +127,9 @@ If nil, defaults to ssh://<system-name> when inside an SSH session."
   :type '(choice (const :tag "Default / Auto" nil) string)
   :group 'zr-mpv)
 
-(defcustom zr-mpv-http-extra-headers nil
-  "Additional HTTP headers alist to send with HTTP backend requests."
-  :type '(repeat (cons (string :tag "Header name") (string :tag "Value")))
-  :group 'zr-mpv)
+(defcustom zr-mpv-http-options nil
+  "HTTP options overriding `zr-http-default-options' for the mpv daemon."
+  :type 'sexp :group 'zr-mpv)
 
 (defcustom zr-mpv-android-package "app.gyrolet.mpvrx"
   "Android package name for the mpvRx player."
@@ -378,18 +377,14 @@ HEADERS is an optional alist or list of HTTP header strings."
         (push `("Origin" . ,(encode-coding-string origin 'utf-8)) req-headers))
       (when-let* ((auth (zr-mpv--auth-header zr-mpv-http-auth-host)))
         (push `("Authorization" . ,auth) req-headers))
-      (when zr-mpv-http-extra-headers
-        (setq req-headers (append req-headers zr-mpv-http-extra-headers)))
-      (let ((url-request-method "POST")
-            (url-request-extra-headers req-headers)
-            (url-request-data (encode-coding-string payload 'utf-8 t)))
-        (url-retrieve
-         zr-mpv-http-url
-         (lambda (status)
-           (if (plist-get status :error)
-               (message "zr-mpv HTTP error: %S" (plist-get status :error))
-             (message "zr-mpv: playback started on %s" zr-mpv-http-url)))
-         nil t)))))
+      (zr-http-request
+       zr-mpv-http-url :options zr-mpv-http-options :method "POST"
+       :headers req-headers :body (encode-coding-string payload 'utf-8 t)
+       :callback
+       (lambda (response error)
+         (if (or error (not (<= 200 (plist-get response :status) 299)))
+             (message "zr-mpv HTTP error: %s" (or error (plist-get response :status)))
+           (message "zr-mpv: playback started on %s" zr-mpv-http-url)))))))
 
 (defun zr-mpv-serve-playlist (files &optional timeout)
   "Start a temporary HTTP server providing an M3U8 playlist of FILES.

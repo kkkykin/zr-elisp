@@ -390,7 +390,8 @@ These settings also support `setq-local` in a conversation:
 (setq zr-erc-upload-auto-send t) ; Optional: send links directly.
 (setq zr-erc-upload-litterbox-time "1h") ; Also 12h, 24h or 72h.
 (setq zr-erc-upload-link-format "[%f](%u)") ; Default: "%u"; %% means %.
-(setq zr-erc-upload-curl-arguments '("--proxy" "http://127.0.0.1:7890"))
+(setq zr-erc-upload-http-options
+      '(:timeout 120 :proxy "http://127.0.0.1:7890"))
 ;; A formatter may instead receive the URL and original filename:
 (setq zr-erc-upload-link-format
       (lambda (url file)
@@ -399,7 +400,8 @@ These settings also support `setq-local` in a conversation:
 
 The formatter and auto-send setting are captured when uploading starts.
 The formatter must return a nonempty single line.
-`zr-erc-upload-timeout` defaults to 120 seconds.
+Requests use `zr-http`; `zr-erc-upload-http-options` overrides
+`zr-http-default-options` and defaults to `(:timeout 120)`.
 `M-x zr-erc-upload-cancel` cancels pending uploads in the current buffer.
 Closing the buffer or disabling the module also cancels its uploads.
 Temporary clipboard images and curl response buffers are cleaned up on
@@ -556,10 +558,10 @@ Use `:proxy` to select an HTTP proxy for opening and downloading files:
                   zr-erc-link-rules))
 ```
 
-The default, `inherit`, uses Emacs's existing URL proxy settings. A nil
+The default, `inherit`, uses curl's proxy environment variables. A nil
 value forces a direct connection, including `:proxy nil` in a rule.
-`:proxy inherit` restores the Emacs settings for a rule. Proxy addresses
-accept `host:port` or `http://host:port`, including bracketed IPv6 hosts;
+`:proxy inherit` restores environment routing for a rule. Proxy addresses
+accept curl proxy URLs or HTTP `host:port`, including bracketed IPv6 hosts;
 credentials and paths in proxy URLs are not supported. Explicit proxies
 bypass `no_proxy` exclusions. HTTP links use the proxy directly, and HTTPS
 links use CONNECT tunnels. These settings affect only file requests and
@@ -601,13 +603,15 @@ come from a tag rather than the body:
                :url-tag "+media-url" :regexp "\\`https://" :type file)))
 ```
 
-All file settings live in `zr-erc-link-rules`. Omitted settings use these defaults:
+HTTP requests use `zr-http-default-options`, overridden by
+`zr-erc-link-http-options` and then individual rules. Other file settings
+live in `zr-erc-link-rules`. Omitted settings use these defaults:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `:max-age` | nil | Maximum message age in seconds; nil means unlimited |
-| `:proxy` | `inherit` | Emacs proxy settings; nil connects directly |
-| `:timeout` | 30 | Maximum seconds for each HTTP request |
+| `:proxy` | inherited | curl proxy environment; nil connects directly |
+| `:timeout` | inherited (30) | Maximum seconds for each HTTP request |
 | `:max-bytes` | 67108864 | Maximum response body size in bytes (64 MiB) |
 | `:dir` | `"~/Downloads/"` | Initial directory offered when downloading |
 

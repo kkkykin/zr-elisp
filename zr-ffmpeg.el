@@ -34,6 +34,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'zr-http)
 (require 'dired)
 (require 'subr-x)
 (require 'transient)
@@ -122,18 +123,15 @@ Verifying certificates protects the credentials in request headers.
 Add `ca_file' to trust a private certificate authority."
   :type '(repeat (choice string (cons symbol sexp))))
 
-(defcustom zr-ffmpeg-curl-program "curl"
-  "Curl executable that uploads remote outputs."
-  :type 'file)
-
-(defcustom zr-ffmpeg-curl-arguments nil
-  "Extra curl arguments for uploads, such as proxy or certificate options."
-  :type '(repeat string))
+(defcustom zr-ffmpeg-http-options nil
+  "HTTP options overriding `zr-http-default-options' for remote uploads."
+  :type 'sexp)
 
 ;;; Presets
 
 ;; An argument list contains strings for flags/options without values and
 ;; conses such as `(c:v . "h264_nvenc")' for options with one value.
+
 (defcustom zr-ffmpeg-presets
   '((screen-stream
      :video-args ((c:v . "libx264") (preset . "veryfast")
@@ -1508,15 +1506,6 @@ more files, which belong next to REMOTE."
                                           (file-name-directory remote))
                                          overwrite))))
 
-(defun zr-ffmpeg--curl-form-file (file name)
-  "Return a curl --form argument whose file part sends FILE as NAME."
-  ;; curl keeps a custom Content-Disposition.  As in zr-tramp-rcrc's own
-  ;; uploads, RFC 5987 encoding preserves every character of NAME.
-  (format (concat "file0=@\"%s\";headers=\"Content-Disposition: form-data; "
-                  "name=\\\"file0\\\"; filename*=utf-8''%s\"")
-          (replace-regexp-in-string "[\"\\]" "\\\\\\&" file)
-          (url-hexify-string name)))
-
 (defun zr-ffmpeg--redirect-url (url location)
   "Resolve LOCATION against URL, rejecting a change of origin or credentials."
   (let* ((next (and location (url-expand-file-name location url)))
@@ -1530,22 +1519,9 @@ more files, which belong next to REMOTE."
       (user-error "Unsafe upload redirect"))
     next))
 
-(defun zr-ffmpeg--curl-response (file)
-  "Read the final (STATUS . LOCATION) from curl's response header FILE."
-  (with-temp-buffer
-    (insert-file-contents file)
-    (let ((case-fold-search t) (status 0) location)
-      (dolist (line (split-string (buffer-string) "\r?\n"))
-        (cond
-         ((string-match "\\`HTTP/[0-9.]+ +\\([0-9]+\\)" line)
-          (setq status (string-to-number (match-string 1 line)) location nil))
-         ((string-match "\\`Location:[ \t]*\\(.*\\)" line)
-          (setq location (string-trim (match-string 1 line))))))
-      (cons status location))))
-
-(defun zr-ffmpeg--curl-upload (local remote buffer callback
+(defun zr-ffmpeg--http-upload (local remote buffer callback
                                      &optional overwrite url redirects)
-  "Upload LOCAL as REMOTE with curl, logging errors to BUFFER.
+  "Upload LOCAL as REMOTE, logging errors to BUFFER.
 Call CALLBACK with non-nil only after an HTTP 2xx response.
 OVERWRITE permits replacement; otherwise WebDAV uses exclusive creation.
 URL and REDIRECTS track retries after same-origin redirects."
@@ -1553,66 +1529,31 @@ URL and REDIRECTS track retries after same-origin redirects."
          (url (or url (car request)))
          (redirects (or redirects 0))
          (rcrc (equal (file-remote-p remote 'method) "rcrc"))
-         (headers (append (unless (or overwrite rcrc)
-                            '(("If-None-Match" . "*")))
-                          (cdr request)))
-         (response-file (make-temp-file "zr-http-headers-"))
-         process)
-    (unwind-protect
-        (progn
-          (setq process
-                (make-process
-                 :name "zr-ffmpeg-upload" :buffer buffer
-                 :connection-type 'pipe :coding 'utf-8-unix
-                 :command
-                 (append
-                  (list zr-ffmpeg-curl-program "--disable" "--silent" "--show-error"
-                        "--fail" "--globoff"
-                        "--output" null-device
-                        ;; Headers from stdin keep credentials out of process lists.
-                        "--header" "@-")
-                  (if rcrc
-                      (list "--form" (zr-ffmpeg--curl-form-file
-                                      local (file-name-nondirectory remote)))
-                    (list "--upload-file" local))
-                  zr-ffmpeg-curl-arguments
-                  ;; Inspect every redirect before sending credentials or data.
-                  (list "--no-location" "--max-redirs" "0" "--proto" "=http,https"
-                        "--dump-header" response-file "--url" url))
-                 :sentinel
-                 (lambda (process _event)
-                   (when (memq (process-status process) '(exit signal))
-                     (unwind-protect
-                         (condition-case err
-                             (pcase-let ((`(,status . ,location)
-                                          (zr-ffmpeg--curl-response response-file)))
-                               (cond
-                                ((and (zerop (process-exit-status process))
-                                      (<= 200 status 299))
-                                 (funcall callback t))
-                                ((and (zerop (process-exit-status process))
-                                      (memq status '(301 302 307 308)))
-                                 (when (>= redirects 5)
-                                   (user-error "Too many upload redirects"))
-                                 (zr-ffmpeg--curl-upload
-                                  local remote buffer callback overwrite
-                                  (zr-ffmpeg--redirect-url url location) (1+ redirects)))
-                                (t (error "Upload failed: HTTP %s, curl exit %s"
-                                          status (process-exit-status process)))))
-                           (error
-                            (when (buffer-live-p buffer)
-                              (with-current-buffer buffer
-                                (goto-char (point-max))
-                                (insert (error-message-string err) "\n")))
-                            (funcall callback nil)))
-                       (delete-file response-file))))))
-          (process-send-string
-           process (mapconcat (lambda (header)
-                                (concat (car header) ": " (cdr header) "\n"))
-                              headers ""))
-          (process-send-eof process)
-          process)
-      (unless process (delete-file response-file)))))
+         (headers (append (unless (or overwrite rcrc) '(("If-None-Match" . "*")))
+                          (cdr request))))
+    (zr-http-request
+     url :options zr-ffmpeg-http-options :headers headers
+     :upload-file (unless rcrc local)
+     :form (when rcrc (list (cons "file0" (list :file local :filename (file-name-nondirectory remote)))))
+     :callback
+     (lambda (response failure)
+       (condition-case err
+           (progn
+             (when failure (error "%s" failure))
+             (let ((status (plist-get response :status)))
+               (cond
+                ((<= 200 status 299) (funcall callback t))
+                ((memq status '(301 302 307 308))
+                 (when (>= redirects 5) (user-error "Too many upload redirects"))
+                 (zr-ffmpeg--http-upload
+                  local remote buffer callback overwrite
+                  (zr-ffmpeg--redirect-url url (cdr (assoc "location" (plist-get response :headers))))
+                  (1+ redirects)))
+                (t (error "Upload failed: HTTP %s" status)))))
+         (error
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (goto-char (point-max)) (insert (error-message-string err) "\n")))
+          (funcall callback nil)))))))
 
 (defun zr-ffmpeg--upload (files directory buffer)
   "Upload FILES, (LOCAL REMOTE OVERWRITE) entries, then delete DIRECTORY.
@@ -1627,7 +1568,7 @@ not yet uploaded."
             ;; Patterns and muxers can produce names that were not known
             ;; before encoding.  Check each actual target with fresh metadata.
             (setq overwrite (zr-ffmpeg--check-remote-output remote overwrite))
-            (zr-ffmpeg--curl-upload
+            (zr-ffmpeg--http-upload
              local remote buffer
              (lambda (success)
                (if (not success)

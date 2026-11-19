@@ -861,7 +861,7 @@ values."
      (unwind-protect
          (progn
            (dolist (program (list zr-ffmpeg-program zr-ffmpeg-ffprobe-program
-                                  zr-ffmpeg-curl-program))
+                                  "curl"))
              (unless (executable-find program)
                (ert-skip (format "%s is required" program))))
            ,@body)
@@ -924,7 +924,7 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
               zr-ffmpeg-test--servers)
         (zr-tramp-rcrc-register-endpoint url "test" "secret")
         (while (and (not ready) (< (float-time) deadline))
-          (let ((zr-tramp-rcrc-timeout 0.5))
+          (let ((zr-tramp-rcrc-http-options '(:timeout 0.5 :proxy nil)))
             (setq ready (ignore-errors (directory-files (concat top "fixture:/")))))
           (unless ready (accept-process-output nil 0.1)))
         (unless ready (error "rcd fixture did not start"))
@@ -945,7 +945,7 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
   ;; A process leaves `process-list' just before its sentinel runs.
   (let ((deadline (+ (float-time) 60)))
     (while (and (cl-some (lambda (process)
-                           (string-match-p "\\`zr-ffmpeg\\(?:-upload\\)?\\(?:<[0-9]+>\\)?\\'"
+                           (string-match-p "\\`\\(?:zr-ffmpeg\\|zr-http-curl\\)\\(?:<[0-9]+>\\)?\\'"
                                            (process-name process)))
                          (process-list))
                 (< (float-time) deadline))
@@ -1060,7 +1060,7 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
     (let* ((input (zr-ffmpeg-test--webdav-root))
            (output (zr-ffmpeg-test--webdav-root))
            (sample (make-temp-file "sample-" nil ".mkv"))
-           (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture"))))
+           (zr-tramp-webdav-http-options '(:headers (("Authorization" . "Bearer fixture")))))
       (zr-ffmpeg-test--sample sample)
       (copy-file sample (concat input "redirect-target"))
       (should (equal (zr-ffmpeg-test--stream-types (concat input "redirect-source"))
@@ -1081,7 +1081,7 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
            (target (concat root "cross-origin-target.mkv"))
            (output (expand-file-name "out.mkv" temporary-file-directory))
            (sample (make-temp-file "sample-" nil ".mkv"))
-           (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture"))))
+           (zr-tramp-webdav-http-options '(:headers (("Authorization" . "Bearer fixture")))))
       (zr-ffmpeg-test--sample sample)
       (copy-file sample input)
       (copy-file sample target)
@@ -1107,9 +1107,9 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
         (let* ((root (zr-ffmpeg-test--webdav-root))
                (output (concat root (car case)))
                (sample (make-temp-file "sample-" nil ".mkv"))
-               (zr-tramp-webdav-extra-headers '(("Authorization" . "Bearer fixture")))
+               (zr-tramp-webdav-http-options '(:headers (("Authorization" . "Bearer fixture"))))
                ;; Even extra curl arguments cannot enable unchecked redirects.
-               (zr-ffmpeg-curl-arguments '("--location-trusted")))
+               (zr-ffmpeg-http-options '(:curl-arguments ("--location-trusted"))))
           (zr-ffmpeg-test--sample sample)
           (zr-ffmpeg-test--run
            (list zr-ffmpeg-program "-v" "error" "-i" sample "-c" "copy" output))

@@ -443,7 +443,7 @@
                                (nnopds--get-publication ,group "library" t))))
                (output (generate-new-buffer " *opds-crash-test*"))
                (child (make-process :name "opds-crash-test" :buffer output :noquery t
-                                    :command (list invocation-name "--batch" "-Q" "-L" nnopds-test--load-path
+                                    :command (list invocation-name "--batch" "-Q" "-L" nnopds-test--load-path "-L" (expand-file-name ".." nnopds-test--load-path)
                                                    "--eval" (prin1-to-string form)))))
           (unwind-protect
               (progn
@@ -464,7 +464,7 @@
                              `((let ((publication (nnopds--get-publication ,group "library" t)))
                                  (unless (= 4 (nnopds--publication-count publication)) (error "Missing chapters")))
                                (nnopds-request-close))))
-               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path "-L" (expand-file-name ".." nnopds-test--load-path)
                                      "--eval" (prin1-to-string form))))
           (ert-info ((buffer-string)) (should (= status 0)))))
       (should (= 4 (plist-get (nnopds--read-json index-file) :count)))
@@ -681,10 +681,10 @@
         (let* ((form `(progn
                        (require 'nnopds)
                        (cl-defstruct (nnopds--connection (:constructor nnopds--make-connection))
-                         name url headers directory catalog publications processes readers fetched
+                         name url headers directory catalog publications requests readers fetched
                          closed progress auth-method)
                        (unless (byte-compile-file ,adapter) (error "Could not compile adapter"))))
-               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+               (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path "-L" (expand-file-name ".." nnopds-test--load-path)
                                      "--eval" (prin1-to-string form))))
           (ert-info ((buffer-string)) (should (= status 0)))))
       (dotimes (session 2)
@@ -714,7 +714,7 @@
                        (error "Book missing"))
                      (nnopds-refresh-catalog "komga")
                      (nnopds-request-close)))
-                 (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+                 (status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path "-L" (expand-file-name ".." nnopds-test--load-path)
                                        "--eval" (prin1-to-string form))))
             (ert-info ((format "Session %d: %s" session (buffer-string))) (should (= status 0)))))
         ;; First browsing fetches once; startup and later browsing use cache.
@@ -738,13 +738,13 @@
 
 (ert-deftest nnopds-test-http-timeout-releases-callback-and-resources ()
   (nnopds-test--with-server
-    (let ((nnopds-request-timeout 1) (calls 0) failure)
+    (let ((nnopds-http-options '(:timeout 1 :proxy nil)) (calls 0) failure)
       (nnopds--request connection "GET" (nnopds--url "/slow" opds-url) nil
                        (lambda (_response error) (cl-incf calls) (setq failure error)))
       (nnopds-test--wait (lambda () failure))
       (should (= calls 1))
-      (should (string-match-p "curl: (28)" failure))
-      (should-not (nnopds--connection-processes connection)))))
+      (should (string-match-p "timed out\\|curl: (28)" failure))
+      (should-not (nnopds--connection-requests connection)))))
 
 (ert-deftest nnopds-test-http-file-output-redirects-and-ownership ()
   (nnopds-test--with-server
@@ -771,7 +771,7 @@
       (should (equal file (plist-get response :file)))
       (should-not (plist-member response :body))
       (should (equal (nnopds--read-bytes file) (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
-      (should-not (nnopds--connection-processes connection))
+      (should-not (nnopds--connection-requests connection))
       (should (cl-every (lambda (path) (not (file-exists-p path))) headers))
       ;; Direct file requests use the same origin scoping as string requests.
       (let* ((target (replace-regexp-in-string "127.0.0.1" "localhost" (nnopds--url "/echo" opds-url)))
@@ -780,11 +780,11 @@
         (let ((echo (nnopds--read-json file)))
           (should-not (plist-get echo :X-API-Key))
           (should-not (plist-get echo :Authorization))))
-      (let ((nnopds-request-timeout 1))
+      (let ((nnopds-http-options '(:timeout 1 :proxy nil)))
         (should-error (nnopds--request connection "GET" (nnopds--url "/slow" opds-url) nil nil nil nil file)))
       ;; Even a failed transfer leaves output-file cleanup to its owner.
       (should (file-exists-p file))
-      (should-not (nnopds--connection-processes connection)))))
+      (should-not (nnopds--connection-requests connection)))))
 
 (ert-deftest nnopds-test-json-arrays-and-booleans-survive-cache-round-trip ()
   (zr-test-with-temp-directory
@@ -1015,7 +1015,7 @@
                     (nnopds-request-close)
                     (princ "koreader-integration-ok")))))
           (with-temp-buffer
-            (let ((status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path
+            (let ((status (call-process invocation-name nil t nil "--batch" "-Q" "-L" nnopds-test--load-path "-L" (expand-file-name ".." nnopds-test--load-path)
                                         "--eval" (prin1-to-string form))))
               (ert-info ((buffer-string))
                 (should (= status 0))

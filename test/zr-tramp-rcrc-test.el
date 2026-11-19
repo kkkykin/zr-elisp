@@ -98,7 +98,7 @@
         (auth-sources nil)
         (tramp-verbose 0)
         (requests 0))
-    (cl-letf (((symbol-function 'url-retrieve) (lambda (&rest _) (cl-incf requests) nil)))
+    (cl-letf (((symbol-function 'zr-http-request-sync) (lambda (&rest _) (cl-incf requests) (signal 'zr-http-error '("Cannot connect")))))
       (cl-flet ((complete ()
                   ;; fido and icomplete complete with `non-essential' bound.
                   (let ((non-essential t))
@@ -111,27 +111,18 @@
         (should-not (complete))
         (should (= requests 1))))))
 
-(ert-deftest zr-tramp-rcrc-requests-keep-the-callers-point ()
+(ert-deftest zr-tramp-rcrc-requests-use-shared-options ()
   (let ((zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
         (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+        (zr-tramp-rcrc-http-options '(:timeout 0.5 :proxy nil))
         (auth-sources nil)
         (vec (tramp-dissect-file-name "/rcrc:127.0.0.1#9:/fx:/")))
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (_url callback &rest _)
-                 (let ((response (generate-new-buffer " *zr-tramp-rcrc-test*")))
-                   (with-current-buffer response
-                     (setq-local url-http-response-status 200)
-                     (insert "HTTP/1.1 200 OK\r\n\r\n{\"ok\":1}"))
-                   ;; Timers run while the request waits, in the caller's buffer.
-                   (run-at-time 0 nil (lambda ()
-                                        (goto-char (point-min))
-                                        (with-current-buffer response
-                                          (funcall callback nil))))
-                   response))))
-      (with-temp-buffer
-        (insert "Current path: /rcrc:127.0.0.1#9:/fx:/")
-        (should (equal (zr-tramp-rcrc--call vec "rc/noop") '((ok . 1))))
-        (should (= (point) (point-max)))))))
+    (cl-letf (((symbol-function 'zr-http-request-sync)
+               (lambda (_url &rest options)
+                 (should (equal zr-tramp-rcrc-http-options (plist-get options :options)))
+                 (should (equal "POST" (plist-get options :method)))
+                 '(:status 200 :body "{\"ok\":1}"))))
+      (should (equal (zr-tramp-rcrc--call vec "rc/noop") '((ok . 1)))))))
 
 ;;; Integration
 
@@ -179,7 +170,7 @@
         (let ((vec (tramp-dissect-file-name (zr-tramp-rcrc-file-name url nil)))
               (deadline (+ (float-time) 10)) ready)
           (while (and (not ready) (< (float-time) deadline))
-            (let ((zr-tramp-rcrc-timeout 0.5))
+            (let ((zr-tramp-rcrc-http-options '(:timeout 0.5 :proxy nil)))
               (setq ready (ignore-errors (zr-tramp-rcrc--call vec "rc/noop") t)))
             (unless ready (accept-process-output nil 0.1)))
           (unless ready (error "Fixture rcd did not start")))
@@ -194,7 +185,7 @@
   (declare (indent 0) (debug body))
   `(let* ((url-proxy-services '(("no_proxy" . ".*")))
           (auth-sources nil)
-          (zr-tramp-rcrc-timeout 10)
+          (zr-tramp-rcrc-http-options '(:timeout 10 :proxy nil))
           (tramp-verbose 0)
           (server (zr-tramp-rcrc-test--start t))
           (name (format "case-%d" (cl-incf zr-tramp-rcrc-test--serial)))

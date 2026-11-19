@@ -2,7 +2,7 @@
 
 ;;; Commentary:
 
-;; Exercise public Emacs file operations with both HTTP transports against
+;; Exercise public Emacs file operations through the shared curl transport against
 ;; a local, in-memory WebDAV server.  No external Python packages are needed.
 
 ;;; Code:
@@ -52,33 +52,23 @@
         (error "WebDAV fixture did not start: %s" (with-current-buffer buffer (buffer-string))))))
   zr-tramp-webdav-test--port)
 
-(defmacro zr-tramp-webdav-test--with-backends (&rest body)
-  "Run BODY for each transport, binding `root' to a fresh collection."
+(defmacro zr-tramp-webdav-test--with-server (&rest body)
+  "Run BODY with `root' bound to a fresh WebDAV collection."
   (declare (indent 0) (debug body))
-  `(let ((port (zr-tramp-webdav-test--start))
-         (auth-sources nil)
-         (auth-source-do-cache nil)
-         (url-proxy-services '(("no_proxy" . ".*")))
-         (process-environment (copy-sequence process-environment))
-         (tramp-cache-data (make-hash-table :test #'equal))
-         (tramp-verbose 0)
-         (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
-         (zr-tramp-webdav--connected (make-hash-table :test #'equal))
-         (zr-tramp-webdav-timeout 3)
-         (zr-tramp-webdav-extra-headers nil))
-     (setenv "NO_PROXY" "*")
-     (setenv "no_proxy" "*")
-     (dolist (zr-tramp-webdav-backend '(url curl))
-       (ert-info ((format "Transport: %S" zr-tramp-webdav-backend))
-         (when (eq zr-tramp-webdav-backend 'curl)
-           (unless (executable-find zr-tramp-webdav-curl-program)
-             (ert-skip "curl is required")))
-         (let ((root (format "/webdav:127.0.0.1#%s:/dav/test-%d/"
-                             port (cl-incf zr-tramp-webdav-test--serial))))
-           (zr-tramp-webdav-clear-cache)
-           (unwind-protect
-               (progn (make-directory root) ,@body)
-             (ignore-errors (delete-directory root t))))))))
+  `(let* ((port (zr-tramp-webdav-test--start))
+          (auth-sources nil) (auth-source-do-cache nil)
+          (zr-http-default-options '(:proxy nil :timeout 3))
+          (tramp-cache-data (make-hash-table :test #'equal))
+          (tramp-verbose 0)
+          (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
+          (zr-tramp-webdav--connected (make-hash-table :test #'equal))
+          (zr-tramp-webdav-http-options nil)
+          (root (format "/webdav:127.0.0.1#%s:/dav/test-%d/"
+                        port (cl-incf zr-tramp-webdav-test--serial))))
+     (unless (executable-find "curl") (ert-skip "curl is required"))
+     (zr-tramp-webdav-clear-cache)
+     (unwind-protect (progn (make-directory root) ,@body)
+       (ignore-errors (delete-directory root t)))))
 
 (defun zr-tramp-webdav-test--contents (file)
   "Read FILE as text."
@@ -100,7 +90,7 @@
   (let* ((file "/webdavs:alice@example.org#8443:/dav/中 文.mkv")
          (auth-sources nil)
          (zr-tramp-webdav--passwords (make-hash-table :test #'equal))
-         (zr-tramp-webdav-extra-headers '(("X-Client" . "test"))))
+         (zr-tramp-webdav-http-options '(:headers (("X-Client" . "test")))))
     (should (equal (zr-tramp-webdav-http-request file)
                    '("https://example.org:8443/dav/%E4%B8%AD%20%E6%96%87.mkv"
                      ("X-Client" . "test"))))
@@ -112,17 +102,17 @@
                      ("Authorization"
                       . ,(concat "Basic " (base64-encode-string "alice:secret" t))))))
     ;; An explicit authorization header takes precedence.
-    (let ((zr-tramp-webdav-extra-headers
+    (let ((zr-tramp-webdav-http-options
            (lambda (name)
              (should (equal name file))
-             '(("authorization" . "Bearer token")))))
+             '(:headers (("authorization" . "Bearer token"))))))
       (should (equal (cdr (zr-tramp-webdav-http-request file))
                      '(("Authorization" . "Bearer token")))))))
 
 (ert-deftest zr-tramp-webdav-http-request-resolves-input-redirects ()
-  "HEAD resolution works with both transports and preserves custom headers."
-  (zr-tramp-webdav-test--with-backends
-    (let ((zr-tramp-webdav-extra-headers '(("X-Client" . "ffmpeg"))))
+  "HEAD resolution preserves custom headers through the shared transport."
+  (zr-tramp-webdav-test--with-server
+    (let ((zr-tramp-webdav-http-options '(:headers (("X-Client" . "ffmpeg")))))
       (write-region "media" nil (concat root "redirect-target") nil 'silent)
       (should (equal (zr-tramp-webdav-http-request (concat root "redirect-source") t)
                      (zr-tramp-webdav-http-request (concat root "redirect-target"))))
@@ -141,28 +131,21 @@
     (should-not (plist-get (car entries) :directory))
     (should-not (zr-tramp-webdav--href-path "/dav/a%2fb" "http://example.org/dav/"))))
 
-(ert-deftest zr-tramp-webdav-url-requests-keep-the-callers-point ()
-  (cl-letf (((symbol-function 'url-retrieve)
-             (lambda (_url callback &rest _)
-               (let ((response (generate-new-buffer " *zr-tramp-webdav-test*")))
-                 (with-current-buffer response
-                   (insert "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"))
-                 ;; Timers run while the request waits, in the caller's buffer.
-                 (run-at-time 0 nil (lambda ()
-                                      (goto-char (point-min))
-                                      (with-current-buffer response
-                                        (funcall callback nil))))
-                 response))))
-    (with-temp-buffer
-      (insert "Find file: /webdav:example.invalid:/dav/")
-      (let ((response (zr-tramp-webdav--url-request
-                       nil "GET" "http://example.invalid/dav/" nil nil)))
-        (should (equal (plist-get response :status) 200))
-        (should (equal (plist-get response :body) "ok")))
-      (should (= (point) (point-max))))))
+(ert-deftest zr-tramp-webdav-requests-keep-the-callers-point ()
+  (zr-tramp-webdav-test--with-server
+    (let ((file (concat root "point.txt")))
+      (write-region "ok" nil file nil 'silent)
+      (with-temp-buffer
+        (insert "Find file")
+        (let ((timer (run-at-time 0 nil (lambda () (goto-char (point-min))))))
+          (unwind-protect
+              (progn
+                (should (equal "ok" (plist-get (zr-tramp-webdav--request file "GET") :body)))
+                (should (= (point) (point-max))))
+            (cancel-timer timer)))))))
 
 (ert-deftest zr-tramp-webdav-text-and-binary-roundtrip ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "中文 %?#&+[].txt"))
           (binary (concat root "raw.bin"))
           (bytes (unibyte-string 0 255 128 13 10 1 254)))
@@ -191,7 +174,7 @@
           (delete-file copy))))))
 
 (ert-deftest zr-tramp-webdav-listing-completion-and-dired ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "中文 note.txt"))
           (directory (concat root "folder/")))
       (write-region "hello" nil file nil 'silent)
@@ -228,11 +211,7 @@
          (requests 0)
          (debug-messages 0)
          results)
-    (cl-letf (((symbol-function 'zr-tramp-webdav--curl-request)
-               (lambda (&rest _args)
-                 (cl-incf requests)
-                 '(:status 404)))
-              ((symbol-function 'zr-tramp-webdav--url-request)
+    (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
                (lambda (&rest _args)
                  (cl-incf requests)
                  '(:status 404)))
@@ -264,15 +243,13 @@
                   tramp-cache-undefined)))))
 
 (ert-deftest zr-tramp-webdav-background-requests-reuse-known-endpoints ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "note.txt"))
           (directory (concat root "folder/")))
       (write-region "hello" nil file nil 'silent)
       (make-directory directory)
       (zr-tramp-webdav-clear-cache)
-      (let* ((transport (if (eq zr-tramp-webdav-backend 'curl)
-                            'zr-tramp-webdav--curl-request
-                          'zr-tramp-webdav--url-request))
+      (let* ((transport 'zr-tramp-webdav--http-request)
              (original (symbol-function transport))
              (requests 0))
         (cl-letf (((symbol-function transport)
@@ -311,7 +288,7 @@
           (should (= requests 5)))))))
 
 (ert-deftest zr-tramp-webdav-background-completion-after-dired ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (make-directory (concat root "alpha/nested/") t)
     (write-region "text" nil (concat root "note.txt") nil 'silent)
     (write-region "text" nil (concat root "alpha/nested/leaf.txt") nil 'silent)
@@ -337,11 +314,9 @@
         (kill-buffer buffer)))))
 
 (ert-deftest zr-tramp-webdav-background-transport-failure-needs-explicit-retry ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let* ((directory (concat root "folder/"))
-           (transport (if (eq zr-tramp-webdav-backend 'curl)
-                          'zr-tramp-webdav--curl-request
-                        'zr-tramp-webdav--url-request))
+           (transport 'zr-tramp-webdav--http-request)
            (requests 0))
       (make-directory (concat directory "nested/leaf/") t)
       (zr-tramp-webdav-clear-cache)
@@ -361,7 +336,7 @@
                        '("leaf/")))))))
 
 (ert-deftest zr-tramp-webdav-background-authentication-never-prompts ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let* ((protected (format "/webdav:127.0.0.1#%s:/auth/" port))
            (prompts 0)
            (noninteractive nil))
@@ -376,10 +351,10 @@
           (should-not (directory-files protected)))
         (should (= prompts 0)))
       ;; Foreground access can authenticate again, then completion can resume.
-      (let ((zr-tramp-webdav-extra-headers
-             (list (cons "Authorization"
+      (let ((zr-tramp-webdav-http-options
+             (list :headers (list (cons "Authorization"
                          (concat "Basic "
-                                 (base64-encode-string "alice:app-password" t))))))
+                                 (base64-encode-string "alice:app-password" t)))))))
         (should (equal (directory-files protected) '("." ".." "secret.txt")))
         (let ((non-essential t)
               (remote-file-name-inhibit-cache t))
@@ -387,7 +362,7 @@
                          '("secret.txt"))))))))
 
 (ert-deftest zr-tramp-webdav-visiting-saving-and-backups ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let* ((file (concat root "visited.txt"))
            (buffer (find-file-noselect file)))
       (unwind-protect
@@ -418,7 +393,7 @@
         (kill-buffer buffer)))))
 
 (ert-deftest zr-tramp-webdav-conflict-preserves-buffer-and-server ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "conflict.txt")) buffer)
       (write-region "original" nil file nil 'silent)
       (setq buffer (find-file-noselect file))
@@ -440,7 +415,7 @@
 
 (ert-deftest zr-tramp-webdav-compressed-file-handlers ()
   (unless (executable-find "gzip") (ert-skip "gzip is required"))
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "compressed.txt.gz")) buffer)
       (write-region "compressed text\n" nil file nil 'silent)
       (should (equal (zr-tramp-webdav-test--contents file) "compressed text\n"))
@@ -464,7 +439,7 @@
         (kill-buffer buffer)))))
 
 (ert-deftest zr-tramp-webdav-append-offset-and-exclusive-create ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "append.txt")))
       (write-region "abc" nil file nil 'silent nil 'excl)
       (should-error (write-region "wrong" nil file nil 'silent nil 'excl)
@@ -477,7 +452,7 @@
       (should (equal (zr-tramp-webdav-test--contents (concat root "new.txt")) "new")))))
 
 (ert-deftest zr-tramp-webdav-copy-move-and-local-transfers ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (concat root "original.txt"))
           (copy (concat root "copy.txt"))
           (moved (concat root "moved.txt"))
@@ -505,7 +480,7 @@
         (when (file-exists-p local) (delete-file local))))))
 
 (ert-deftest zr-tramp-webdav-directory-operations ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((nested (concat root "a/b/")))
       (make-directory nested t)
       (make-directory nested t)
@@ -525,7 +500,7 @@
       (should-not (file-exists-p (concat root "empty"))))))
 
 (ert-deftest zr-tramp-webdav-auth-source-and-custom-headers ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((file (format "/webdav:alice@127.0.0.1#%s:/auth/secret.txt" port))
           (auth (make-temp-file "zr-webdav-test-auth-")))
       (unwind-protect
@@ -535,18 +510,18 @@
             (let ((auth-sources (list auth)))
               (should (equal (zr-tramp-webdav-test--contents file) "authenticated")))
             (zr-tramp-webdav-clear-cache)
-            (let ((zr-tramp-webdav-extra-headers
+            (let ((zr-tramp-webdav-http-options
                    (lambda (name)
                      (should (equal name file))
-                     (list (cons "authorization"
-                                 (concat "Basic " (base64-encode-string "alice:app-password" t)))))))
+                     (list :headers (list (cons "authorization"
+                                 (concat "Basic " (base64-encode-string "alice:app-password" t))))))))
               (should (equal (zr-tramp-webdav-test--contents file) "authenticated")))
             (zr-tramp-webdav-clear-cache)
             (should-error (zr-tramp-webdav-test--contents file) :type 'file-error))
         (delete-file auth)))))
 
 (ert-deftest zr-tramp-webdav-redirects-and-http-errors ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((base (format "/webdav:127.0.0.1#%s:" port)))
       (should-not (file-exists-p (concat root "missing")))
       (should-not (file-exists-p (concat base "/__test__/missing-multistatus")))
@@ -562,9 +537,9 @@
       (should (file-exists-p (concat root "partial-delete"))))))
 
 (ert-deftest zr-tramp-webdav-transport-timeouts-and-truncated-data ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (let ((base (format "/webdav:127.0.0.1#%s:" port))
-          (zr-tramp-webdav-timeout 0.2))
+          (zr-tramp-webdav-http-options '(:timeout 0.2)))
       (should-error (zr-tramp-webdav--get (concat base "/__test__/slow")) :type 'file-error)
       (should-error (zr-tramp-webdav--get (concat base "/__test__/truncated")) :type 'file-error))))
 
@@ -576,7 +551,7 @@
                 :type 'file-error))
 
 (ert-deftest zr-tramp-webdav-precious-save-and-conflict ()
-  (zr-tramp-webdav-test--with-backends
+  (zr-tramp-webdav-test--with-server
     (dolist (name '("precious.txt" "precious-race.txt"))
       (let* ((file (concat root name)) buffer)
         (write-region "original\n" nil file nil 'silent)

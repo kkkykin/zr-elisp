@@ -10,13 +10,10 @@
 (require 'button)
 (require 'ol)
 (require 'auth-source)
-(require 'url)
-(require 'url-http)
+(require 'url-parse)
+(require 'zr-http)
 (require 'iso8601)
 (require 'image)
-(defvar url-http-response-status)
-(defvar url-http-end-of-headers)
-(defvar url-http-after-change-function)
 
 (defgroup zr-erc-link nil "Rule-based link actions in ERC." :group 'erc)
 (defcustom zr-erc-link-rules
@@ -45,18 +42,22 @@ auth-source search plist; :auth-scheme is basic or bearer; :auth-header
 defaults to Authorization.  :max-age is seconds; nil disables age checks
 (the default).  Age uses the IRC time tag or local receipt time; expired
 links reject file requests.  :proxy is inherit (the default), nil for a
-direct connection, or an HTTP proxy as host:port or http://host:port,
-with IPv6 bracketed.
+direct connection, or a curl proxy URL (host:port means HTTP).
 Explicit proxies bypass no_proxy and HTTPS uses CONNECT.  :timeout limits
-each HTTP request (default 30 seconds).  :max-bytes limits response body
-size (default 64 MiB).  :dir is the initial download
+each HTTP request (inherited from `zr-http-default-options').  :max-bytes
+limits response body size (default 64 MiB).  :dir is the initial download
 directory (default ~/Downloads/).  Redirects are rejected; rewrite to the
 final URL so custom credentials cannot be forwarded to another host.
 This option supports buffer-local values."
   :type 'sexp :group 'zr-erc-link)
 
+(defcustom zr-erc-link-http-options '(:max-bytes 67108864)
+  "HTTP options overriding `zr-http-default-options' for file links.
+Rules can override :proxy, :timeout and :max-bytes for individual links."
+  :type 'sexp :group 'zr-erc-link)
+
 (cl-defstruct zr-erc-link--job
-  buffer item destination overwrite callback request timer raw timeout max-bytes done error)
+  buffer item destination overwrite callback request raw done error)
 (defvar-local zr-erc-link--jobs nil)
 (defvar zr-erc-link--directory nil
   "Shared temporary directory for files fetched by this Emacs session.")
@@ -128,25 +129,6 @@ When ONLY-RULE is non-nil, only consider that rule."
   (when (zr-erc-link--expired-p item)
     (user-error "Media link has expired (message exceeds the configured age limit)")))
 
-(defun zr-erc-link--proxy-locator (proxy)
-  "Return a URL proxy locator for PROXY, rejecting invalid proxy addresses."
-  (pcase proxy
-    ('inherit url-proxy-locator)
-    ('nil (lambda (_url _host) "DIRECT"))
-    (_ (save-match-data
-         (let ((case-fold-search t))
-           (unless (and (stringp proxy)
-                        (string-match
-                         (concat "\\`\\(?:http://\\)?"
-                                 "\\(\\(?:\\[[[:xdigit:]:.]+\\]\\|[[:alnum:]._-]+\\)\\)"
-                                 ":\\([0-9]+\\)/?\\'")
-                         proxy)
-                        (<= 1 (string-to-number (match-string 2 proxy)) 65535))
-             (user-error "Media proxy must be inherit, nil, or an HTTP host:port"))
-           (let ((directive (format "PROXY %s:%d" (match-string 1 proxy)
-                                    (string-to-number (match-string 2 proxy)))))
-             (lambda (_url _host) directive)))))))
-
 (defun zr-erc-link--headers (item)
   "Build request headers for ITEM, resolving secrets only when fetching."
   (let* ((rule (plist-get item :rule))
@@ -182,12 +164,9 @@ When ONLY-RULE is non-nil, only consider that rule."
 (defun zr-erc-link--cleanup (job)
   "Cancel JOB and remove its temporary resources, retaining downloaded files."
   (setf (zr-erc-link--job-done job) t)
-  (when (timerp (zr-erc-link--job-timer job))
-    (cancel-timer (zr-erc-link--job-timer job)))
-  (when-let* ((buffer (zr-erc-link--job-request job)) ((buffer-live-p buffer)))
-    (when-let* ((process (get-buffer-process buffer)) ((process-live-p process)))
-      (delete-process process))
-    (kill-buffer buffer))
+  (when-let* ((request (zr-erc-link--job-request job)))
+    (zr-http-cancel request))
+
   (when-let* ((file (zr-erc-link--job-raw job)) ((file-exists-p file)))
     (delete-file file))
   (when (buffer-live-p (zr-erc-link--job-buffer job))
@@ -262,69 +241,45 @@ Return its possibly renamed path.  Leave non-images unchanged."
         (when-let* ((buffer (get-file-buffer file)))
           (kill-buffer buffer))))))
 
-(defun zr-erc-link--received (status job)
-  "Handle URL response STATUS for JOB in the HTTP response buffer."
-  (let ((response (current-buffer)))
-    (unwind-protect
-        (unless (zr-erc-link--job-done job)
-          (cancel-timer (zr-erc-link--job-timer job))
-          (condition-case nil
-              (progn
-                (when (or (plist-get status :error)
-                          ;; A failed TLS handshake can leave CONNECT's 200
-                          ;; response behind.  It is not a media response.
-                          (eq url-http-after-change-function
-                              #'url-https-proxy-after-change-function)
-                          (not (and (integerp url-http-response-status)
-                                    (<= 200 url-http-response-status 299))))
-                  (error "HTTP failure"))
-                (unless (and url-http-end-of-headers
-                             (<= (- (point-max) (1+ url-http-end-of-headers))
-                                 (zr-erc-link--job-max-bytes job)))
-                  (error "Invalid or oversized response"))
-                (let ((coding-system-for-write 'no-conversion))
-                  (write-region (1+ url-http-end-of-headers) (point-max)
-                                (zr-erc-link--job-raw job) nil 'silent))
-                (unless (zr-erc-link--job-destination job)
-                  (setf (zr-erc-link--job-raw job)
-                        (zr-erc-link--image-suffix (zr-erc-link--job-raw job))))
-                (cond
-                 ((zr-erc-link--job-destination job)
-                  (copy-file (zr-erc-link--job-raw job) (zr-erc-link--job-destination job)
-                             (zr-erc-link--job-overwrite job))
-                  (zr-erc-link--cleanup job)
-                  (message "ERC media: download saved"))
-                 ((zr-erc-link--job-callback job)
-                  (let ((file (zr-erc-link--job-raw job)))
-                    (setf (zr-erc-link--job-raw job) nil)
-                    (zr-erc-link--cleanup job)
-                    (funcall (zr-erc-link--job-callback job)
-                             file (zr-erc-link--job-item job))))
-                 (t
-                  (zr-erc-link--open-file (zr-erc-link--job-raw job)
-                                         (zr-erc-link--job-item job))
-                  ;; Completed files stay in the shared directory for browsing.
-                  (setf (zr-erc-link--job-raw job) nil)
-                  (zr-erc-link--cleanup job))))
-            (error (zr-erc-link--fail job "Request failed, response too large, or cannot open file"))))
-      (when (buffer-live-p response) (kill-buffer response)))))
+(defun zr-erc-link--received (response error job)
+  "Handle HTTP RESPONSE or ERROR for JOB."
+  (unless (zr-erc-link--job-done job)
+    (condition-case nil
+        (progn
+          (when (or error (not (<= 200 (plist-get response :status) 299)))
+            (error "HTTP failure"))
+          (unless (zr-erc-link--job-destination job)
+            (setf (zr-erc-link--job-raw job)
+                  (zr-erc-link--image-suffix (zr-erc-link--job-raw job))))
+          (cond
+           ((zr-erc-link--job-destination job)
+            (copy-file (zr-erc-link--job-raw job) (zr-erc-link--job-destination job)
+                       (zr-erc-link--job-overwrite job))
+            (zr-erc-link--cleanup job)
+            (message "ERC media: download saved"))
+           ((zr-erc-link--job-callback job)
+            (let ((file (zr-erc-link--job-raw job)))
+              (setf (zr-erc-link--job-raw job) nil)
+              (zr-erc-link--cleanup job)
+              (funcall (zr-erc-link--job-callback job) file (zr-erc-link--job-item job))))
+           (t
+            (zr-erc-link--open-file (zr-erc-link--job-raw job) (zr-erc-link--job-item job))
+            (setf (zr-erc-link--job-raw job) nil)
+            (zr-erc-link--cleanup job))))
+      (error (zr-erc-link--fail job "Request failed, response too large, or cannot open file")))))
 
 (defun zr-erc-link--fetch (item &optional destination overwrite callback)
-  "Fetch ITEM to open, or save to DESTINATION with OVERWRITE permission.
-When CALLBACK is non-nil, call it with the fetched file and ITEM instead
-of opening a buffer.  Failed requests call it with nil and ITEM."
+  "Fetch ITEM to open, save to DESTINATION, or pass to CALLBACK.
+CALLBACK receives the downloaded file and ITEM, or nil and ITEM on failure."
   (zr-erc-link--check-age item)
   (let* ((rule (plist-get item :rule))
-         (locator (zr-erc-link--proxy-locator
-                   (zr-erc-link--option rule :proxy 'inherit)))
-         ;; URL's connection cache is keyed by destination, not proxy.
-         (connections (make-hash-table :test #'equal))
+         (overrides (cl-loop for key in '(:proxy :timeout :max-bytes)
+                             when (plist-member rule key) append (list key (plist-get rule key))))
+         (options (zr-http-options zr-http-default-options zr-erc-link-http-options overrides))
          (headers (zr-erc-link--headers item))
          (job (make-zr-erc-link--job
                :buffer (current-buffer) :item item
-               :destination destination :overwrite overwrite :callback callback
-               :timeout (zr-erc-link--option rule :timeout 30)
-               :max-bytes (zr-erc-link--option rule :max-bytes (* 64 1024 1024)))))
+               :destination destination :overwrite overwrite :callback callback)))
     (setf (zr-erc-link--job-raw job)
           (make-temp-file
            (expand-file-name
@@ -336,27 +291,11 @@ of opening a buffer.  Failed requests call it with nil and ITEM."
     (push job zr-erc-link--jobs)
     (add-hook 'kill-buffer-hook #'zr-erc-link--cleanup-buffer nil t)
     (condition-case nil
-        (let ((url-request-extra-headers headers)
-              (url-request-noninteractive t)
-              (url-proxy-locator locator)
-              (url-proxy-services (copy-tree url-proxy-services))
-              (url-http-open-connections connections)
-              (url-http-attempt-keepalives nil)
-              (url-max-redirections 0))
-          (setf (zr-erc-link--job-timer job)
-                (run-at-time (zr-erc-link--job-timeout job) nil
-                             #'zr-erc-link--fail job "Request timed out")
-                (zr-erc-link--job-request job)
-                (url-retrieve (plist-get item :target) #'zr-erc-link--received (list job) t t))
-          (unless (zr-erc-link--job-request job) (error "No request"))
-          ;; Preserve routing for asynchronous connection retries as well.
-          (let ((services url-proxy-services))
-            (with-current-buffer (zr-erc-link--job-request job)
-              (setq-local url-max-redirections 0
-                          url-proxy-locator locator
-                          url-proxy-services services
-                          url-http-open-connections connections
-                          url-http-attempt-keepalives nil))))
+        (setf (zr-erc-link--job-request job)
+              (zr-http-request
+               (plist-get item :target) :options options :headers headers
+               :output-file (zr-erc-link--job-raw job)
+               :callback (lambda (response error) (zr-erc-link--received response error job))))
       (error (zr-erc-link--fail job "Could not start the request")))
     job))
 

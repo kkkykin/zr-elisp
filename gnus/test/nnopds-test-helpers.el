@@ -42,7 +42,7 @@
               (nnopds-koreader-url nil) (nnopds-koreader-user nil) (nnopds-koreader-password nil)
               (nnopds--connection nil) (nnopds--group nil)
               (gnus-cache-directory (expand-file-name "cache" opds-root))
-              (nnopds-request-timeout 2)
+              (nnopds-http-options '(:timeout 2 :proxy nil))
               (nnopds-catalog-cache-ttl nil)
               (nnopds-progress-sync-delay 60)
               (nntp-server-buffer (generate-new-buffer " *opds-test-server*")))

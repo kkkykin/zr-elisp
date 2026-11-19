@@ -80,9 +80,8 @@
                 (list (cons "Accept" (concat (plist-get page :type) ", application/octet-stream;q=0.5")))
                 nil temporary)))
     (lambda ()
-      (when-let* ((process (nnopds--request-state-process state))
-                  ((process-live-p process)))
-        (delete-process process)))))
+      (when-let* ((request (nnopds--request-state-request state)))
+        (zr-http-cancel request)))))
 
 (provide 'nnopds-comic)
 ;;; nnopds-comic.el ends here

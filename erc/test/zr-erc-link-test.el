@@ -208,7 +208,8 @@ TLS, when non-nil, is a list of certificate and key file names."
          (process (make-process :name "erc-media-http-test" :buffer buffer :noquery t
                                  :command (append (list "python3" zr-erc-link-test--server-file) tls)))
          (directory (make-temp-file "erc-media-test-" t))
-         (url-proxy-services '(("no_proxy" . "127.0.0.1"))))
+         (url-proxy-services '(("no_proxy" . "127.0.0.1")))
+         (zr-http-default-options '(:proxy nil :timeout 3)))
     (unwind-protect
         (progn
           (zr-erc-link-test--wait
@@ -398,8 +399,8 @@ TLS, when non-nil, is a list of certificate and key file names."
 
 (ert-deftest zr-erc-link-pending-requests-clean-up-and-ignore-late-responses ()
   (with-temp-buffer
-    (cl-letf (((symbol-function 'url-retrieve)
-               (lambda (&rest _) (generate-new-buffer " *erc-media-request*"))))
+    (cl-letf (((symbol-function 'zr-http-request)
+               (lambda (&rest _) (zr-http--make-request :bytes 0))))
       (zr-erc-link-test--button "image.png")
       (goto-char (point-min))
       (zr-erc-link-open)
@@ -412,13 +413,12 @@ TLS, when non-nil, is a list of certificate and key file names."
           (should-not (eq next job))
           (zr-erc-link--cleanup-buffer)
           (should (zr-erc-link--job-done next))
-          (should-not (buffer-live-p (zr-erc-link--job-request next)))
+          (should (zr-http-request-done (zr-erc-link--job-request next)))
           (should-not (file-exists-p (zr-erc-link--job-raw next)))
-          (should-not (memq (zr-erc-link--job-timer next) timer-list))
-          (should-not zr-erc-link--jobs)
+                    (should-not zr-erc-link--jobs)
           (cl-letf (((symbol-function 'zr-erc-link--open-file)
                      (lambda (&rest _) (ert-fail "Canceled request opened a buffer"))))
-            (with-temp-buffer (zr-erc-link--received nil next))))))))
+            (zr-erc-link--received nil "late failure" next)))))))
 
 (ert-deftest zr-erc-link-age-uses-server-time-or-receipt ()
   (let ((now (encode-time '(0 0 12 2 10 2026 nil nil 0)))
@@ -489,7 +489,7 @@ TLS, when non-nil, is a list of certificate and key file names."
           side-effects)
       (cl-letf (((symbol-function 'current-time) (lambda () now))
                 ((symbol-function 'display-images-p) (lambda (&rest _) t))
-                ((symbol-function 'url-retrieve) (lambda (&rest _) (push 'request side-effects)))
+                ((symbol-function 'zr-http-request) (lambda (&rest _) (push 'request side-effects)))
                 ((symbol-function 'auth-source-search) (lambda (&rest _) (push 'auth side-effects)))
                 ((symbol-function 'make-temp-file) (lambda (&rest _) (push 'temp side-effects)))
                 ((symbol-function 'make-directory) (lambda (&rest _) (push 'directory side-effects)))
@@ -512,17 +512,13 @@ TLS, when non-nil, is a list of certificate and key file names."
 (ert-deftest zr-erc-link-invalid-proxy-does-not-start-request ()
   (with-temp-buffer
     (dolist (proxy '(t "" "localhost" "host:0" "host:65536" "host:bad"
-                    "https://host:80" "socks5://host:80" "http://user:secret@host:80"
-                    "http://host:80/path" "host:80;DIRECT" "host:80\n"))
+                    "http://user:secret@host:80" "http://host:80/path"
+                    "host:80;DIRECT" "host:80\n"))
       (should-error (zr-erc-link--fetch
-                     (list :target "http://127.0.0.1/image" :rule (list :proxy proxy)))
-                    :type 'user-error)
+                     (list :target "http://127.0.0.1/image" :rule (list :proxy proxy))))
       (should-not zr-erc-link--jobs)))
   (dolist (proxy '("[::1]:7890" "http://[::1]:7890/"))
-    (let ((url-proxy-locator (zr-erc-link--proxy-locator proxy)))
-      (should (equal (url-find-proxy-for-url (url-generic-parse-url "https://example.test")
-                                            "example.test")
-                     "http://[::1]:7890/")))))
+    (should (equal "--proxy" (car (zr-http--proxy proxy))))))
 
 (ert-deftest zr-erc-link-http-proxy-overrides-and-isolation ()
   (zr-erc-link-test--server
@@ -532,7 +528,7 @@ TLS, when non-nil, is a list of certificate and key file names."
         (let* ((url-proxy-locator #'url-default-find-proxy-for-url)
                (url-proxy-services '(("no_proxy" . ".")))
                (services (copy-tree url-proxy-services))
-               (connections url-http-open-connections)
+               (environment (copy-sequence process-environment))
                (destination (expand-file-name "download" directory)))
           (with-temp-buffer
             (setq-local zr-erc-link-rules (list (list :type 'file :proxy proxy)))
@@ -541,10 +537,8 @@ TLS, when non-nil, is a list of certificate and key file names."
               (let* ((rule (append '(:type file) (and direct '(:proxy nil))))
                      (item (zr-erc-link--item (concat base "/data") nil rule))
                      (job (zr-erc-link--fetch item destination t)))
-                (with-current-buffer (zr-erc-link--job-request job)
-                  (should-not (eq url-http-open-connections connections))
-                  (should (equal (url-find-proxy-for-url (url-generic-parse-url base) "127.0.0.1")
-                                 (unless direct (concat proxy "/")))))
+                (let ((command (process-command (zr-http-request-process (zr-erc-link--job-request job)))))
+                  (should (equal (cadr (member "--proxy" command)) (if direct "" proxy))))
                 (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
                 (should-not (zr-erc-link--job-error job))))
             (with-current-buffer log
@@ -558,7 +552,8 @@ TLS, when non-nil, is a list of certificate and key file names."
                 (should-not (zr-erc-link--job-error job))))
             ;; A rule can restore an inherited proxy over a local direct setting.
             (setq-local zr-erc-link-rules '((:type file :proxy nil)))
-            (let* ((url-proxy-locator (lambda (_url _host) (concat "PROXY " (substring proxy 7))))
+            (let* ((process-environment (append (list (concat "http_proxy=" proxy)
+                                                     "no_proxy=" "NO_PROXY=") process-environment))
                    (item (zr-erc-link--item (concat base "/data") nil '(:type file :proxy inherit)))
                    (job (zr-erc-link--fetch item destination t)))
               (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
@@ -568,7 +563,7 @@ TLS, when non-nil, is a list of certificate and key file names."
                                   (point-min) (point-max)))))
           (should (= 13 (length (zr-erc-link-test--read destination))))
           (should (equal services url-proxy-services))
-          (should (eq connections url-http-open-connections))
+          (should (equal environment process-environment))
           (should (eq url-proxy-locator #'url-default-find-proxy-for-url))))))))
 
 (ert-deftest zr-erc-link-http-proxy-failure-does-not-fall-back-direct ()
@@ -608,7 +603,7 @@ TLS, when non-nil, is a list of certificate and key file names."
           (should (= 0 (call-process "openssl" nil nil nil "x509" "-req" "-in" csr
                                      "-CA" ca "-CAkey" ca-key "-CAcreateserial" "-out" cert
                                      "-days" "1" "-copy_extensions" "copy")))
-          (let ((gnutls-trustfiles (list ca)))
+          (let ((zr-erc-link-http-options (list :curl-arguments (list "--cacert" ca))))
             (zr-erc-link-test--server
              (lambda (base downloads)
                (zr-erc-link-test--proxy
@@ -627,28 +622,18 @@ TLS, when non-nil, is a list of certificate and key file names."
              (list cert key))))
       (delete-directory directory t))))
 
-(ert-deftest zr-erc-link-connect-response-is-not-a-download ()
-  (let* ((directory (make-temp-file "erc-media-connect-" t))
+(ert-deftest zr-erc-link-transport-error-does-not-overwrite-download ()
+  (let* ((directory (make-temp-file "erc-media-transport-" t))
          (destination (expand-file-name "download" directory))
          (raw (expand-file-name "raw" directory))
-         (job (make-zr-erc-link--job :destination destination :overwrite t
-                                     :raw raw :max-bytes 1024
-                                     :timer (run-at-time 60 nil #'ignore))))
+         (job (make-zr-erc-link--job :destination destination :overwrite t :raw raw)))
     (unwind-protect
         (progn
           (write-region "original" nil destination nil 'silent)
-          ;; URL can invoke the callback with CONNECT's 200 status after a
-          ;; rejected TLS handshake.  Never overwrite a file with that body.
-          (with-temp-buffer
-            (insert "HTTP/1.1 200 Connection established\r\n\r\n")
-            (setq-local url-http-response-status 200
-                        url-http-end-of-headers (1- (point-max))
-                        url-http-after-change-function #'url-https-proxy-after-change-function)
-            (zr-erc-link--received nil job))
+          (zr-erc-link--received nil "TLS handshake failed" job)
           (should (zr-erc-link--job-error job))
           (should-not (file-exists-p raw))
           (should (equal (zr-erc-link-test--read destination) "original")))
-      (cancel-timer (zr-erc-link--job-timer job))
       (delete-directory directory t))))
 
 (ert-deftest zr-erc-link-http-auth-source-download-and-failures ()
@@ -686,7 +671,7 @@ TLS, when non-nil, is a list of certificate and key file names."
                      destination t)))
            (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
            (should (zr-erc-link--job-error job))
-           (should-not (buffer-live-p (zr-erc-link--job-request job)))))))))
+           (should (zr-http-request-done (zr-erc-link--job-request job)))))))))
 
 (ert-deftest zr-erc-link-http-opens-files-in-one-session-directory ()
   (let ((zr-erc-link--directory nil)
@@ -717,7 +702,7 @@ TLS, when non-nil, is a list of certificate and key file names."
                        (should (equal before (buffer-string)))
                        (should-not (overlays-in (point-min) (point-max)))
                        (should-not zr-erc-link--jobs)
-                       (should-not (buffer-live-p (zr-erc-link--job-request job)))
+                       (should (zr-http-request-done (zr-erc-link--job-request job)))
                        (should (equal (file-name-directory file)
                                       (file-name-as-directory zr-erc-link--directory)))
                        (with-current-buffer viewer
@@ -858,19 +843,14 @@ TLS, when non-nil, is a list of certificate and key file names."
   (with-temp-buffer
     (let* ((file (make-temp-file "erc-link-open-" nil ".txt"))
            (job (make-zr-erc-link--job
-                 :buffer (current-buffer) :raw file :max-bytes 1024
-                 :item '(:target "https://example.test/file.txt" :type file)
-                 :timer (run-at-time 60 nil #'ignore)))
+                 :buffer (current-buffer) :raw file
+                 :item '(:target "https://example.test/file.txt" :type file)))
            (find-file-hook (list (lambda () (error "Cannot open this file")))))
       (push job zr-erc-link--jobs)
       (unwind-protect
           (progn
-            (with-temp-buffer
-              (insert "HTTP/1.1 200 OK\r\n\r\n")
-              (setq-local url-http-response-status 200
-                          url-http-end-of-headers (1- (point-max)))
-              (insert "file contents\n")
-              (zr-erc-link--received nil job))
+            (write-region "file contents\n" nil file nil 'silent)
+            (zr-erc-link--received (list :status 200 :file file) nil job)
             (should (zr-erc-link--job-error job))
             (should-not (file-exists-p file))
             (should-not (get-file-buffer file))
@@ -903,7 +883,7 @@ TLS, when non-nil, is a list of certificate and key file names."
               (item (zr-erc-link--item (concat base "/data") nil)))
          (write-region "original" nil destination nil 'silent)
          (let ((job (zr-erc-link--fetch item destination t)))
-           (should (= (zr-erc-link--job-timeout job) 2))
+           (should (= (zr-http-request-max-bytes (zr-erc-link--job-request job)) 12))
            (zr-erc-link-test--wait (lambda () (zr-erc-link--job-done job)))
            (should (zr-erc-link--job-error job))
            (should (equal (zr-erc-link-test--read destination) "original")))

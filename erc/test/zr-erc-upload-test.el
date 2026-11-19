@@ -44,7 +44,7 @@
 (defun zr-erc-upload-test--buffers ()
   "Return buffers owned by the curl backend."
   (cl-remove-if-not (lambda (buffer)
-                      (string-match-p "\\` \\*erc-upload-\\(?:response\\|errors\\)"
+                      (string-match-p "\\` \\*zr-http-\\(?:body\\|errors\\)"
                                       (buffer-name buffer)))
                     (buffer-list)))
 
@@ -336,7 +336,7 @@
            (lambda (base requests)
              (zr-erc-upload-test--conversation
                (let ((zr-erc-upload-litterbox-url (concat base "/upload"))
-                     (zr-erc-upload-curl-arguments '("--header" "X-Test: erc-upload"))
+                     (zr-erc-upload-http-options '(:headers (("X-Test" . "erc-upload")) :proxy nil))
                      (zr-erc-upload-litterbox-time "12h"))
                  (cl-letf (((symbol-function 'erc-send-input)
                             (lambda (text &rest _) (push text sent) t)))
@@ -350,7 +350,7 @@
                      (should (string-match-p "X-Test: erc-upload" request))
                      (should (string-match-p "name=\"reqtype\"\r\n\r\nfileupload\r\n" request))
                      (should (string-match-p "name=\"time\"\r\n\r\n12h\r\n" request))
-                     (should (string-match-p "name=\"fileToUpload\"; filename=" request))
+                     (should (string-match-p "name=\"fileToUpload\"; filename\\*=" request))
                      (should (string-search bytes request)))
                    (should (equal (zr-erc-upload-test--read file) bytes))))))))
       (delete-directory directory t))))
@@ -363,7 +363,7 @@
        (zr-erc-upload-test--conversation
          (let ((zr-erc-upload-litterbox-url
                 (concat base (if (equal path "/cancel") "/hang" path)))
-               (zr-erc-upload-timeout 1) sent
+               (zr-erc-upload-http-options '(:timeout 1 :proxy nil)) sent
                (file (make-temp-file "erc-upload-owned-")))
            (cl-letf (((symbol-function 'erc-send-input) (lambda (&rest _) (setq sent t))))
              (let ((job (zr-erc-upload--start file nil t)))

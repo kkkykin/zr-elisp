@@ -48,6 +48,47 @@ Follow 连续显示。栏数按实际可显示的字符数计算，包含边缘�
 `zr-window-arrange-follow-columns` 提供同样的布局操作，返回分栏窗口列表，
 供其他模块复用；Follow 状态由调用方管理。
 
+HTTP 客户端请求统一使用 `zr-http`，需要本机安装 curl。全局默认、包级
+`*-http-options`、单次请求参数按顺序覆盖，显式 nil 也会覆盖默认值：
+
+```elisp
+(setq zr-http-default-options
+      '(:timeout 30 :proxy inherit
+        :headers (("User-Agent" . "zr-elisp"))))
+;; inherit 使用 curl 的代理环境变量；nil 直连；明确代理忽略 no_proxy。
+(setq zr-mpv-http-options '(:timeout 10))
+(setq zr-erc-upload-http-options
+      '(:timeout 120 :proxy "http://127.0.0.1:7890"))
+(setq zr-tramp-webdav-http-options
+      (lambda (file)
+        (when (string-match-p "example.org" file)
+          '(:curl-arguments ("--ipv4")))))
+
+(zr-http-request-sync "https://example.org/api"
+                      :method "POST"
+                      :headers '(("Content-Type" . "application/json"))
+                      :body (encode-coding-string (json-serialize '(:query "中文"))
+                                                  'utf-8 t))
+```
+
+包级配置包括 `zr-mpv-http-options`、`zr-rclone-http-options`、
+`zr-tramp-rcrc-http-options`、`zr-tramp-webdav-http-options`、
+`zr-ffmpeg-http-options`、`zr-erc-link-http-options`、
+`zr-erc-upload-http-options` 和 `nnopds-http-options`。
+Headers 按名称忽略大小写合并；字段值 nil 删除继承字段，`:headers nil`
+清空继承的 headers；`:curl-arguments` 则整体覆盖。curl 程序路径用
+`:curl-program` 配置。额外参数用于代理、证书、协议版本等传输设置；
+请求方法、body、上传和输出使用结构化选项。
+
+`zr-http-request` 返回可用 `zr-http-cancel` 取消的请求对象，`:callback`
+接收 `(response error)`，只调用一次。响应包含 `:status`、`:headers`、
+`:url` 和字节串 `:body`；使用 `:output-file` 时返回 `:file`，下载直接
+写入临时文件，完整收到响应后替换目标，传输失败或取消保留原目标。
+HTTP 4xx/5xx 也作为响应返回，由业务代码判断；重定向及认证来源由各包
+处理。`:upload-file` 支持文件请求体，`:form` 支持普通字段和文件字段，
+`:max-bytes` 限制实际接收的响应体大小。详细选项见 `zr-http-default-options`。
+加载库不会改变 Emacs 的 URL 配置或进程环境。本轮只实现 curl 后端。
+
 `zr-terminal` 提供公共 OSC 编码、发送和 OSC 777 通知，`zr-wezterm` 负责
 `ZRTransport` JSON 分块传输。发送接口默认使用当前终端 frame，也可传入明确的
 frame，适合 daemon 的多个终端连接。目标必须是存活的终端 frame。

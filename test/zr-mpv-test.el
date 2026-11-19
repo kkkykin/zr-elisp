@@ -247,12 +247,12 @@
                (lambda (var &rest _)
                  (when (equal var "SSH_CONNECTION") "1.2.3.4 22 5.6.7.8 9999")))
               ((symbol-function 'system-name) (lambda () "testhost"))
-              ((symbol-function 'url-retrieve)
-               (lambda (url &rest _)
+              ((symbol-function 'zr-http-request)
+               (lambda (url &rest options)
                  (setq url-called url
-                       method-called url-request-method
-                       headers-called url-request-extra-headers
-                       data-called url-request-data))))
+                       method-called (plist-get options :method)
+                       headers-called (plist-get options :headers)
+                       data-called (plist-get options :body)))))
       (zr-mpv-play-http '("/video/中文😀.mp4") "--pause")
       (should (equal "http://example.com/mpv/" url-called))
       (should (equal "POST" method-called))
