@@ -10,7 +10,7 @@
 ;; without enabling the module.  Uploads run asynchronously and append links
 ;; to the originating conversation's input.  Set `zr-erc-upload-auto-send'
 ;; to send them directly instead, preserving draft input.
-;; Configure `zr-erc-upload-backend-order' for automatic fallback and
+;; Configure `zr-erc-upload-backend-rules' for automatic fallback and
 ;; `zr-erc-upload-expiry-hours' for a minimum retention time.
 
 ;;; Code:
@@ -39,18 +39,26 @@
 Each function receives a local FILE and a CALLBACK, and returns a
 function of no arguments that cancels the upload and releases resources.
 Call CALLBACK with (URL nil) on success, or (nil ERROR-STRING) on failure.
-URL must point directly to file content suitable for browser display,
-without an intermediate page or forced download.
+URL must accept GET and return file content directly, without an
+intermediate page.  Binary files may trigger a browser download.
 The callback may run synchronously.  Backend functions run in the
 originating ERC buffer, so they can use buffer-local configuration."
   :type '(alist :key-type symbol :value-type function))
 
-(defcustom zr-erc-upload-backend-order '(litterbox tempfile tmp0 beacon)
-  "Backend names to try in order, from `zr-erc-upload-backends'.
+(defcustom zr-erc-upload-backend-rules
+  '((".*" litterbox tempfile tmp0 beacon))
+  "Alist of MIME type regexps and backend orders.
+The first matching rule selects backend names from `zr-erc-upload-backends'.
 Each backend is tried once, stopping at the first valid URL.  Errors,
-timeouts and invalid responses advance to the next backend.  A prefix
-argument to `zr-erc-upload-file' selects just one backend for that upload."
-  :type '(repeat symbol))
+timeouts and invalid responses advance to the next backend.  For example:
+  ((\"\\\\`image/\" litterbox tempfile tmp0 beacon)
+   (\"\\\\`application/zip\\\\'\" tempfile litterbox tmp0 beacon)
+   (\".*\" litterbox tempfile tmp0 beacon))
+Use a final \".*\" rule to handle all remaining file types.  An upload
+without a matching rule fails before contacting any backend.
+Image MIME types are detected from content; other types use the filename.
+A backend explicitly selected by `zr-erc-upload-file' overrides the rules."
+  :type '(alist :key-type regexp :value-type (repeat symbol)))
 
 (defcustom zr-erc-upload-expiry-hours 1
   "Minimum retention time in hours for uploaded files.
@@ -109,26 +117,48 @@ DURATIONS is an alist of hours and API values."
                        "Upload rejected")))
     data))
 
-(defun zr-erc-upload--check-preview-file (file)
-  "Require FILE to be an image supported by the inline preview backends."
+(defun zr-erc-upload--image-type (file)
+  "Return the image type detected from FILE's header, or nil."
   (with-temp-buffer
     (set-buffer-multibyte nil)
     (insert-file-contents-literally file nil 0 8192)
-    (unless (memq (image-type-from-data (buffer-string)) '(png jpeg gif webp svg))
-      (error "Direct links require a PNG, JPEG, GIF, WebP or SVG image"))))
+    (image-type-from-data (buffer-string))))
 
-(defun zr-erc-upload--preview-url (base id)
-  "Build a direct image URL from BASE and the uploaded file ID."
+(defun zr-erc-upload--preview-file-p (file)
+  "Whether FILE supports an inline image URL on TempFile and tmp0."
+  (memq (zr-erc-upload--image-type file) '(png jpeg gif webp svg)))
+
+(defun zr-erc-upload--order-for-file (file)
+  "Choose FILE's backend order using `zr-erc-upload-backend-rules'."
+  (let ((mime (or (cdr (assq (zr-erc-upload--image-type file)
+                            '((png . "image/png") (jpeg . "image/jpeg")
+                              (gif . "image/gif") (webp . "image/webp")
+                              (svg . "image/svg+xml"))))
+                 (mailcap-file-name-to-mime-type file)
+                 "application/octet-stream")))
+    (if-let* ((rule (cl-find-if (lambda (entry) (string-match-p (car entry) mime))
+                               zr-erc-upload-backend-rules)))
+        (cdr rule)
+      (user-error "No upload backend rule matches MIME type: %s" mime))))
+
+(defun zr-erc-upload--file-id (id)
+  "Validate and return the uploaded file ID."
   (unless (and (stringp id) (string-match-p "\\`[A-Za-z0-9]+\\'" id))
     (error "Upload response did not return a file ID"))
-  (concat base id "/preview"))
+  id)
 
-(defun zr-erc-upload--request (url form callback &optional parser)
-  "Upload multipart FORM to URL, returning a cancellation function.
-PARSER extracts a link from the response text; nil uses the trimmed text."
+(defun zr-erc-upload--file-url (base id endpoint)
+  "Build a direct file URL from BASE, file ID and ENDPOINT."
+  (concat base (zr-erc-upload--file-id id) "/" endpoint))
+
+(cl-defun zr-erc-upload--request (url callback &key form body headers parser)
+  "Request URL, returning a cancellation function.
+Send multipart FORM or JSON BODY with optional HEADERS.  PARSER extracts
+a value from the response text; nil uses the trimmed text."
   (let ((request
-         (zr-http-request
-          url :options zr-erc-upload-http-options :form form
+         (apply
+          #'zr-http-request
+          url :options zr-erc-upload-http-options :form form :body body
           :callback
           (lambda (response error)
             (let (link reason)
@@ -141,18 +171,19 @@ PARSER extracts a link from the response text; nil uses the trimmed text."
                     (let ((text (decode-coding-string (plist-get response :body) 'utf-8)))
                       (setq link (if parser (funcall parser text) (string-trim text))))))
                 (error (setq reason (error-message-string err))))
-              (funcall callback link reason))))))
+              (funcall callback link reason)))
+          (when headers (list :headers headers)))))
     (lambda () (zr-http-cancel request))))
 
 (defun zr-erc-upload-litterbox (file callback)
   "Upload local FILE to Litterbox, returning a cancellation function."
   (zr-erc-upload--request
    "https://litterbox.catbox.moe/resources/internals/api.php"
+   callback :form
    (list '("reqtype" . "fileupload")
          (cons "time" (zr-erc-upload--expiry
                        '((1 . "1h") (12 . "12h") (24 . "24h") (72 . "72h"))))
-         (cons "fileToUpload" (list :file file)))
-   callback))
+         (cons "fileToUpload" (list :file file)))))
 
 (defun zr-erc-upload-beacon (file callback)
   "Upload local FILE to Beacon, returning a cancellation function.
@@ -161,37 +192,96 @@ for 24 hours."
   (zr-erc-upload--expiry '((24)))
   (zr-erc-upload--request
    "https://beacon.host/v1/upload"
-   (list (cons "file" (list :file file))) callback))
+   callback :form (list (cons "file" (list :file file)))))
 
 (defun zr-erc-upload-tempfile (file callback)
-  "Upload image FILE to TempFile, returning a cancellation function.
-Return its inline image URL; other file types fail before uploading."
-  (zr-erc-upload--check-preview-file file)
-  (zr-erc-upload--request
-   "https://tempfile.org/api/upload/local"
-   (list (cons "files" (list :file file))
-         (cons "expiryHours" (zr-erc-upload--expiry
-                              '((1 . "1") (6 . "6") (24 . "24") (48 . "48")))))
-   callback
-   (lambda (text)
-     (zr-erc-upload--preview-url
-      "https://tempfile.org/"
-      (alist-get 'id (car (alist-get 'files (zr-erc-upload--json text))))))))
+  "Upload local FILE to TempFile, returning a cancellation function.
+Use an inline URL for supported images and a GET download URL otherwise."
+  (let ((endpoint (if (zr-erc-upload--preview-file-p file) "preview" "download")))
+    (zr-erc-upload--request
+     "https://tempfile.org/api/upload/local" callback
+     :form (list (cons "files" (list :file file))
+                 (cons "expiryHours" (zr-erc-upload--expiry
+                                      '((1 . "1") (6 . "6") (24 . "24") (48 . "48")))))
+     :parser
+     (lambda (text)
+       (zr-erc-upload--file-url
+        "https://tempfile.org/"
+        (alist-get 'id (car (alist-get 'files (zr-erc-upload--json text)))) endpoint)))))
+
+(defun zr-erc-upload--tmp0-signed (form ttl callback)
+  "Upload FORM to tmp0 and return a signed GET link with lifetime TTL.
+Return a cancellation function covering both HTTP requests."
+  (let ((http-options (zr-http-options zr-http-default-options zr-erc-upload-http-options))
+        cancel cancelled)
+    (cl-labels
+        ((request
+          (url done &rest arguments)
+          (let ((zr-http-default-options nil)
+                (zr-erc-upload-http-options http-options)
+                finished)
+            (let ((stop
+                   (apply
+                    #'zr-erc-upload--request url
+                    (lambda (value reason)
+                      (unless (or finished cancelled)
+                        (setq finished t)
+                        (when cancel
+                          (let ((old cancel))
+                            (setq cancel nil)
+                            (funcall old)))
+                        (funcall done value reason)))
+                    arguments)))
+              (if (or finished cancelled)
+                  (funcall stop)
+                (setq cancel stop))))))
+      (request
+       "https://tmp0.cc/api/v1/upload"
+       (lambda (id reason)
+         (if reason
+             (funcall callback nil reason)
+           (condition-case err
+               (request
+                "https://tmp0.cc/api/v1/signed/generate" callback
+                :headers '(("Content-Type" . "application/json"))
+                :body (encode-coding-string
+                       (json-serialize `(:fileId ,id :ttl ,ttl
+                                         :oneTimeUse :false :ipBinding :false))
+                       'utf-8 t)
+                :parser (lambda (text)
+                          (alist-get 'signedUrl
+                                     (json-parse-string text :object-type 'alist))))
+             (error (funcall callback nil (error-message-string err))))))
+       :form form
+       :parser (lambda (text)
+                 (zr-erc-upload--file-id (alist-get 'fileId (zr-erc-upload--json text))))))
+    (lambda ()
+      (setq cancelled t)
+      (when cancel
+        (let ((old cancel))
+          (setq cancel nil)
+          (funcall old))))))
 
 (defun zr-erc-upload-tmp0 (file callback)
-  "Upload image FILE to tmp0, returning a cancellation function.
-Return its inline image URL; other file types fail before uploading."
-  (zr-erc-upload--check-preview-file file)
-  (zr-erc-upload--request
-   "https://tmp0.cc/api/v1/upload"
-   (list (cons "file" (list :file file))
-         (cons "expires" (zr-erc-upload--expiry
-                          '((1 . "1h") (6 . "6h") (12 . "12h") (24 . "1d")
-                            (72 . "3d") (168 . "7d") (336 . "14d") (720 . "30d")))))
-   callback
-   (lambda (text)
-     (zr-erc-upload--preview-url
-      "https://tmp0.cc/api/file/" (alist-get 'fileId (zr-erc-upload--json text))))))
+  "Upload local FILE to tmp0, returning a cancellation function.
+Use an inline URL for supported images, or a signed GET link valid for
+`zr-erc-upload-expiry-hours' otherwise.  Signed links last at most 7 days."
+  (let* ((preview (zr-erc-upload--preview-file-p file))
+         (ttl (ceiling (* zr-erc-upload-expiry-hours 3600)))
+         (form (list (cons "file" (list :file file))
+                     (cons "expires" (zr-erc-upload--expiry
+                                      '((1 . "1h") (6 . "6h") (12 . "12h") (24 . "1d")
+                                        (72 . "3d") (168 . "7d") (336 . "14d") (720 . "30d")))))))
+    (if preview
+        (zr-erc-upload--request
+         "https://tmp0.cc/api/v1/upload" callback :form form
+         :parser (lambda (text)
+                   (zr-erc-upload--file-url
+                    "https://tmp0.cc/api/file/" (alist-get 'fileId (zr-erc-upload--json text))
+                    "preview")))
+      (when (> ttl 604800)
+        (error "Signed GET links support at most 168 hours"))
+      (zr-erc-upload--tmp0-signed form ttl callback))))
 
 (defun zr-erc-upload--check ()
   "Require a connected ERC conversation."
@@ -336,7 +426,8 @@ Return its inline image URL; other file types fail before uploading."
 
 (defun zr-erc-upload--start (file &optional backend temporary)
   "Upload FILE and share its link in this conversation.
-Try `zr-erc-upload-backend-order', or only BACKEND when it is non-nil.
+Select backends from `zr-erc-upload-backend-rules', or only BACKEND
+when it is non-nil.
 Insert the link in input unless `zr-erc-upload-auto-send' is non-nil.
 If TEMPORARY is non-nil, take ownership of FILE and delete it afterwards."
   (let ((job (make-zr-erc-upload--job
@@ -352,7 +443,7 @@ If TEMPORARY is non-nil, take ownership of FILE and delete it afterwards."
           (unless (and (numberp zr-erc-upload-expiry-hours)
                        (> zr-erc-upload-expiry-hours 0))
             (user-error "Upload expiry must be a positive number of hours"))
-          (let ((order (if backend (list backend) zr-erc-upload-backend-order)))
+          (let ((order (if backend (list backend) (zr-erc-upload--order-for-file file))))
             (unless (and order (proper-list-p order) (cl-every #'symbolp order))
               (user-error "Upload backend order must be a nonempty list of names"))
             (setf (zr-erc-upload--job-backends job)

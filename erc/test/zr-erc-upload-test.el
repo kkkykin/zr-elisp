@@ -102,6 +102,8 @@ URL may be a function mapping each original URL to a local endpoint."
                                                 "{\"success\":true,\"files\":[{\"id\":\"file42\",\"url\":\"https://example.test/file/\"}]}")
                                                ((string-prefix-p "POST /tmp0 " data)
                                                 "{\"success\":true,\"fileId\":\"file42\",\"url\":\"/d/file\",\"fullUrl\":\"https://example.test/d/file\",\"directDownloadUrl\":\"https://example.test/api/file/file/download\"}")
+                                               ((string-prefix-p "POST /signed " data)
+                                                "{\"signedUrl\":\"https://tmp0.cc/api/v1/signed/download/file42?sig=test&exp=123&nonce=abc\",\"expiresIn\":21600}")
                                                ((string-prefix-p "POST /json-error " data)
                                                 "{\"success\":false,\"error\":\"File rejected\"}")
                                                ((string-prefix-p "POST /json-bad " data)
@@ -142,7 +144,7 @@ URL may be a function mapping each original URL to a local endpoint."
           (insert "history\n")
           (erc-display-prompt nil nil "ERC> ")
           (insert "draft")
-          (let* ((zr-erc-upload-backend-order '(custom))
+          (let* ((zr-erc-upload-backend-rules '((".*" custom)))
                  (zr-erc-upload-backends
                   `((custom . ,(lambda (_path done)
                                  (setq callback done)
@@ -181,7 +183,7 @@ URL may be a function mapping each original URL to a local endpoint."
           (goto-char 4)
           (setq buffer-read-only t)
           (setq-local zr-erc-upload-auto-send t)
-          (let* ((zr-erc-upload-backend-order '(custom))
+          (let* ((zr-erc-upload-backend-rules '((".*" custom)))
                  (zr-erc-upload-link-format "/say %f %u")
                  (zr-erc-upload-backends
                   `((custom . ,(lambda (path done)
@@ -216,7 +218,7 @@ URL may be a function mapping each original URL to a local endpoint."
 (ert-deftest zr-erc-upload-synchronous-and-startup-failures ()
   (zr-erc-upload-test--conversation
     (let ((cancellations 0) sent
-          (zr-erc-upload-backend-order '(custom)))
+          (zr-erc-upload-backend-rules '((".*" custom))))
       (cl-letf (((symbol-function 'erc-send-input)
                  (lambda (text &rest _) (push text sent) t)))
         (let* ((file (make-temp-file "erc-upload-owned-"))
@@ -231,7 +233,7 @@ URL may be a function mapping each original URL to a local endpoint."
           (should (equal (erc-user-input) "https://example.test/a")))))
     (dolist (backend '(missing failure))
       (let ((file (make-temp-file "erc-upload-owned-"))
-            (zr-erc-upload-backend-order (list backend))
+            (zr-erc-upload-backend-rules (list (cons ".*" (list backend))))
             (zr-erc-upload-backends '((failure . (lambda (&rest _) (error "Start failed"))))))
         (if (eq backend 'missing)
             (should-error (zr-erc-upload--start file nil t))
@@ -243,7 +245,7 @@ URL may be a function mapping each original URL to a local endpoint."
   (zr-erc-upload-test--conversation
     (let* ((origin (current-buffer))
            (file (make-temp-file "erc-upload-owned-")) first second calls cancellations
-           (zr-erc-upload-backend-order '(first second unused))
+           (zr-erc-upload-backend-rules '((".*" first second unused)))
            (zr-erc-upload-expiry-hours 6)
            (zr-erc-upload-http-options '(:timeout 10))
            (zr-erc-upload-backends
@@ -265,7 +267,7 @@ URL may be a function mapping each original URL to a local endpoint."
                            (lambda () (push 'second cancellations))))
               (unused . ,(lambda (&rest _) (push 'unused calls))))))
       (let ((job (zr-erc-upload--start file nil t)))
-        (setq zr-erc-upload-backend-order '(unused)
+        (setq zr-erc-upload-backend-rules '((".*" unused))
               zr-erc-upload-backends nil
               zr-erc-upload-expiry-hours 48
               zr-erc-upload-http-options '(:timeout 90))
@@ -285,7 +287,7 @@ URL may be a function mapping each original URL to a local endpoint."
   (dolist (finish '(success cancel))
     (zr-erc-upload-test--conversation
       (let* ((file (make-temp-file "erc-upload-owned-")) first second calls cancellations
-             (zr-erc-upload-backend-order '(first first second unused))
+             (zr-erc-upload-backend-rules '((".*" first first second unused)))
              (zr-erc-upload-backends
               `((first . ,(lambda (_file done)
                             (push 'first calls)
@@ -320,7 +322,7 @@ URL may be a function mapping each original URL to a local endpoint."
 (ert-deftest zr-erc-upload-all-failures-are-reported ()
   (zr-erc-upload-test--conversation
     (let* ((file (make-temp-file "erc-upload-owned-")) messages
-           (zr-erc-upload-backend-order '(first second third))
+           (zr-erc-upload-backend-rules '((".*" first second third)))
            (zr-erc-upload-backends
             '((first . (lambda (_file done) (funcall done nil "Timeout") #'ignore))
               (second . (lambda (&rest _) (error "Startup failed")))
@@ -336,7 +338,7 @@ URL may be a function mapping each original URL to a local endpoint."
 
 (ert-deftest zr-erc-upload-explicit-backend-and-invalid-configuration ()
   (zr-erc-upload-test--conversation
-    (let* ((zr-erc-upload-backend-order '(unused)) calls
+    (let* ((zr-erc-upload-backend-rules nil) calls
           (zr-erc-upload-backends
            `((chosen . ,(lambda (_file done)
                           (push 'chosen calls)
@@ -347,7 +349,7 @@ URL may be a function mapping each original URL to a local endpoint."
       (should (equal calls '(chosen)))
       (should (equal (erc-user-input) "https://example.test/chosen")))
     (dolist (order '(nil litterbox (missing) (litterbox . beacon)))
-      (let ((zr-erc-upload-backend-order order)
+      (let ((zr-erc-upload-backend-rules (list (cons ".*" order)))
             (file (make-temp-file "erc-upload-owned-")))
         (should-error (zr-erc-upload--start file nil t) :type 'user-error)
         (should-not (file-exists-p file))))
@@ -358,12 +360,59 @@ URL may be a function mapping each original URL to a local endpoint."
         (should-not (file-exists-p file))))
     (should-not zr-erc-upload--jobs)))
 
+(ert-deftest zr-erc-upload-unmatched-rule-stops-before-upload ()
+  (dolist (rules '(nil (("\\`image/" litterbox))))
+    (zr-erc-upload-test--conversation
+      (let ((file (make-temp-file "erc-upload-owned-" nil ".txt")) contacted
+            (zr-erc-upload-backend-rules rules))
+        (write-region "ordinary text" nil file nil 'silent)
+        (cl-letf (((symbol-function 'zr-http-request)
+                   (lambda (&rest _) (setq contacted t) (error "Unexpected HTTP request"))))
+          (let ((err (should-error (zr-erc-upload--start file nil t) :type 'user-error)))
+            (should (equal (error-message-string err)
+                           "No upload backend rule matches MIME type: text/plain"))))
+        (should-not contacted)
+        (should-not (file-exists-p file))
+        (should-not zr-erc-upload--jobs)))))
+
+(ert-deftest zr-erc-upload-mime-rules-select-fallback-orders ()
+  (pcase-dolist
+      (`(,suffix ,bytes ,expected ,override)
+       `((".unknown" ,zr-erc-upload-test--image-bytes (image-failure images) nil)
+         (".pdf" "%PDF-1.7\n" (pdf) nil)
+         (".zip" "PK archive data" (archive) nil)
+         (".unknown" "ordinary data" (general) nil)
+         (".png" ,zr-erc-upload-test--image-bytes (general) general)))
+    (zr-erc-upload-test--conversation
+      (let* ((file (make-temp-file "erc-upload-rules-" nil suffix)) calls
+             (zr-erc-upload-backend-rules
+              '(("\\`image/" image-failure images)
+                ("\\`application/pdf\\'" pdf)
+                ("\\`application/zip\\'" archive)
+                (".*" general)))
+             (zr-erc-upload-backends
+              (mapcar (lambda (name)
+                        (cons name
+                              (lambda (_file done)
+                                (push name calls)
+                                (if (eq name 'image-failure)
+                                    (funcall done nil "Image backend rejected")
+                                  (funcall done (format "https://example.test/%s" name) nil))
+                                #'ignore)))
+                      '(image-failure images pdf archive general))))
+        (let ((coding-system-for-write 'no-conversion))
+          (write-region bytes nil file nil 'silent))
+        (zr-erc-upload--start file override t)
+        (should (equal (reverse calls) expected))
+        (should (equal (erc-user-input) (format "https://example.test/%s" (car (last expected)))))
+        (should-not (file-exists-p file))))))
+
 (ert-deftest zr-erc-upload-yank-media-binary-and-cancellation ()
   (let ((bytes (unibyte-string 137 80 78 71 0 255 13 10))
         file callback sent (cancellations 0))
     (zr-erc-upload-test--conversation
       (zr-erc-upload--install)
-      (let ((zr-erc-upload-backend-order '(custom))
+      (let ((zr-erc-upload-backend-rules '((".*" custom)))
             (zr-erc-upload-backends
              `((custom . ,(lambda (path done)
                             (setq file path callback done)
@@ -399,7 +448,7 @@ URL may be a function mapping each original URL to a local endpoint."
           (zr-erc-upload-test--conversation
             (zr-erc-upload--install)
             (insert "draft ")
-            (let ((zr-erc-upload-backend-order '(custom))
+            (let ((zr-erc-upload-backend-rules '((".*" custom)))
                   (zr-erc-upload-backends
                    `((custom . ,(lambda (path done)
                                   (push path uploaded)
@@ -435,7 +484,7 @@ URL may be a function mapping each original URL to a local endpoint."
       (let* ((zr-erc-upload-auto-send (car case))
              (change (cadr case))
              (file (make-temp-file "erc-upload-owned-")) callback sent
-             (zr-erc-upload-backend-order '(custom))
+             (zr-erc-upload-backend-rules '((".*" custom)))
              (zr-erc-upload-backends
               `((custom . ,(lambda (_file done) (setq callback done) #'ignore)))))
         (zr-erc-upload--start file nil t)
@@ -494,7 +543,7 @@ URL may be a function mapping each original URL to a local endpoint."
                     (tempfile "/tempfile" "https://tempfile.org/file42/preview" "files" "expiryHours" "24")
                     (tmp0 "/tmp0" "https://tmp0.cc/api/file/file42/preview" "file" "expires" "12h")))
                (zr-erc-upload-test--conversation
-                 (let ((zr-erc-upload-backend-order (list backend))
+                 (let ((zr-erc-upload-backend-rules (list (cons ".*" (list backend))))
                        (zr-erc-upload-http-options '(:headers (("X-Test" . "erc-upload")) :proxy nil))
                        (zr-erc-upload-expiry-hours 8))
                    (zr-erc-upload-test--endpoint (concat base path)
@@ -525,7 +574,7 @@ URL may be a function mapping each original URL to a local endpoint."
    (lambda (base requests)
      (dolist (path '("/error" "/bad" "/hang" "/cancel"))
        (zr-erc-upload-test--conversation
-         (let ((zr-erc-upload-backend-order '(litterbox))
+         (let ((zr-erc-upload-backend-rules '((".*" litterbox)))
                (zr-erc-upload-http-options '(:timeout 1 :proxy nil)) sent
                (file (make-temp-file "erc-upload-owned-")))
            (zr-erc-upload-test--endpoint
@@ -550,7 +599,7 @@ URL may be a function mapping each original URL to a local endpoint."
      (dolist (path '("/error" "/bad" "/hang" "/json-error" "/json-bad" "/json-no-url"))
        (zr-erc-upload-test--conversation
          (let* ((file (make-temp-file "erc-upload-owned-"))
-                (zr-erc-upload-backend-order '(primary backup))
+                (zr-erc-upload-backend-rules '((".*" primary backup)))
                 (zr-erc-upload-backends
                  `((primary . ,(if (string-prefix-p "/json-" path)
                                    #'zr-erc-upload-tempfile #'zr-erc-upload-litterbox))
@@ -608,7 +657,7 @@ URL may be a function mapping each original URL to a local endpoint."
    (lambda (base requests)
      (zr-erc-upload-test--conversation
        (let ((file (make-temp-file "erc-upload-owned-"))
-             (zr-erc-upload-backend-order '(beacon tempfile tmp0))
+             (zr-erc-upload-backend-rules '((".*" beacon tempfile tmp0)))
              (zr-erc-upload-expiry-hours 72)
              (zr-erc-upload-http-options '(:proxy nil)))
          (let ((coding-system-for-write 'no-conversion))
@@ -623,24 +672,166 @@ URL may be a function mapping each original URL to a local endpoint."
          (should-not (file-exists-p file))
          (should-not (zr-erc-upload-test--buffers)))))))
 
-(ert-deftest zr-erc-upload-real-curl-non-image-fallback ()
+(ert-deftest zr-erc-upload-real-curl-general-files ()
   (skip-unless (executable-find "curl"))
   (zr-erc-upload-test--server
    (lambda (base requests)
-     (zr-erc-upload-test--conversation
-       (let ((file (make-temp-file "erc-upload-owned-" nil ".png"))
-             (zr-erc-upload-backend-order '(tempfile tmp0 beacon))
-             (zr-erc-upload-http-options '(:proxy nil)))
-         (write-region "Not an image despite the extension" nil file nil 'silent)
-         (zr-erc-upload-test--endpoint (concat base "/beacon")
-           (let ((job (zr-erc-upload--start file nil t)))
-             (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job)))
-             (should (= (length (zr-erc-upload--job-errors job)) 2))))
-         (should (= (length (funcall requests)) 1))
-         (should (equal (erc-user-input) "https://example.test/cutie.png"))
-         (should-not (file-exists-p file))
-         (should-not zr-erc-upload--jobs)
-         (should-not (zr-erc-upload-test--buffers)))))))
+     (pcase-dolist
+         (`(,backend ,suffix ,bytes)
+          `((tempfile ".png" "Not an image despite the extension")
+            (tempfile ".zip" ,(unibyte-string 80 75 3 4 0 255 1 10))
+            (tmp0 ".txt" "ordinary text")
+            (tmp0 ".zip" ,(unibyte-string 80 75 3 4 0 255 1 10))))
+       (zr-erc-upload-test--conversation
+         (let ((file (make-temp-file "erc-upload-owned-" nil suffix))
+               (before (length (funcall requests)))
+               (zr-erc-upload-expiry-hours 6)
+               (zr-erc-upload-http-options '(:proxy nil)))
+           (let ((coding-system-for-write 'no-conversion))
+             (write-region bytes nil file nil 'silent))
+           (zr-erc-upload-test--endpoint
+               (lambda (url)
+                 (concat base (if (string-suffix-p "/signed/generate" url)
+                                  "/signed" (format "/%s" backend))))
+             (let ((job (zr-erc-upload--start file backend t)))
+               (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job)))
+               (should-not (zr-erc-upload--job-errors job))))
+           (let* ((signed (eq backend 'tmp0))
+                  (count (if signed 2 1))
+                  (upload (nth (1- count) (funcall requests))))
+             (should (= (length (funcall requests)) (+ before count)))
+             (should (string-search bytes upload))
+             (should (equal (erc-user-input)
+                            (if signed
+                                "https://tmp0.cc/api/v1/signed/download/file42?sig=test&exp=123&nonce=abc"
+                              "https://tempfile.org/file42/download")))
+             (when signed
+               (let* ((request (car (funcall requests)))
+                      (body (substring request (+ 4 (string-match "\r\n\r\n" request))))
+                      (data (json-parse-string body :object-type 'alist :false-object nil)))
+                 (should (string-search "Content-Type: application/json" request))
+                 (should (equal (alist-get 'fileId data) "file42"))
+                 (should (= (alist-get 'ttl data) 21600))
+                 (should-not (alist-get 'oneTimeUse data))
+                 (should-not (alist-get 'ipBinding data)))))
+           (should-not (file-exists-p file))
+           (should-not zr-erc-upload--jobs)
+           (should-not (zr-erc-upload-test--buffers))))))))
+
+(ert-deftest zr-erc-upload-real-curl-signed-failures-and-cancel ()
+  (skip-unless (executable-find "curl"))
+  (zr-erc-upload-test--server
+   (lambda (base requests)
+     (dolist (path '("/error" "/json-bad" "/hang" "/cancel"))
+       (zr-erc-upload-test--conversation
+         (let ((file (make-temp-file "erc-upload-owned-" nil ".txt"))
+               (before (length (funcall requests)))
+               (zr-erc-upload-backend-rules '((".*" tmp0 beacon)))
+               (zr-erc-upload-http-options '(:timeout 1 :proxy nil)))
+           (write-region "signed fallback payload" nil file nil 'silent)
+           (zr-erc-upload-test--endpoint
+               (lambda (url)
+                 (concat base
+                         (cond ((string-search "beacon.host" url) "/beacon")
+                               ((string-suffix-p "/signed/generate" url)
+                                (if (equal path "/cancel") "/hang" path))
+                               (t "/tmp0"))))
+             (let ((job (zr-erc-upload--start file nil t)))
+               (when (equal path "/cancel")
+                 (zr-erc-upload-test--wait (lambda () (= (length (funcall requests)) (+ before 2))))
+                 (zr-erc-upload-cancel))
+               (zr-erc-upload-test--wait (lambda () (zr-erc-upload--job-done job)))))
+           (should (= (length (funcall requests)) (+ before (if (equal path "/cancel") 2 3))))
+           (should (equal (erc-user-input)
+                          (if (equal path "/cancel") "" "https://example.test/cutie.png")))
+           (should-not (file-exists-p file))
+           (should-not zr-erc-upload--jobs)
+           (should-not (zr-erc-upload-test--buffers))))))))
+
+(ert-deftest zr-erc-upload-signed-synchronous-handoff-and-cancel ()
+  (dolist (finish '(success cancel))
+    (zr-erc-upload-test--conversation
+      (let* ((file (make-temp-file "erc-upload-owned-" nil ".txt")) second cancellations
+             (zr-erc-upload-backend-rules '((".*" tmp0))))
+        (write-region "ordinary file" nil file nil 'silent)
+        (cl-letf (((symbol-function 'zr-http-request)
+                   (lambda (url &rest arguments)
+                     (let ((done (plist-get arguments :callback)))
+                       (if (string-suffix-p "/signed/generate" url)
+                           (progn (setq second done) 'signed-request)
+                         (funcall done '(:status 200 :body "{\"success\":true,\"fileId\":\"file42\"}") nil)
+                         'upload-request))))
+                  ((symbol-function 'zr-http-cancel)
+                   (lambda (request)
+                     (push request cancellations)
+                     (when (eq request 'signed-request) (funcall second nil "Cancelled")))))
+          (let ((job (zr-erc-upload--start file nil t)))
+            (should (equal cancellations '(upload-request)))
+            (should-not (zr-erc-upload--job-done job))
+            (if (eq finish 'success)
+                (funcall second '(:status 200 :body "{\"signedUrl\":\"https://example.test/signed\"}") nil)
+              (zr-erc-upload-cancel))
+            (funcall second '(:status 200 :body "{\"signedUrl\":\"https://example.test/late\"}") nil)
+            (should (equal cancellations '(signed-request upload-request)))
+            (should (equal (erc-user-input) (if (eq finish 'success) "https://example.test/signed" "")))
+            (should (zr-erc-upload--job-done job))
+            (should-not (file-exists-p file))))))))
+
+(ert-deftest zr-erc-upload-signed-preserves-http-settings ()
+  (zr-erc-upload-test--conversation
+    (let* ((file (make-temp-file "erc-upload-owned-" nil ".txt")) first second
+           (zr-erc-upload-backend-rules '((".*" tmp0)))
+           (zr-http-default-options '(:timeout 20 :proxy inherit :headers (("X-Global" . "saved"))))
+           (zr-erc-upload-http-options '(:timeout 11 :proxy nil :headers (("X-Test" . "original")))))
+      (write-region "ordinary file" nil file nil 'silent)
+      (cl-letf (((symbol-function 'zr-http-request)
+                 (lambda (url &rest arguments)
+                   (if (string-suffix-p "/signed/generate" url)
+                       (let ((options (plist-get arguments :options)))
+                         (should (= (plist-get options :timeout) 11))
+                         (should-not (plist-get options :proxy))
+                         (should (equal (plist-get options :headers)
+                                        '(("X-Global" . "saved") ("X-Test" . "original"))))
+                         (setq second (plist-get arguments :callback)))
+                     (setq first (plist-get arguments :callback)))
+                   'request))
+                ((symbol-function 'zr-http-cancel) #'ignore))
+        (let ((job (zr-erc-upload--start file nil t)))
+          (setq zr-erc-upload-http-options '(:timeout 90 :headers (("X-Test" . "changed")))
+                zr-http-default-options '(:headers (("X-Other" . "wrong-buffer"))))
+          (with-temp-buffer
+            (funcall first '(:status 200 :body "{\"success\":true,\"fileId\":\"file42\"}") nil))
+          (funcall second '(:status 200 :body "{\"signedUrl\":\"https://example.test/signed\"}") nil)
+          (should (zr-erc-upload--job-done job))
+          (should (equal (erc-user-input) "https://example.test/signed"))
+          (should-not (file-exists-p file)))))))
+
+(ert-deftest zr-erc-upload-signed-retention-and-startup-fallback ()
+  (dolist (hours '(1 336))
+    (zr-erc-upload-test--conversation
+      (let* ((file (make-temp-file "erc-upload-owned-" nil ".txt")) calls
+             (zr-erc-upload-expiry-hours hours)
+             (zr-erc-upload-backend-rules '((".*" tmp0 backup)))
+             (zr-erc-upload-backends
+              `((tmp0 . zr-erc-upload-tmp0)
+                (backup . ,(lambda (_file done)
+                             (funcall done "https://example.test/backup" nil) #'ignore)))))
+        (write-region "ordinary file" nil file nil 'silent)
+        (cl-letf (((symbol-function 'zr-http-request)
+                   (lambda (url &rest arguments)
+                     (push url calls)
+                     (if (string-suffix-p "/signed/generate" url)
+                         (error "Signing startup failed")
+                       (funcall (plist-get arguments :callback)
+                                '(:status 200 :body "{\"success\":true,\"fileId\":\"file42\"}") nil))
+                     'request))
+                  ((symbol-function 'zr-http-cancel) #'ignore))
+          (let ((job (zr-erc-upload--start file nil t)))
+            (should (zr-erc-upload--job-done job))
+            (should (= (length (zr-erc-upload--job-errors job)) 1))))
+        (should (= (length calls) (if (= hours 1) 2 0)))
+        (should (equal (erc-user-input) "https://example.test/backup"))
+        (should-not (file-exists-p file))))))
 
 (provide 'zr-erc-upload-test)
 ;;; zr-erc-upload-test.el ends here

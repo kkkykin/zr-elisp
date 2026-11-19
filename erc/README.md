@@ -376,7 +376,7 @@ files. A clipboard “cut” operation uploads a copy and leaves the source inta
 `M-x zr-erc-upload-file` selects a local file directly and also works without
 enabling the module. With a prefix argument, it prompts for the backend.
 
-The default order is `(litterbox tempfile tmp0 beacon)`, with automatic fallback.
+The default rule is `(".*" litterbox tempfile tmp0 beacon)`, with automatic fallback.
 Curl must be installed. Uploads run asynchronously. Set
 `zr-erc-upload-auto-send` to non-nil to send each link
 as a literal chat message through ERC's normal send pipeline, preserving
@@ -384,15 +384,21 @@ draft input. If the connection or conversation target changes while
 uploading, the link is reported in the error message instead of being
 inserted or sent.
 
-Built-in backends share direct file URLs suitable for browser display.
-TempFile and tmp0 provide these only for PNG, JPEG, GIF, WebP and SVG images.
-For other files they fail before uploading, allowing fallback to Litterbox
-or Beacon. Image types are detected from file contents rather than extensions.
+Built-in backends share GET URLs that return the file itself without a download
+page. PNG, JPEG, GIF, WebP and SVG images use inline image URLs on TempFile and
+tmp0. Other files, including documents and archives, use GET download URLs and
+may trigger the browser's save dialog. Each service enforces its own size and
+file type limits; rejected uploads automatically fall back to the next backend.
 
 These settings also support `setq-local` in a conversation:
 
 ```elisp
-(setq zr-erc-upload-backend-order '(tempfile tmp0 beacon litterbox)) ; Optional: reorder.
+;; Optional: use different orders for specific MIME types, then a catch-all rule.
+(setq zr-erc-upload-backend-rules
+      '(("\\`image/" litterbox tempfile tmp0 beacon)
+        ("\\`application/pdf\\'" tempfile beacon litterbox tmp0)
+        ("\\`application/zip\\'" tempfile litterbox tmp0 beacon)
+        (".*" litterbox tempfile tmp0 beacon)))
 (setq zr-erc-upload-expiry-hours 24) ; Minimum retention, rounded up per service.
 (setq zr-erc-upload-auto-send t) ; Optional: send links directly.
 (setq zr-erc-upload-link-format "[%f](%u)") ; Default: "%u"; %% means %.
@@ -404,17 +410,21 @@ These settings also support `setq-local` in a conversation:
         (format "%s: %s" (file-name-nondirectory file) url)))
 ```
 
-The backend order and functions, expiry, HTTP options, formatter and auto-send
+The selected backend order and functions, expiry, HTTP options, formatter and auto-send
 setting are captured when uploading starts.
 The formatter must return a nonempty single line.
 Requests use `zr-http`; `zr-erc-upload-http-options` overrides
-`zr-http-default-options` and defaults to `(:timeout 120)` per backend attempt.
+`zr-http-default-options` and defaults to `(:timeout 120)` per HTTP request.
 `M-x zr-erc-upload-cancel` cancels pending uploads in the current buffer.
 Closing the buffer or disabling the module also cancels its uploads.
 Temporary clipboard images and curl response buffers are cleaned up on
 completion, cancellation and failure.
 
-`zr-erc-upload-backend-order` is a nonempty list of names to try in order.
+`zr-erc-upload-backend-rules` selects a nonempty backend order by MIME type.
+The first matching regexp wins. Use a final `".*"` rule to handle all remaining
+types; no match reports an error before any upload starts. Image MIME types are
+detected from the file contents and other types from the filename extension.
+A backend explicitly selected with a prefix argument overrides these rules.
 Each name is tried once. Transport failures, timeouts, HTTP errors, rejected
 uploads, malformed JSON and invalid URLs automatically advance to the next
 backend. The first valid URL finishes the upload. If every backend fails,
@@ -433,14 +443,19 @@ whose maximum lifetime is too short fails without uploading, allowing fallback.
 | --- | --- | --- | --- |
 | `litterbox` | — | 1, 12, 24 or 72 hours | Direct file |
 | [`beacon`](https://beacon.host/file-upload-api) | 4 MB per anonymous request | 24 hours | Direct file |
-| [`tempfile`](https://tempfile.org/api) | 100 MB per file | 1, 6, 24 or 48 hours | Direct image |
-| [`tmp0`](https://tmp0.cc/blog/the-api-written-down) | 2 GB per file | 1, 6, 12 hours; 1, 3, 7, 14 or 30 days | Direct image |
+| [`tempfile`](https://tempfile.org/api) | 100 MB per file | 1, 6, 24 or 48 hours | Direct image or GET download |
+| [`tmp0`](https://tmp0.cc/blog/the-api-written-down) | 2 GB per file | Images: up to 30 days; other GET links: up to 7 days | Direct image or signed GET download |
 
 Beacon uses the single-request `/v1/upload` API. TempFile uses `files[0].id`
 to build `https://tempfile.org/{id}/preview`; tmp0 uses `fileId` to build
-`https://tmp0.cc/api/file/{id}/preview`. Both endpoints return the image itself
-with an image content type and no forced download. API endpoints and form fields
-are handled by the built-in functions without per-service configuration options.
+`https://tmp0.cc/api/file/{id}/preview` for supported images. TempFile uses
+`https://tempfile.org/{id}/download` for other files. tmp0 uploads other files,
+then calls `/api/v1/signed/generate` to obtain a GET URL returning the file itself.
+Its signature has no IP binding or one-time-use limit, and lasts for the requested
+`zr-erc-upload-expiry-hours`, at most 168 hours. Longer lifetimes fail before
+uploading, allowing fallback. Cancellation covers both requests.
+API endpoints and form fields are handled by the built-in functions without
+per-service configuration options.
 tmp0 may remove image metadata during upload without re-encoding the image.
 Its direct image URL preserves pixels and dimensions, but the stored bytes may
 differ from the original file.
@@ -449,15 +464,15 @@ differ from the original file.
 
 ```elisp
 (add-to-list 'zr-erc-upload-backends '(my-host . my-upload-function))
-(setq zr-erc-upload-backend-order '(my-host litterbox))
+(setq zr-erc-upload-backend-rules '((".*" my-host litterbox)))
 ```
 
 An upload function receives a local filename and a callback, runs in the
 originating ERC buffer, and returns a function that cancels and releases its
 resources. It calls the callback with `(URL nil)` on success or
 `(nil ERROR-STRING)` on failure; synchronous callbacks are also supported.
-Successful URLs must use HTTP or HTTPS and point directly to file content,
-without an intermediate page or forced download. Tests exercise multipart uploads,
+Successful URLs must use HTTP or HTTPS and accept GET to return the file content,
+without an intermediate page. Tests exercise multipart uploads,
 fallback and cancellation against a local HTTP server without contacting
 public services:
 
