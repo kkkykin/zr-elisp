@@ -518,6 +518,9 @@ Expired links and failed requests do not stop the remaining files.
 All fetched files share one dedicated temporary directory for the Emacs
 session. In Image mode, native `n`/`p` browse images in this directory and skip
 non-image filenames. Other files can be opened manually from its Dired buffer.
+Cached filenames start with the message's UTC timestamp, including fractional
+seconds, so navigation follows message time even when files are fetched out of
+order. A sequence number preserves request order for equal timestamps.
 If a cached image lacks a recognizable image extension, Emacs's content
 detection supplies its suffix, so URLs ending in `download` can also be
 browsed. File contents and explicit download destinations are preserved.

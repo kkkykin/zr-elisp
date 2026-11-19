@@ -60,6 +60,8 @@ This option supports buffer-local values."
 (defvar-local zr-erc-link--jobs nil)
 (defvar zr-erc-link--directory nil
   "Shared temporary directory for files fetched by this Emacs session.")
+(defvar zr-erc-link--file-sequence 0
+  "Sequence number preserving request order for equal message times.")
 (defvar erc-zr-link-mode)
 
 (defun zr-erc-link--option (rule key fallback)
@@ -324,8 +326,13 @@ of opening a buffer.  Failed requests call it with nil and ITEM."
                :timeout (zr-erc-link--option rule :timeout 30)
                :max-bytes (zr-erc-link--option rule :max-bytes (* 64 1024 1024)))))
     (setf (zr-erc-link--job-raw job)
-          (make-temp-file (expand-file-name "erc-media-" (zr-erc-link--temp-directory))
-                          nil (concat "-" (zr-erc-link--file-name item))))
+          (make-temp-file
+           (expand-file-name
+            (format "erc-media-%s-%09d-"
+                    (format-time-string "%Y%m%dT%H%M%S.%N" (plist-get item :time) t)
+                    (cl-incf zr-erc-link--file-sequence))
+            (zr-erc-link--temp-directory))
+           nil (concat "-" (zr-erc-link--file-name item))))
     (push job zr-erc-link--jobs)
     (add-hook 'kill-buffer-hook #'zr-erc-link--cleanup-buffer nil t)
     (condition-case nil
