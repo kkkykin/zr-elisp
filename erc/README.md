@@ -376,9 +376,9 @@ files. A clipboard “cut” operation uploads a copy and leaves the source inta
 `M-x zr-erc-upload-file` selects a local file directly and also works without
 enabling the module. With a prefix argument, it prompts for the backend.
 
-The default backend uses curl to upload to Litterbox with `reqtype=fileupload`,
-`time=1h` and `fileToUpload=@FILE`. Curl must be installed. Uploads run
-asynchronously. Set `zr-erc-upload-auto-send` to non-nil to send each link
+The default order is `(litterbox tempfile tmp0 beacon)`, with automatic fallback.
+Curl must be installed. Uploads run asynchronously. Set
+`zr-erc-upload-auto-send` to non-nil to send each link
 as a literal chat message through ERC's normal send pipeline, preserving
 draft input. If the connection or conversation target changes while
 uploading, the link is reported in the error message instead of being
@@ -387,8 +387,9 @@ inserted or sent.
 These settings also support `setq-local` in a conversation:
 
 ```elisp
+(setq zr-erc-upload-backend-order '(tempfile tmp0 beacon litterbox)) ; Optional: reorder.
+(setq zr-erc-upload-expiry-hours 24) ; Minimum retention, rounded up per service.
 (setq zr-erc-upload-auto-send t) ; Optional: send links directly.
-(setq zr-erc-upload-litterbox-time "1h") ; Also 12h, 24h or 72h.
 (setq zr-erc-upload-link-format "[%f](%u)") ; Default: "%u"; %% means %.
 (setq zr-erc-upload-http-options
       '(:timeout 120 :proxy "http://127.0.0.1:7890"))
@@ -398,29 +399,57 @@ These settings also support `setq-local` in a conversation:
         (format "%s: %s" (file-name-nondirectory file) url)))
 ```
 
-The formatter and auto-send setting are captured when uploading starts.
+The backend order and functions, expiry, HTTP options, formatter and auto-send
+setting are captured when uploading starts.
 The formatter must return a nonempty single line.
 Requests use `zr-http`; `zr-erc-upload-http-options` overrides
-`zr-http-default-options` and defaults to `(:timeout 120)`.
+`zr-http-default-options` and defaults to `(:timeout 120)` per backend attempt.
 `M-x zr-erc-upload-cancel` cancels pending uploads in the current buffer.
 Closing the buffer or disabling the module also cancels its uploads.
 Temporary clipboard images and curl response buffers are cleaned up on
 completion, cancellation and failure.
 
-`zr-erc-upload-backends` is an alist of names and upload functions; choose the
-default with `zr-erc-upload-backend`. To add a backend:
+`zr-erc-upload-backend-order` is a nonempty list of names to try in order.
+Each name is tried once. Transport failures, timeouts, HTTP errors, rejected
+uploads, malformed JSON and invalid URLs automatically advance to the next
+backend. The first valid URL finishes the upload. If every backend fails,
+the error message includes each backend's reason. Cancellation stops the
+whole upload. Failed requests are released before continuing, and temporary
+clipboard files are retained until the whole upload finishes. A prefix
+argument chooses only the selected backend.
+
+All built-in services support anonymous uploads and use the same
+`zr-erc-upload-expiry-hours` setting, which defaults to 1. The requested lifetime
+is rounded up to the shortest supported duration. For example, 8 hours becomes
+12 on Litterbox and tmp0, 24 on TempFile, and the fixed 24 on Beacon. A service
+whose maximum lifetime is too short fails without uploading, allowing fallback.
+
+| Backend | API limit per file/request | Retention | Shared link |
+| --- | --- | --- | --- |
+| `litterbox` | — | 1, 12, 24 or 72 hours | Direct file |
+| [`beacon`](https://beacon.host/file-upload-api) | 4 MB per anonymous request | 24 hours | Direct file |
+| [`tempfile`](https://tempfile.org/api) | 100 MB per file | 1, 6, 24 or 48 hours | File page |
+| [`tmp0`](https://tmp0.cc/blog/the-api-written-down) | 2 GB per file | 1, 6, 12 hours; 1, 3, 7, 14 or 30 days | Download page |
+
+Beacon uses the single-request `/v1/upload` API. TempFile shares the returned
+`files[0].url`; tmp0 shares `fullUrl`, because its `directDownloadUrl` requires
+POST and cannot be opened as a normal link. API endpoints and form fields are
+handled by the built-in functions without per-service configuration options.
+
+`zr-erc-upload-backends` is an alist of names and upload functions. To add one:
 
 ```elisp
 (add-to-list 'zr-erc-upload-backends '(my-host . my-upload-function))
-(setq zr-erc-upload-backend 'my-host)
+(setq zr-erc-upload-backend-order '(my-host litterbox))
 ```
 
 An upload function receives a local filename and a callback, runs in the
 originating ERC buffer, and returns a function that cancels and releases its
 resources. It calls the callback with `(URL nil)` on success or
 `(nil ERROR-STRING)` on failure; synchronous callbacks are also supported.
-Successful URLs must use HTTP or HTTPS. Litterbox is the supplied backend.
-Tests exercise curl against a local HTTP server without uploading to Litterbox:
+Successful URLs must use HTTP or HTTPS. Tests exercise multipart uploads,
+fallback and cancellation against a local HTTP server without contacting
+public services:
 
 ```sh
 make test TEST_FILE=erc/test/zr-erc-upload-test.el
