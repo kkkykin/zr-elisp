@@ -135,16 +135,18 @@ Validate the resulting headers and proxy before callers allocate resources."
   "Validate transport ARGUMENTS, reserving request and output controls."
   (unless (and (proper-list-p arguments) (cl-every #'stringp arguments))
     (error "HTTP curl arguments must be a list of strings"))
-  (dolist (argument arguments)
-    (when (or (string-match-p "[\0\r\n]" argument)
-              (string-match-p
-               (concat "\\`\\(?:--\\(?:config\\|next\\|url\\|output\\|output-dir\\|remote-name"
-                       "\\|remote-header-name\\|dump-header\\|write-out\\|request\\|head"
-                       "\\|data[^=]*\\|form[^=]*\\|upload-file\\|user\\|oauth2-bearer"
-                       "\\|retry[^=]*\\|fail[^=]*\\|parallel[^=]*\\)\\(?:=\\|\\'\\)"
-                       "\\|-[K:oODwXIduFTf]\\)")
-               argument))
-      (error "Reserved HTTP curl argument: %s" argument)))
+  ;; Curl distinguishes -k (insecure) from -K (config), and -x from -X.
+  (let ((case-fold-search nil))
+    (dolist (argument arguments)
+      (when (or (string-match-p "[\0\r\n]" argument)
+                (string-match-p
+                 (concat "\\`\\(?:--\\(?:config\\|next\\|url\\|output\\|output-dir\\|remote-name"
+                         "\\|remote-header-name\\|dump-header\\|write-out\\|request\\|head"
+                         "\\|data[^=]*\\|form[^=]*\\|upload-file\\|user\\|oauth2-bearer"
+                         "\\|retry[^=]*\\|fail[^=]*\\|parallel[^=]*\\)\\(?:=\\|\\'\\)"
+                         "\\|-[K:oODwXIduFTf]\\)")
+                 argument))
+        (error "Reserved HTTP curl argument: %s" argument))))
   arguments)
 
 (defun zr-http--quote (text)

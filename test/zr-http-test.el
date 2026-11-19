@@ -53,6 +53,17 @@
                    '(("Accept" . "text/plain") ("X-Delete" . "secret"))))
     (should-not (plist-get (zr-http-options defaults '(:headers nil)) :headers))))
 
+(ert-deftest zr-http-curl-arguments-case-sensitive ()
+  (dolist (case-fold-search '(t nil))
+    (dolist (arguments '(("-k" "-x" "http://127.0.0.1:8080")
+                        ("-kx" "http://127.0.0.1:8080")
+                        ("--insecure")
+                        ("--cacert" "/tmp/mitmproxy-ca-cert.pem")))
+      (should (equal arguments (zr-http--extra-arguments arguments))))
+    (dolist (argument '("-K" "-K/tmp/curl.conf" "-X" "-XPOST" "-I" "-T"
+                        "-d" "-o" "--config" "--output=/tmp/output"))
+      (should-error (zr-http--extra-arguments (list argument))))))
+
 (ert-deftest zr-http-real-methods-binary-and-http-errors ()
   (zr-http-test--server
     (let ((bytes (apply #'unibyte-string (number-sequence 0 255))))
