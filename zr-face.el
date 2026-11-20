@@ -383,7 +383,7 @@ Avoids selecting the most recently used theme."
 ;;; Appearance
 
 (defcustom zr-face-wezterm-theme "Google (light) (terminal.sexy)"
-  "Theme to apply to WezTerm terminal frames.
+  "Fallback theme for WezTerm terminals that have not reported a background color.
 Can be a theme name string, a function returning a theme name,
 or nil to disable WezTerm theme updates."
   :group 'zr-face
@@ -405,7 +405,8 @@ In a graphical display:
 
 In a WezTerm terminal without a graphical display:
 - Configures the WezTerm terminal theme via `zr-wezterm-send-json'
-  once per terminal connection."
+  once per terminal connection, unless Emacs has already received the
+  terminal's background color via reportBackground."
   (interactive)
   (let ((frame (or frame (selected-frame))))
     (if (display-graphic-p frame)
@@ -416,6 +417,7 @@ In a WezTerm terminal without a graphical display:
       (when (and (equal (or (getenv "TERM_PROGRAM" frame)
                             (getenv "TERM_PROGRAM"))
                         "WezTerm")
+                 (not (terminal-parameter frame 'xterm--background-color))
                  (not (terminal-parameter frame 'zr-face-wezterm-setup))
                  (fboundp 'zr-wezterm-send-json))
         (with-selected-frame frame

@@ -40,6 +40,7 @@
 (defvar zr-face-buffer-alist)
 (defvar zr-face-buffer-mode)
 (defvar zr-face-appearance-should-setup-p)
+(defvar zr-face-wezterm-theme)
 
 (ert-deftest zr-face-test-system-dark-mode-is-safe-in-terminal ()
   "Use the detected terminal background, falling back to the frame."
@@ -195,6 +196,25 @@
       (set-terminal-parameter nil 'zr-face-wezterm-setup nil)
       (zr-face-appearance-setup)
       (should (= 2 calls)))))
+
+(ert-deftest zr-face-test-terminal-appearance-keeps-reported-background ()
+  "A reported terminal background prevents WezTerm theme generation and updates."
+  (let ((frame (selected-frame))
+        (zr-face-wezterm-theme
+         (lambda () (ert-fail "Reported background should skip theme generation"))))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) nil))
+              ((symbol-function 'getenv)
+               (lambda (name &optional _) (and (equal name "TERM_PROGRAM") "WezTerm")))
+              ((symbol-function 'terminal-parameter)
+               (lambda (target parameter)
+                 (should (eq target frame))
+                 (and (eq parameter 'xterm--background-color) '(0 0 0))))
+              ((symbol-function 'zr-wezterm-send-json)
+               (lambda (&rest _) (ert-fail "Reported background should keep terminal colors")))
+              ((symbol-function 'set-terminal-parameter)
+               (lambda (&rest _) (ert-fail "Skipped setup should not mark the terminal"))))
+      (zr-face-appearance-setup frame)
+      (zr-face-appearance-setup frame))))
 
 (ert-deftest zr-face-test-spec-attrs ()
   "Extracting attributes handles plists and display conditions."
