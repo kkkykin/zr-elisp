@@ -129,6 +129,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.reply(303, headers={"Location": self.path})
             return False
         entry = FILES.get(path)
+        if (entry and entry["data"] is not None and raw_path.endswith("/")
+                and self.command in ("PROPFIND", "GET")):
+            self.reply(404)
+            return False
         if (entry and entry["data"] is None and not raw_path.endswith("/")
                 and self.command in ("PROPFIND", "GET")):
             self.reply(301, headers={"Location": raw_path + "/"})

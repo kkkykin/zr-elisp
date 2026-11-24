@@ -407,10 +407,19 @@ Encoded slashes and dot components are rejected to preserve hierarchy."
    file "PROPFIND" `(("Depth" . ,depth) ("Content-Type" . "application/xml; charset=utf-8"))
    zr-tramp-webdav--propfind-body))
 
+(defun zr-tramp-webdav--cached-collection-p (vec localname)
+  "Whether cached metadata identifies VEC's LOCALNAME as a collection.
+Actual attributes take precedence over hints recorded after MKCOL."
+  (let ((entry (tramp-get-file-property vec localname "zr-webdav-stat" tramp-cache-undefined)))
+    (if (eq entry tramp-cache-undefined)
+        (tramp-get-file-property vec localname "zr-webdav-collection")
+      (plist-get entry :directory))))
+
 (defun zr-tramp-webdav--stat (file &optional fresh)
   "Return metadata for FILE, or nil if missing; FRESH bypasses the cache.
 Non-essential metadata checks always reuse cached values."
-  (with-parsed-tramp-file-name (expand-file-name file) nil
+  (setq file (expand-file-name file))
+  (with-parsed-tramp-file-name file nil
     (let ((remote-file-name-inhibit-cache
            (unless non-essential (or fresh remote-file-name-inhibit-cache))))
       (with-tramp-file-property v localname "zr-webdav-stat"
@@ -418,21 +427,39 @@ Non-essential metadata checks always reuse cached values."
         ;; names.  Listing a directory is enough to cache its children;
         ;; checking those candidates must not start additional requests.
         (when non-essential (throw 'zr-tramp-webdav--non-essential nil))
-        (let* ((response (zr-tramp-webdav--propfind file "0"))
+        (let* ((collection
+                (let ((remote-file-name-inhibit-cache nil))
+                  (zr-tramp-webdav--cached-collection-p v localname)))
+               ;; Emacs removes trailing slashes before file predicates.
+               ;; Reuse known directory types only to select the URL;
+               ;; the response still supplies fresh metadata.
+               (target (if (or collection
+                               (equal (file-name-as-directory file) default-directory))
+                           (file-name-as-directory file) file))
+               (response (zr-tramp-webdav--propfind target "0"))
                (status (plist-get response :status)))
-          (cond
-           ((memq status '(404 410)) nil)
-           ((= status 207)
-            (let* ((path (zr-tramp-webdav--href-path
-                          (plist-get response :url) (plist-get response :url)))
-                   (entry (cl-find path (zr-tramp-webdav--entries response)
-                                   :key (lambda (e) (plist-get e :path)) :test #'equal)))
-              (unless entry
-                (signal 'file-error (list "WebDAV response omitted requested resource" file)))
-              (cond ((memq (plist-get entry :status) '(404 410)) nil)
-                    ((= (plist-get entry :status) 200) entry)
-                    (t (zr-tramp-webdav--http-error entry file)))))
-           (t (zr-tramp-webdav--http-error response file))))))))
+          ;; A collection may have become a regular file, or the caller
+          ;; may be testing a file using directory syntax.
+          (when (and (not (equal target (directory-file-name target)))
+                     (memq status '(404 410)))
+            (setq response (zr-tramp-webdav--propfind (directory-file-name target) "0")
+                  status (plist-get response :status)))
+          (let ((entry
+                 (cond
+                  ((memq status '(404 410)) nil)
+                  ((= status 207)
+                   (let* ((path (zr-tramp-webdav--href-path
+                                 (plist-get response :url) (plist-get response :url)))
+                          (entry (cl-find path (zr-tramp-webdav--entries response)
+                                          :key (lambda (e) (plist-get e :path)) :test #'equal)))
+                     (unless entry
+                       (signal 'file-error (list "WebDAV response omitted requested resource" file)))
+                     (cond ((memq (plist-get entry :status) '(404 410)) nil)
+                           ((= (plist-get entry :status) 200) entry)
+                           (t (zr-tramp-webdav--http-error entry file)))))
+                  (t (zr-tramp-webdav--http-error response file)))))
+            (tramp-set-file-property v localname "zr-webdav-collection" (plist-get entry :directory))
+            entry))))))
 
 (defun zr-tramp-webdav--attributes (entry file id-format)
   "Convert metadata ENTRY for FILE to file attributes in ID-FORMAT."
@@ -611,8 +638,11 @@ old validators and modification times with those from RESPONSE."
     (unwind-protect
         (condition-case err
             (progn
-              (when (file-directory-p file)
-                (signal 'file-error (list "Cannot read a WebDAV directory as a file" file)))
+              (let ((entry (zr-tramp-webdav--stat file)))
+                (unless entry
+                  (signal 'file-missing (list "No such WebDAV file" file)))
+                (when (plist-get entry :directory)
+                  (signal 'file-error (list "Cannot read a WebDAV directory as a file" file))))
               (setq response (zr-tramp-webdav--get file))
               (zr-tramp-webdav--write-bytes (plist-get response :body) temp)
               (let ((file-coding-system-alist
@@ -641,26 +671,32 @@ old validators and modification times with those from RESPONSE."
           ((and etag (not (string-prefix-p "W/" etag))) (list (cons "If-Match" etag)))
           (modified (list (cons "If-Unmodified-Since" modified))))))
 
-(defun zr-tramp-webdav--mutate (file method &optional headers data exclusive)
-  "Run METHOD on FILE using HEADERS and DATA, then invalidate its cache.
-EXCLUSIVE controls the error for a failed create-only precondition."
-  (unwind-protect
-      (let* ((response (zr-tramp-webdav--request file method headers data))
-             (status (plist-get response :status)))
-        (unless (<= 200 status 299)
-          (zr-tramp-webdav--http-error response file exclusive))
-        ;; DELETE/COPY/MOVE may return HTTP 207 with per-resource failures.
-        (when (= status 207)
-          (let ((nodes (zr-tramp-webdav--children (zr-tramp-webdav--xml response) "response")))
-            (unless nodes
-              (signal 'file-error (list "Empty WebDAV mutation response" file)))
-            (dolist (node nodes)
-              (unless (let ((code (zr-tramp-webdav--status node)))
-                        (and code (<= 200 code 299)))
-                (zr-tramp-webdav--http-error
-                 (list :status (or (zr-tramp-webdav--status node) 500)) file)))))
-        response)
-    (zr-tramp-webdav--flush file)))
+(defun zr-tramp-webdav--mutate
+    (file method &optional headers data exclusive accepted-statuses)
+  "Run METHOD on FILE using HEADERS and DATA, invalidating changed metadata.
+EXCLUSIVE controls the error for a failed create-only precondition.
+ACCEPTED-STATUSES are HTTP errors the caller handles itself."
+  (let (copied)
+    (unwind-protect
+        (let* ((response (zr-tramp-webdav--request file method headers data))
+               (status (plist-get response :status)))
+          (unless (or (<= 200 status 299) (memq status accepted-statuses))
+            (zr-tramp-webdav--http-error response file exclusive))
+          ;; DELETE/COPY/MOVE may return HTTP 207 with per-resource failures.
+          (when (= status 207)
+            (let ((nodes (zr-tramp-webdav--children (zr-tramp-webdav--xml response) "response")))
+              (unless nodes
+                (signal 'file-error (list "Empty WebDAV mutation response" file)))
+              (dolist (node nodes)
+                (unless (let ((code (zr-tramp-webdav--status node)))
+                          (and code (<= 200 code 299)))
+                  (zr-tramp-webdav--http-error
+                   (list :status (or (zr-tramp-webdav--status node) 500)) file)))))
+          ;; A successful COPY changes only the destination.  Keep source
+          ;; attributes for subsequent copies and local downloads.
+          (setq copied (equal method "COPY"))
+          response)
+      (unless copied (zr-tramp-webdav--flush file)))))
 
 (defun zr-tramp-webdav--write-region (start end file &optional append visit _lockname mustbenew)
   "Implement `write-region' using a conditional WebDAV PUT."
@@ -760,14 +796,24 @@ EXCLUSIVE controls the error for a failed create-only precondition."
 (defun zr-tramp-webdav--make-directory (directory &optional parents)
   "Create DIRECTORY using MKCOL, optionally creating PARENTS."
   (setq directory (file-name-as-directory (expand-file-name directory)))
-  (let ((entry (zr-tramp-webdav--stat directory t)))
-    (if entry
-        (unless (and parents (plist-get entry :directory))
+  (with-parsed-tramp-file-name directory nil
+    (unless (and parents (zr-tramp-webdav--cached-collection-p v localname))
+      ;; MKCOL checks existence atomically; no preceding PROPFIND is needed.
+      (let ((response (zr-tramp-webdav--mutate directory "MKCOL" nil nil nil '(405 409))))
+        (when (= (plist-get response :status) 409)
+          (let ((parent (file-name-directory (directory-file-name directory))))
+            (unless (and parents (not (equal parent directory)))
+              (zr-tramp-webdav--http-error response directory))
+            (make-directory parent t)
+            ;; Retry once: a persistent 409 must not recurse indefinitely.
+            (setq response (zr-tramp-webdav--mutate directory "MKCOL" nil nil nil '(405)))))
+        (when (and (= (plist-get response :status) 405)
+                   (not (and parents
+                             (plist-get (zr-tramp-webdav--stat directory t) :directory))))
           (signal 'file-already-exists (list "File exists" directory)))
-      (when parents
-        (let ((parent (file-name-directory (directory-file-name directory))))
-          (unless (file-directory-p parent) (make-directory parent t))))
-      (zr-tramp-webdav--mutate directory "MKCOL"))
+        ;; Creation establishes the type and URL, but not DAV timestamps
+        ;; or validators.  Retrieve actual attributes only when needed.
+        (tramp-set-file-property v localname "zr-webdav-collection" t)))
     nil))
 
 (defun zr-tramp-webdav--delete-file (file &optional trash)
@@ -785,11 +831,13 @@ EXCLUSIVE controls the error for a failed create-only precondition."
     (signal 'file-error '("WebDAV does not support trash")))
   (setq directory (file-name-as-directory (expand-file-name directory)))
   (let ((remote-file-name-inhibit-cache t))
-    (unless (file-directory-p directory)
-      (signal 'file-error (list "Not a WebDAV directory" directory)))
-    (when (and (not recursive)
-               (directory-files directory nil directory-files-no-dot-files-regexp))
-      (signal 'file-error (list "Directory is not empty" directory))))
+    (if recursive
+        (unless (file-directory-p directory)
+          (signal 'file-error (list "Not a WebDAV directory" directory)))
+      ;; Depth 1 establishes both the directory's type and its emptiness.
+      (when (cl-some (lambda (entry) (not (member (car entry) '("." ".."))))
+                     (zr-tramp-webdav--directory-entries directory))
+        (signal 'file-error (list "Directory is not empty" directory)))))
   (zr-tramp-webdav--mutate directory "DELETE")
   nil)
 
@@ -805,18 +853,23 @@ EXCLUSIVE controls the error for a failed create-only precondition."
 DIRECTORY permits replacing an empty directory.  Return overwrite consent."
   (when (equal (expand-file-name file) (expand-file-name newname))
     (signal 'file-error (list "Source and destination are the same file" file)))
-  (let* ((remote-file-name-inhibit-cache t)
-         (exists (file-exists-p newname)))
+  (let* ((remote (zr-tramp-webdav-file-name-p newname))
+         ;; COPY/MOVE Overwrite:F and PUT If-None-Match:* reject existing
+         ;; remote targets atomically.  Only overwrites need a type check.
+         (entry (when (and remote okay) (zr-tramp-webdav--stat newname t)))
+         (exists (if remote (and entry t) (file-exists-p newname)))
+         (target-directory (and exists (if remote (plist-get entry :directory)
+                                         (file-directory-p newname)))))
     (when (and exists
                (or (not okay)
                    (and (integerp okay)
                         (not (y-or-n-p (format "File %s exists; overwrite? " newname))))))
       (signal 'file-already-exists (list "File exists" newname)))
-    (when (and exists (file-directory-p newname)
+    (when (and target-directory
                (or (not directory)
                    (directory-files newname nil directory-files-no-dot-files-regexp)))
       (signal 'file-error (list "Cannot overwrite a directory" newname)))
-    (when (and exists directory (not (file-directory-p newname)))
+    (when (and exists directory (not target-directory))
       (signal 'file-error (list "Cannot replace a file with a directory" newname)))
     (if (integerp okay) exists okay)))
 

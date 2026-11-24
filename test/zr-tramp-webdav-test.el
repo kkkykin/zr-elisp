@@ -74,6 +74,18 @@
   "Read FILE as text."
   (with-temp-buffer (insert-file-contents file) (buffer-string)))
 
+(defmacro zr-tramp-webdav-test--with-requests (&rest body)
+  "Run BODY recording (METHOD PATH DEPTH) entries in `requests'."
+  (declare (indent 0) (debug body))
+  `(let ((original (symbol-function 'zr-tramp-webdav--http-request))
+         requests)
+     (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                (lambda (file method url headers data)
+                  (push (list method (url-filename (url-generic-parse-url url))
+                              (cdr (assoc "Depth" headers))) requests)
+                  (funcall original file method url headers data))))
+       ,@body)))
+
 (ert-deftest zr-tramp-webdav-paths-and-registration ()
   (let* ((name "/webdavs:alice@example.org#8443:/dav/中文 %?#&+.txt")
          (vec (tramp-dissect-file-name name)))
@@ -724,6 +736,210 @@
       (make-directory (concat root "empty"))
       (delete-directory (concat root "empty"))
       (should-not (file-exists-p (concat root "empty"))))))
+
+(ert-deftest zr-tramp-webdav-dired-reading-and-creation-request-counts ()
+  "Dired should neither redirect known directories nor duplicate mkdir checks."
+  (require 'dired-aux)
+  (zr-tramp-webdav-test--with-server
+    (zr-tramp-webdav-clear-cache)
+    (let (buffer)
+      (unwind-protect
+          (zr-tramp-webdav-test--with-requests
+            (setq buffer (dired-noselect root))
+            (let ((path (tramp-file-local-name root)))
+              (should (equal (reverse requests)
+                             `(("PROPFIND" ,path "0") ("PROPFIND" ,path "1"))))
+              (setq requests nil)
+              (with-current-buffer buffer (revert-buffer nil t))
+              (should (equal (reverse requests)
+                             `(("PROPFIND" ,path "0") ("PROPFIND" ,path "1")))))
+            (setq requests nil)
+            (let ((directory (concat root "created/")))
+              (with-current-buffer buffer
+                (dired-create-directory directory)
+                (should (dired-goto-file (directory-file-name directory))))
+              (should (equal (mapcar #'car (reverse requests)) '("PROPFIND" "MKCOL" "PROPFIND")))
+              ;; Attributes must come from DAV, not guessed creation times.
+              (should-not (time-equal-p
+                           (file-attribute-modification-time (file-attributes directory))
+                           '(0 0)))
+              (should (= (length requests) 3))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
+
+(ert-deftest zr-tramp-webdav-mkdir-uses-server-checks-and-reuses-created-types ()
+  "Recursive creation retries only missing parents and honors existing files."
+  (zr-tramp-webdav-test--with-server
+    (let ((directory (concat root "a/b/c/")))
+      (zr-tramp-webdav-test--with-requests
+        (make-directory directory t)
+        (should (equal (mapcar #'car requests) '("MKCOL" "MKCOL" "MKCOL" "MKCOL" "MKCOL")))
+        (setq requests nil)
+        (make-directory directory t)
+        (should-not requests)
+        ;; Explicitly bypassing the cache still checks the actual type.
+        (let ((remote-file-name-inhibit-cache t)) (make-directory directory t))
+        (should (equal (mapcar #'car (reverse requests)) '("MKCOL" "PROPFIND")))
+        (should-error (make-directory directory) :type 'file-already-exists)
+        (let ((file (concat root "file.txt")))
+          (write-region "keep" nil file nil 'silent)
+          (should-error (make-directory file t) :type 'file-already-exists)
+          (should (equal (zr-tramp-webdav-test--contents file) "keep")))))))
+
+(ert-deftest zr-tramp-webdav-mkdir-persistent-conflict-does-not-loop ()
+  "A server's persistent 409 gets one retry after checking the parent."
+  (zr-tramp-webdav-test--with-server
+    (let ((original (symbol-function 'zr-tramp-webdav--http-request))
+          (directory (concat root "blocked/"))
+          (requests 0))
+      (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                 (lambda (file method url headers data)
+                   (if (and (equal file directory) (equal method "MKCOL"))
+                       (progn (cl-incf requests) '(:status 409))
+                     (funcall original file method url headers data)))))
+        (should-error (make-directory directory t) :type 'file-error)
+        (should (= requests 2))))))
+
+(ert-deftest zr-tramp-webdav-collection-url-hints-do-not-hide-type-changes ()
+  "A stale directory URL must not conceal a replacement regular file."
+  (zr-tramp-webdav-test--with-server
+    (let* ((directory (concat root "changed/"))
+           (file (directory-file-name directory))
+           (original (symbol-function 'zr-tramp-webdav--http-request))
+           (url (zr-tramp-webdav--url (tramp-dissect-file-name file))))
+      (make-directory directory)
+      (should (file-directory-p directory))
+      ;; Simulate another client, leaving this Emacs's metadata untouched.
+      (funcall original file "DELETE" url nil nil)
+      (funcall original file "PUT" url nil "replacement")
+      (zr-tramp-webdav-test--with-requests
+        (let* ((remote-file-name-inhibit-cache t)
+               (attributes (file-attributes file)))
+          (should-not (file-attribute-type attributes))
+          (should (= (file-attribute-size attributes) (length "replacement"))))
+        (should (equal (mapcar #'cadr (reverse requests))
+                       (list (tramp-file-local-name directory) (tramp-file-local-name file))))
+        (should-error (make-directory directory t) :type 'file-already-exists))
+      ;; A fresh parent listing must also override an older MKCOL hint.
+      (funcall original file "DELETE" url nil nil)
+      (make-directory directory)
+      (funcall original file "DELETE" url nil nil)
+      (funcall original file "PUT" url nil "replacement")
+      (let ((remote-file-name-inhibit-cache t)) (directory-files root))
+      (should-error (make-directory directory t) :type 'file-already-exists))))
+
+(ert-deftest zr-tramp-webdav-copy-move-counts-and-exclusive-race ()
+  "New targets use atomic COPY/MOVE guards; overwrites check metadata once."
+  (zr-tramp-webdav-test--with-server
+    (let ((file (concat root "source.txt"))
+          (copy (concat root "copy.txt"))
+          (moved (concat root "moved.txt"))
+          (race (concat root "race.txt")))
+      (write-region "source" nil file nil 'silent)
+      (zr-tramp-webdav-test--with-requests
+        (copy-file file copy)
+        (should (equal (mapcar #'car requests) '("COPY")))
+        (should (file-attributes file))
+        (should (= (length requests) 1))
+        (setq requests nil)
+        (copy-file file copy t)
+        (should (equal (mapcar #'car (reverse requests)) '("PROPFIND" "COPY")))
+        (setq requests nil)
+        (rename-file file moved)
+        (should (equal (mapcar #'car requests) '("MOVE")))
+        ;; A destination created just before COPY must survive.
+        (let ((transport (symbol-function 'zr-tramp-webdav--http-request)))
+          (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                     (lambda (name method url headers data)
+                       (when (equal method "COPY")
+                         (funcall original race "PUT"
+                                  (zr-tramp-webdav--url (tramp-dissect-file-name race))
+                                  nil "other writer"))
+                       (funcall transport name method url headers data))))
+            (should-error (copy-file moved race) :type 'file-already-exists)))
+        (should (equal (zr-tramp-webdav-test--contents race) "other writer"))
+        (let ((directory (concat root "target/")))
+          (make-directory directory)
+          (should-error (copy-file moved (directory-file-name directory) t) :type 'file-error))))))
+
+(ert-deftest zr-tramp-webdav-copy-failure-invalidates-source-metadata ()
+  "Only successful COPY may retain the source's cached attributes."
+  (zr-tramp-webdav-test--with-server
+    (let ((file (concat root "source.txt"))
+          (copy (concat root "copy.txt"))
+          (original (symbol-function 'zr-tramp-webdav--http-request)))
+      (write-region "source" nil file nil 'silent)
+      (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                 (lambda (name method url headers data)
+                   (if (equal method "COPY")
+                       '(:status 207 :body "<multistatus xmlns='DAV:'><response><href>/failed</href><status>HTTP/1.1 423 Locked</status></response></multistatus>")
+                     (funcall original name method url headers data)))))
+        (should-error (copy-file file copy) :type 'file-error))
+      (with-parsed-tramp-file-name file nil
+        (let ((remote-file-name-inhibit-cache nil))
+          (should (eq (tramp-get-file-property v localname "zr-webdav-stat" tramp-cache-undefined)
+                      tramp-cache-undefined)))))))
+
+(ert-deftest zr-tramp-webdav-upload-uses-one-conditional-put ()
+  "Uploads to new names need no PROPFIND and cannot overwrite a racing writer."
+  (zr-tramp-webdav-test--with-server
+    (let ((local (make-temp-file "zr-webdav-upload-"))
+          (file (concat root "uploaded.txt"))
+          (race (concat root "put-race.mkv")))
+      (unwind-protect
+          (progn
+            (write-region "upload" nil local nil 'silent)
+            (zr-tramp-webdav-test--with-requests
+              (copy-file local file)
+              (should (equal (mapcar #'car requests) '("PUT")))
+              (setq requests nil)
+              (should-error (copy-file local race) :type 'file-already-exists)
+              (should (equal (mapcar #'car requests) '("PUT"))))
+            (should (equal (zr-tramp-webdav-test--contents file) "upload"))
+            (should (equal (zr-tramp-webdav-test--contents race) "created by another writer")))
+        (delete-file local)))))
+
+(ert-deftest zr-tramp-webdav-delete-directory-counts-and-fresh-emptiness ()
+  "Empty-directory deletion checks one fresh listing; recursive deletion checks type."
+  (zr-tramp-webdav-test--with-server
+    (let* ((directory (concat root "empty/"))
+           (child (concat directory "child.txt"))
+           (original (symbol-function 'zr-tramp-webdav--http-request)))
+      (make-directory directory)
+      (directory-files directory)
+      ;; Another client fills a directory while our listing still says empty.
+      (funcall original child "PUT" (zr-tramp-webdav--url (tramp-dissect-file-name child)) nil "keep")
+      (zr-tramp-webdav-test--with-requests
+        (should-error (delete-directory directory) :type 'file-error)
+        (should (equal (mapcar #'car requests) '("PROPFIND")))
+        (should (equal (caddar requests) "1"))
+        (setq requests nil)
+        (delete-directory directory t)
+        (should (equal (mapcar #'car (reverse requests)) '("PROPFIND" "DELETE"))))
+      (make-directory directory)
+      (zr-tramp-webdav-test--with-requests
+        (delete-directory directory)
+        (should (equal (mapcar #'car (reverse requests)) '("PROPFIND" "DELETE")))))))
+
+(ert-deftest zr-tramp-webdav-visiting-missing-file-skips-get ()
+  "A known missing file needs no failed GET and keeps its create-only guard."
+  (zr-tramp-webdav-test--with-server
+    (directory-files root)
+    (let ((file (concat root "new.txt")) buffer)
+      (unwind-protect
+          (zr-tramp-webdav-test--with-requests
+            (setq buffer (find-file-noselect file))
+            (should (equal (mapcar #'car requests) '("PROPFIND")))
+            (with-current-buffer buffer
+              (should (plist-get (cdr zr-tramp-webdav--visited) :missing))
+              (insert "ours")
+              (funcall original file "PUT" (zr-tramp-webdav--url (tramp-dissect-file-name file))
+                       nil "other writer")
+              (should-error (write-region (point-min) (point-max) file nil t) :type 'file-error)
+              (should (buffer-modified-p)))
+            (should (equal (zr-tramp-webdav-test--contents file) "other writer")))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
 
 (ert-deftest zr-tramp-webdav-auth-source-and-custom-headers ()
   (zr-tramp-webdav-test--with-server
