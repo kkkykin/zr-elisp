@@ -23,9 +23,6 @@
 (add-to-list 'load-path "/path/to/zr-elisp/erc")
 (add-to-list 'load-path "/path/to/zr-elisp/gnus")
 
-(use-package zr-bookmark
-  :custom (zr-bookmark-shared-file "~/shared/bookmarks")
-  :config (zr-bookmark-shared-mode 1))
 (use-package zr-comint
   :hook ((comint-mode . zr-comint-history-mode)
          (shell-mode . zr-comint-shell-setup)))
@@ -165,7 +162,6 @@ make check-parens
 make byte-compile
 make clean
 
-make test TEST_FILE=test/zr-bookmark-test.el
 make test TEST_FILE='$(wildcard org/test/*-test.el)'
 make check-parens byte-compile FILE='$(wildcard org/*.el)'
 ```
