@@ -242,7 +242,7 @@
                                           tramp-cache-undefined)
                   tramp-cache-undefined)))))
 
-(ert-deftest zr-tramp-webdav-background-requests-reuse-known-endpoints ()
+(ert-deftest zr-tramp-webdav-background-completion-reuses-known-endpoints ()
   (zr-tramp-webdav-test--with-server
     (let ((file (concat root "note.txt"))
           (directory (concat root "folder/")))
@@ -264,6 +264,8 @@
           (should (file-exists-p file))
           (should (= requests 1))
           (let ((non-essential t))
+            (should-not (directory-files root))
+            (should (equal (file-name-all-completions "f" root) '("folder/")))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (should (= requests 2))
           (let ((non-essential t))
@@ -274,18 +276,69 @@
               (should (equal (file-name-all-completions "f" root) '("folder/")))
               (should (equal (directory-files root t "txt$") (list file)))))
           (should (= requests 2))
-          ;; Connected endpoints also refresh expired or bypassed metadata.
+          ;; Only completion may refresh expired or bypassed metadata.
           (let ((non-essential t)
                 (remote-file-name-inhibit-cache t))
             (should (file-attributes file))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
-          (should (= requests 4))
+          (should (= requests 2))
+          (let ((non-essential t)
+                (remote-file-name-inhibit-cache t))
+            (should (equal (file-name-completion "f" root) "folder/")))
+          (should (= requests 3))
           (let ((non-essential t))
             (should (file-exists-p file))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (let ((remote-file-name-inhibit-cache t))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
-          (should (= requests 5)))))))
+          (should (= requests 4)))))))
+
+(ert-deftest zr-tramp-webdav-dired-background-checks-do-not-refresh ()
+  "Expired metadata and missing ancestors must not block Dired redisplay."
+  (require 'project)
+  (zr-tramp-webdav-test--with-server
+    (let* ((file (concat root "note.txt"))
+           (new-file (concat root "external.txt"))
+           (parent (file-name-directory (directory-file-name root)))
+           (parent-url (zr-tramp-webdav--url (tramp-dissect-file-name parent)))
+           (original (symbol-function 'zr-tramp-webdav--http-request))
+           (vc-file-prop-obarray (obarray-make))
+           (requests 0)
+           buffer)
+      (write-region "hello" nil file nil 'silent)
+      (zr-tramp-webdav-clear-cache)
+      (setq buffer (dired-noselect root))
+      (unwind-protect
+          (with-current-buffer buffer
+            ;; Simulate another client, without invalidating Emacs's cache.
+            (should (= (plist-get (zr-tramp-webdav--request new-file "PUT" nil "text")
+                                  :status)
+                       201))
+            (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                       (lambda (&rest args)
+                         (cl-incf requests)
+                         ;; Nextcloud's DAV endpoint need not expose its parent.
+                         (if (equal (nth 2 args) parent-url)
+                             (list :status 403 :url parent-url)
+                           (apply original args)))))
+              (dolist (remote-file-name-inhibit-cache '(0 t))
+                (dotimes (_ 3)
+                  (should-not (project-mode-line-format))
+                  (let ((non-essential t))
+                    (should (file-directory-p root))
+                    (should (= (file-attribute-size (file-attributes file)) 5))
+                    (should (equal (directory-files root) '("." ".." "note.txt")))
+                    (should-not (file-attributes parent))
+                    (should-not (file-exists-p new-file)))))
+              (should (= requests 0))
+              ;; A skipped request must not poison a later explicit lookup.
+              (should-error (file-attributes parent) :type 'file-error)
+              (should (= requests 1))
+              (should (file-exists-p new-file))
+              (revert-buffer nil t)
+              (should (dired-goto-file new-file))
+              (should (> requests 1))))
+        (kill-buffer buffer)))))
 
 (ert-deftest zr-tramp-webdav-background-completion-after-dired ()
   (zr-tramp-webdav-test--with-server
@@ -346,9 +399,9 @@
                 ((symbol-function 'read-passwd)
                  (lambda (&rest _args) (cl-incf prompts) "app-password")))
         (let ((non-essential t))
-          (should-error (directory-files protected) :type 'file-error)
+          (should-error (file-name-all-completions "" protected) :type 'file-error)
           ;; A 401 suspends background requests until an explicit retry.
-          (should-not (directory-files protected)))
+          (should-not (file-name-all-completions "" protected)))
         (should (= prompts 0)))
       ;; Foreground access can authenticate again, then completion can resume.
       (let ((zr-tramp-webdav-http-options
