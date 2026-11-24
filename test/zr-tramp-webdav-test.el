@@ -445,6 +445,131 @@
         (with-current-buffer buffer (set-buffer-modified-p nil))
         (kill-buffer buffer)))))
 
+(ert-deftest zr-tramp-webdav-save-request-count-and-response-validators ()
+  "Saves reuse metadata without downloading backups more than once."
+  (dolist (validators '(all etag modified none))
+    (zr-tramp-webdav-test--with-server
+      (let* ((file (concat root "readme.md"))
+             (backup-dir (make-temp-file "zr-webdav-backups-" t))
+             (backup-directory-alist (list (cons ".*" backup-dir)))
+             (make-backup-files t)
+             (version-control t)
+             (original (symbol-function 'zr-tramp-webdav--http-request))
+             (extra (if (eq validators 'none) '("PROPFIND") nil))
+             (puts 0)
+             requests buffer)
+        (unwind-protect
+            (progn
+              (write-region "old\n" nil file nil 'silent)
+              (setq buffer (find-file-noselect file))
+              (with-current-buffer buffer
+                (setq-local backup-inhibited nil
+                            buffer-file-coding-system 'utf-8-dos)
+                (zr-tramp-webdav-clear-cache)
+                (goto-char (point-max))
+                (insert "中文\n")
+                (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                           (lambda (&rest args)
+                             (push (nth 1 args) requests)
+                             (when (equal (nth 1 args) "PUT")
+                               (cl-incf puts)
+                               (should (zr-tramp-webdav--header
+                                        (nth 3 args)
+                                        (if (and (= puts 2) (eq validators 'modified))
+                                            "If-Unmodified-Since" "If-Match"))))
+                             (let ((response (apply original args)))
+                               ;; Nextcloud can return only ETag on PUT;
+                               ;; other servers may omit both validators.
+                               (when (equal (nth 1 args) "PUT")
+                                 (plist-put
+                                  response :headers
+                                  (cl-remove-if
+                                   (lambda (header)
+                                     (pcase (downcase (car header))
+                                       ("etag" (memq validators '(modified none)))
+                                       ("last-modified" (memq validators '(etag none)))))
+                                   (plist-get response :headers))))
+                               response))))
+                  (save-buffer)
+                  (should (equal (nreverse requests) (append '("PROPFIND" "GET" "PUT") extra)))
+                  (should-not (buffer-modified-p))
+                  (let ((backups (directory-files backup-dir t directory-files-no-dot-files-regexp)))
+                    (should (= (length backups) 1))
+                    (should (equal (zr-tramp-webdav-test--contents (car backups)) "old\n")))
+                  ;; Cache size must count the uploaded bytes, including
+                  ;; multibyte text and the chosen newline encoding.
+                  (setq requests nil)
+                  (should (= (file-attribute-size (file-attributes file))
+                             (length (encode-coding-string (buffer-string) 'utf-8-dos))))
+                  (should-not requests)
+                  (if (eq validators 'modified)
+                      (progn
+                        (should-not (plist-get (cdr zr-tramp-webdav--visited) :etag))
+                        (should (plist-get (cdr zr-tramp-webdav--visited) :modified)))
+                    (should (plist-get (cdr zr-tramp-webdav--visited) :etag)))
+                  (insert "again\n")
+                  ;; Last-Modified-only responses must guard the next PUT
+                  ;; using the new timestamp rather than an earlier ETag.
+                  (save-buffer)
+                  (should (equal (nreverse requests) (append '("PROPFIND" "PUT") extra)))
+                  (should-not (buffer-modified-p)))))
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer (set-buffer-modified-p nil))
+            (kill-buffer buffer))
+          (delete-directory backup-dir t))))))
+
+(ert-deftest zr-tramp-webdav-save-race-still-preserves-buffer ()
+  "A change after the save-time PROPFIND is rejected by conditional PUT."
+  (zr-tramp-webdav-test--with-server
+    (let* ((file (concat root "save-race.txt"))
+           (make-backup-files nil)
+           (original (symbol-function 'zr-tramp-webdav--http-request))
+           requests buffer)
+      (write-region "original\n" nil file nil 'silent)
+      (setq buffer (find-file-noselect file))
+      (unwind-protect
+          (with-current-buffer buffer
+            (erase-buffer)
+            (insert "unsaved edits\n")
+            (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                       (lambda (&rest args)
+                         (push (nth 1 args) requests)
+                         (when (equal (nth 1 args) "PUT")
+                           (funcall original file "PUT" (nth 2 args) nil "external version\n"))
+                         (apply original args))))
+              (should-error (save-buffer) :type 'file-error))
+            (should (equal (nreverse requests) '("PROPFIND" "PUT")))
+            (should (buffer-modified-p))
+            (should (equal (buffer-string) "unsaved edits\n"))
+            (should (equal (zr-tramp-webdav-test--contents file) "external version\n")))
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer)))))
+
+(ert-deftest zr-tramp-webdav-exclusive-create-needs-only-put ()
+  "Exclusive writes rely on the server's atomic create-only precondition."
+  (zr-tramp-webdav-test--with-server
+    (let* ((file (concat root "exclusive.txt"))
+           (race (concat root "put-race.mkv"))
+           (original (symbol-function 'zr-tramp-webdav--http-request))
+           requests)
+      (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                 (lambda (&rest args)
+                   (push (nth 1 args) requests)
+                   (should (equal (zr-tramp-webdav--header (nth 3 args) "If-None-Match") "*"))
+                   (apply original args))))
+        (write-region "first" nil file nil 'silent nil 'excl)
+        (should (equal requests '("PUT")))
+        (setq requests nil)
+        (should-error (write-region "second" nil file nil 'silent nil 'excl)
+                      :type 'file-already-exists)
+        (should (equal requests '("PUT")))
+        (setq requests nil)
+        (should-error (write-region "ours" nil race nil 'silent nil 'excl)
+                      :type 'file-already-exists)
+        (should (equal requests '("PUT"))))
+      (should (equal (zr-tramp-webdav-test--contents file) "first"))
+      (should (equal (zr-tramp-webdav-test--contents race) "created by another writer")))))
+
 (ert-deftest zr-tramp-webdav-conflict-preserves-buffer-and-server ()
   (zr-tramp-webdav-test--with-server
     (let ((file (concat root "conflict.txt")) buffer)

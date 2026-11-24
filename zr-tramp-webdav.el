@@ -37,6 +37,9 @@
 ;; ETags (or Last-Modified) guard saves and read/modify/write appends when
 ;; the server supplies them.  Exclusive creation uses If-None-Match.
 ;; Backups use copying so the original resource keeps its write validator.
+;; Normal saves need a version check and PUT, plus GET for the first backup.
+;; GET/PUT responses populate the attribute cache; a PUT without validators
+;; needs an additional PROPFIND before recording the saved version.
 ;;
 ;; WebDAV does not expose a POSIX shell, symlinks, Unix modes or ownership.
 ;; Modes/IDs are synthetic; permission checks are estimates, with the
@@ -521,8 +524,15 @@ Non-essential metadata checks always reuse cached values."
 
 (defun zr-tramp-webdav--file-writable-p (file)
   "Estimate whether FILE can be written; the server has the final say."
-  (or (zr-tramp-webdav--file-exists-p file)
-      (file-directory-p (file-name-directory (directory-file-name (expand-file-name file))))))
+  (setq file (expand-file-name file))
+  (or ;; A visited file establishes its containing directory.  Emacs
+      ;; checks that directory on every save, even without a precious save.
+      (and zr-tramp-webdav--visited
+           (not (plist-get (cdr zr-tramp-webdav--visited) :missing))
+           (equal (file-name-as-directory file)
+                  (file-name-directory (car zr-tramp-webdav--visited))))
+      (zr-tramp-webdav--file-exists-p file)
+      (file-directory-p (file-name-directory (directory-file-name file)))))
 
 (defun zr-tramp-webdav--flush (file)
   "Invalidate FILE, its descendants and its parent's directory listing."
@@ -534,6 +544,7 @@ Non-essential metadata checks always reuse cached values."
   (let ((response (zr-tramp-webdav--request file "GET")))
     (unless (= (plist-get response :status) 200)
       (zr-tramp-webdav--http-error response file))
+    (zr-tramp-webdav--cache-response file response (length (plist-get response :body)))
     response))
 
 (defun zr-tramp-webdav--response-entry (response)
@@ -542,6 +553,20 @@ Non-essential metadata checks always reuse cached values."
          (modified (zr-tramp-webdav--header headers "last-modified")))
     (list :etag (zr-tramp-webdav--header headers "etag") :modified modified
           :mtime (zr-tramp-webdav--time modified))))
+
+(defun zr-tramp-webdav--cache-response (file response size &optional previous)
+  "Cache regular FILE's HTTP RESPONSE and byte SIZE, returning its metadata.
+Preserve the creation time from PREVIOUS or cached attributes, but replace
+old validators and modification times with those from RESPONSE."
+  (with-parsed-tramp-file-name (expand-file-name file) nil
+    (let* ((remote-file-name-inhibit-cache nil)
+           (previous (or previous (tramp-get-file-property v localname "zr-webdav-stat")))
+           (entry (append (zr-tramp-webdav--response-entry response)
+                          (list :path (zr-tramp-webdav--href-path
+                                       (plist-get response :url) (plist-get response :url))
+                                :status 200 :directory nil :size size
+                                :ctime (plist-get previous :ctime)))))
+      (tramp-set-file-property v localname "zr-webdav-stat" entry))))
 
 (defun zr-tramp-webdav--setup-buffer ()
   "Keep the original WebDAV resource in place when making a backup."
@@ -636,12 +661,23 @@ EXCLUSIVE controls the error for a failed create-only precondition."
 (defun zr-tramp-webdav--write-region (start end file &optional append visit _lockname mustbenew)
   "Implement `write-region' using a conditional WebDAV PUT."
   (setq file (expand-file-name file))
-  (let* ((existing (zr-tramp-webdav--stat file t))
-         (exclusive (or (eq mustbenew 'excl) (and mustbenew (not existing))))
-         (entry (when (equal file (car zr-tramp-webdav--visited))
+  (let* ((entry (when (equal file (car zr-tramp-webdav--visited))
                   (cdr zr-tramp-webdav--visited)))
+         (existing
+          (cond
+           ;; If-None-Match performs exclusive creation atomically.
+           ((eq mustbenew 'excl) nil)
+           ;; The visited validator guards the actual PUT, even if the
+           ;; file changes after Emacs's save-time version check.
+           ((and (not append) (not mustbenew) (zr-tramp-webdav--conditions entry))
+            (unless (plist-get entry :missing)
+              (with-parsed-tramp-file-name file nil
+                (let ((remote-file-name-inhibit-cache nil))
+                  (tramp-get-file-property v localname "zr-webdav-stat" entry)))))
+           (t (zr-tramp-webdav--stat file t))))
+         (exclusive (or (eq mustbenew 'excl) (and mustbenew (not existing))))
          (temp (tramp-compat-make-temp-file file))
-         response coding)
+         response saved coding data)
     (unwind-protect
         (progn
           (when (plist-get existing :directory)
@@ -660,30 +696,31 @@ EXCLUSIVE controls the error for a failed create-only precondition."
                 (file-coding-system-alist (tramp-find-file-name-coding-system-alist file temp)))
             (write-region start end temp append 'silent)
             (setq coding last-coding-system-used))
-          (setq response
+          (setq data (zr-tramp-webdav--read-bytes temp)
+                response
                 (zr-tramp-webdav--mutate
                  file "PUT"
                  (append '(("Content-Type" . "application/octet-stream"))
                          (if exclusive '(("If-None-Match" . "*"))
                            (zr-tramp-webdav--conditions entry)))
-                 (zr-tramp-webdav--read-bytes temp) exclusive))
+                 data exclusive)
+                saved (zr-tramp-webdav--cache-response file response (length data) existing))
           (when (or (eq visit t) (stringp visit))
             (setq buffer-file-name (if (stringp visit) (expand-file-name visit) file))
-            (let ((saved (zr-tramp-webdav--response-entry response)))
-              (unless (or (plist-get saved :etag) (plist-get saved :mtime))
-                (setq saved (zr-tramp-webdav--stat file t)))
-              (if (and file-precious-flag (not (equal file buffer-file-name))
-                       (equal buffer-file-name (car zr-tramp-webdav--visited)))
-                  ;; write-region VISIT names the real file, but this PUT
-                  ;; only wrote its temporary replacement.  Keep the old
-                  ;; destination validator until the subsequent MOVE.
-                  (progn
-                    (setq zr-tramp-webdav--pending-move
-                          (list :from file :to buffer-file-name
-                                :old (cdr zr-tramp-webdav--visited)))
-                    (tramp-run-real-handler #'set-visited-file-modtime
-                                            (list (or (plist-get saved :mtime) '(0 0)))))
-                (zr-tramp-webdav--remember buffer-file-name saved)))
+            (unless (or (plist-get saved :etag) (plist-get saved :mtime))
+              (setq saved (zr-tramp-webdav--stat file t)))
+            (if (and file-precious-flag (not (equal file buffer-file-name))
+                     (equal buffer-file-name (car zr-tramp-webdav--visited)))
+                ;; write-region VISIT names the real file, but this PUT
+                ;; only wrote its temporary replacement.  Keep the old
+                ;; destination validator until the subsequent MOVE.
+                (progn
+                  (setq zr-tramp-webdav--pending-move
+                        (list :from file :to buffer-file-name
+                              :old (cdr zr-tramp-webdav--visited)))
+                  (tramp-run-real-handler #'set-visited-file-modtime
+                                          (list (or (plist-get saved :mtime) '(0 0)))))
+              (zr-tramp-webdav--remember buffer-file-name saved))
             (set-buffer-modified-p nil))
           (run-hooks 'tramp-handle-write-region-hook)
           (when (and (not noninteractive) (or (null visit) (eq visit t) (stringp visit)))
