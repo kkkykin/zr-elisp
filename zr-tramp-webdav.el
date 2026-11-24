@@ -30,9 +30,9 @@
 ;; Supports visiting/saving files, completion, Dired, directory creation,
 ;; deletion, copying and renaming, including transfers to/from local files.
 ;; Directory listings use PROPFIND; same-server copies/moves use COPY/MOVE.
-;; Background metadata checks use cached values, including expired ones.
-;; File-name completion can contact an endpoint after it has answered a
-;; request, without prompting for credentials.
+;; Background metadata checks and completion reuse cached values, including
+;; expired ones.  Completion can list an uncached directory on an endpoint
+;; that has answered a request, without prompting for credentials.
 ;; File contents are staged locally to preserve Emacs coding conventions.
 ;; ETags (or Last-Modified) guard saves and read/modify/write appends when
 ;; the server supplies them.  Exclusive creation uses If-None-Match.
@@ -80,8 +80,9 @@ error, an authentication failure, or `zr-tramp-webdav-clear-cache'.")
 
 (defvar zr-tramp-webdav--completing nil
   "Non-nil while handling WebDAV file-name completion.
-Only completion may make synchronous `non-essential' requests to known
-endpoints; mode-line checks and project discovery must use the cache.")
+Only uncached completion listings may make synchronous `non-essential'
+requests to known endpoints.  Candidate predicates, mode-line checks and
+project discovery must use cached metadata.")
 
 (defvar-local zr-tramp-webdav--visited nil
   "File name and HTTP validators recorded when visiting or saving a file.")
@@ -411,9 +412,12 @@ Encoded slashes and dot components are rejected to preserve hierarchy."
 Non-essential metadata checks always reuse cached values."
   (with-parsed-tramp-file-name (expand-file-name file) nil
     (let ((remote-file-name-inhibit-cache
-           (unless (and non-essential (not zr-tramp-webdav--completing))
-             (or fresh remote-file-name-inhibit-cache))))
+           (unless non-essential (or fresh remote-file-name-inhibit-cache))))
       (with-tramp-file-property v localname "zr-webdav-stat"
+        ;; Completion also calls predicates on "../" and speculative
+        ;; names.  Listing a directory is enough to cache its children;
+        ;; checking those candidates must not start additional requests.
+        (when non-essential (throw 'zr-tramp-webdav--non-essential nil))
         (let* ((response (zr-tramp-webdav--propfind file "0"))
                (status (plist-get response :status)))
           (cond
@@ -988,11 +992,11 @@ DIRECTORY permits replacing an empty directory.  Return overwrite consent."
       (let* ((zr-tramp-webdav--completing
               (or zr-tramp-webdav--completing
                   (memq operation '(file-name-all-completions file-name-completion))))
-             ;; Redrawing the mode line must neither refresh expired
-             ;; metadata nor probe inaccessible ancestors for projects.
+             ;; Automatic completion must reuse Dired's listing even
+             ;; after its usual TTL.  Refresh through an explicit read,
+             ;; Dired revert, or mutation invalidation instead of typing.
              (remote-file-name-inhibit-cache
-              (unless (and non-essential (not zr-tramp-webdav--completing))
-                remote-file-name-inhibit-cache)))
+              (unless non-essential remote-file-name-inhibit-cache)))
         (if-let* ((handler (alist-get operation zr-tramp-webdav-file-name-handler-alist)))
             (apply handler args)
           (tramp-run-real-handler operation args))))))

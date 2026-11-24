@@ -276,7 +276,7 @@
               (should (equal (file-name-all-completions "f" root) '("folder/")))
               (should (equal (directory-files root t "txt$") (list file)))))
           (should (= requests 2))
-          ;; Only completion may refresh expired or bypassed metadata.
+          ;; Automatic completion also reuses expired or bypassed metadata.
           (let ((non-essential t)
                 (remote-file-name-inhibit-cache t))
             (should (file-attributes file))
@@ -285,13 +285,61 @@
           (let ((non-essential t)
                 (remote-file-name-inhibit-cache t))
             (should (equal (file-name-completion "f" root) "folder/")))
-          (should (= requests 3))
+          (should (= requests 2))
           (let ((non-essential t))
             (should (file-exists-p file))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
           (let ((remote-file-name-inhibit-cache t))
             (should (equal (directory-files root) '("." ".." "folder" "note.txt"))))
-          (should (= requests 4)))))))
+          (should (= requests 3)))))))
+
+(ert-deftest zr-tramp-webdav-fido-reuses-dired-listing-and-skips-parent ()
+  "Typing a new name must not refresh Dired's listing or probe ../."
+  (require 'icomplete)
+  (zr-tramp-webdav-test--with-server
+    (make-directory (concat root "test/"))
+    ;; With multiple entries, TRAMP retains ./ and ../ as candidates for
+    ;; file-name-completion.  Fido's fallback then tests their existence.
+    (write-region "text" nil (concat root "note.txt") nil 'silent)
+    (zr-tramp-webdav-clear-cache)
+    (let* ((buffer (dired-noselect root))
+           (original (symbol-function 'zr-tramp-webdav--http-request))
+           (requests 0))
+      (unwind-protect
+          (with-current-buffer buffer
+            (cl-letf (((symbol-function 'zr-tramp-webdav--http-request)
+                       (lambda (&rest args)
+                         (cl-incf requests)
+                         (apply original args))))
+              (let ((non-essential t)
+                    (minibuffer-completing-file-name t)
+                    (completion-styles '(initials partial-completion flex))
+                    (completion-category-defaults (icomplete--fido-ccd))
+                    (completion-category-overrides nil)
+                    (completion-ignore-case t)
+                    (read-file-name-completion-ignore-case t))
+                (dolist (remote-file-name-inhibit-cache '(0 t))
+                  (dolist (name '("" "t" "te" "tes" "test" "test3"))
+                    (let* ((input (concat root name))
+                           (candidates (completion-all-completions
+                                        input #'read-file-name-internal #'file-exists-p
+                                        (length input))))
+                      (if (equal name "test3")
+                          (should-not candidates)
+                        (should (member "test/" candidates))))))
+                (should (= requests 0))
+                ;; Navigating into an uncached subdirectory still lists it.
+                (should (file-name-all-completions "" (concat root "test/")))
+                (should (= requests 1)))
+              ;; An explicit refresh rereads server metadata.
+              (revert-buffer nil t)
+              (should (> requests 1))
+              (setq requests 0)
+              (let ((non-essential t)
+                    (remote-file-name-inhibit-cache 0))
+                (should (equal (file-name-all-completions "test" root) '("test/"))))
+              (should (= requests 0))))
+        (kill-buffer buffer)))))
 
 (ert-deftest zr-tramp-webdav-dired-background-checks-do-not-refresh ()
   "Expired metadata and missing ancestors must not block Dired redisplay."
