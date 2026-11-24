@@ -31,9 +31,9 @@
 ;; http://HOST:PORT/ and Basic credentials from auth-source, for example:
 ;;   machine 127.0.0.1 port 5572 login zr-rclone password SECRET
 ;;
-;; Like a TRAMP connection, an rcd that is registered or has answered a
-;; request also serves background (`non-essential') requests, such as
-;; fido and icomplete completion, until it cannot be reached.
+;; Background metadata checks and completion reuse cached values, including
+;; expired ones.  Completion can list uncached directories on an rcd that
+;; is registered or has answered a request, until it cannot be reached.
 ;;
 ;; `zr-tramp-rcrc-http-request' gives other HTTP clients, such as FFmpeg
 ;; or curl, the URL and headers that read or upload a file.
@@ -66,9 +66,14 @@
 Each value is a plist with :url, :user and :password.")
 
 (defvar zr-tramp-rcrc--connected (make-hash-table :test #'equal)
-  "\"HOST#PORT\" keys of the rcds that serve `non-essential' requests.
+  "\"HOST#PORT\" keys of the rcds that serve background completion.
 An rcd is connected once it is registered or answers a request, until a
 request cannot reach it.")
+
+(defvar zr-tramp-rcrc--completing nil
+  "Non-nil while handling rcrc file-name completion.
+Only uncached listings may start background requests; candidate
+predicates and other metadata checks must use cached values.")
 
 ;;; Rclone paths and file names
 
@@ -171,11 +176,13 @@ PASSWORD, credentials come from auth-source.  A later registration of
 the same HOST#PORT replaces the earlier one.  The rcd counts as
 connected, so background completion may contact it."
   (let* ((address (zr-tramp-rcrc--host-port url))
-         (key (zr-tramp-rcrc--key (car address) (cdr address))))
+         (key (zr-tramp-rcrc--key (car address) (cdr address)))
+         (endpoint (list :url (concat (string-remove-suffix "/" url) "/")
+                         :user user :password password)))
+    (unless (equal endpoint (gethash key zr-tramp-rcrc--endpoints))
+      (zr-tramp-rcrc-clear-cache key))
     (puthash key t zr-tramp-rcrc--connected)
-    (puthash key (list :url (concat (string-remove-suffix "/" url) "/")
-                       :user user :password password)
-             zr-tramp-rcrc--endpoints)))
+    (puthash key endpoint zr-tramp-rcrc--endpoints)))
 
 (defun zr-tramp-rcrc-credentials (url &optional user password)
   "Return (USER . PASSWORD) for rcd URL, looking up auth-source if needed."
@@ -233,15 +240,19 @@ Return (STATUS . BODY), where BODY holds the response bytes."
 
 (defun zr-tramp-rcrc--http (vec method path &optional headers data)
   "Like `zr-tramp-rcrc--retrieve' for VEC, METHOD, PATH, HEADERS and DATA.
-A `non-essential' request, such as one of background completion, only
-goes to a connected rcd, as TRAMP then only reuses open connections."
+Background requests are limited to completion on connected rcds."
   (let ((key (zr-tramp-rcrc--key (tramp-file-name-host vec)
                                   (tramp-file-name-port-or-default vec))))
-    (when (and non-essential (not (gethash key zr-tramp-rcrc--connected)))
+    (when (and non-essential
+               (not (and zr-tramp-rcrc--completing
+                         (gethash key zr-tramp-rcrc--connected))))
       (throw 'zr-tramp-rcrc--non-essential nil))
     (condition-case err
-        (prog1 (zr-tramp-rcrc--retrieve vec method path headers data)
-          (puthash key t zr-tramp-rcrc--connected))
+        (let ((response (zr-tramp-rcrc--retrieve vec method path headers data)))
+          (if (= (car response) 401)
+              (remhash key zr-tramp-rcrc--connected)
+            (puthash key t zr-tramp-rcrc--connected))
+          response)
       ;; Quits and input interrupting completion are not errors.
       (error (remhash key zr-tramp-rcrc--connected)
              (signal (car err) (cdr err))))))
@@ -302,13 +313,19 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
                  (time-convert (date-to-time (alist-get 'ModTime item)) t))))
 
 (defun zr-tramp-rcrc--stat (file &optional fresh)
-  "Return metadata for FILE, or nil if missing; FRESH bypasses the cache."
+  "Return metadata for FILE, or nil if missing; FRESH bypasses the cache.
+Non-essential metadata checks always reuse cached values."
   (with-parsed-tramp-file-name (expand-file-name file) nil
-    (let ((remote-file-name-inhibit-cache (or fresh remote-file-name-inhibit-cache)))
+    (let ((remote-file-name-inhibit-cache
+           (unless non-essential (or fresh remote-file-name-inhibit-cache))))
       (with-tramp-file-property v localname "zr-rcrc-stat"
         (let ((fs (zr-tramp-rcrc--fs localname)))
           (if (or (not fs) (string-empty-p (cdr fs)))
               zr-tramp-rcrc--directory
+            ;; Completion also tests ../ and speculative names.  An
+            ;; unknown candidate must not trigger another RC request or
+            ;; cache a false missing result.
+            (when non-essential (throw 'zr-tramp-rcrc--non-essential nil))
             (when-let* ((item (alist-get 'item (zr-tramp-rcrc--call
                                                v "operations/stat"
                                                (zr-tramp-rcrc--params file)))))
@@ -327,7 +344,9 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
   (append
    (mapcar (lambda (name) (cons (concat name ":") zr-tramp-rcrc--directory))
            (alist-get 'remotes (zr-tramp-rcrc--call vec "config/listremotes")))
-   (if (equal (alist-get 'os (zr-tramp-rcrc--call vec "core/version")) "windows")
+   (if (equal (with-tramp-connection-property vec "zr-rcrc-os"
+                (alist-get 'os (zr-tramp-rcrc--call vec "core/version")))
+              "windows")
        (delete-dups
         (delq nil (mapcar (lambda (disk)
                             (when (string-match "\\`[[:alpha:]]:" disk)
@@ -459,6 +478,8 @@ goes to a connected rcd, as TRAMP then only reuses open connections."
 
 (defun zr-tramp-rcrc--download (file local)
   "Copy the contents of rcrc FILE to LOCAL file."
+  (unless (zr-tramp-rcrc--stat file)
+    (signal 'file-missing (list "No such file" file)))
   (let* ((location (zr-tramp-rcrc--location file))
          (response (zr-tramp-rcrc--http
                     (car location) "GET"
@@ -568,17 +589,21 @@ DIRECTORY permits replacing an empty directory."
   (when (equal (expand-file-name file) (expand-file-name newname))
     (signal 'file-error (list "Source and destination are the same file" file)))
   (let* ((remote-file-name-inhibit-cache t)
-         (exists (file-exists-p newname)))
+         (remote (zr-tramp-rcrc-file-name-p newname))
+         (entry (when remote (zr-tramp-rcrc--stat newname t)))
+         (exists (if remote (and entry t) (file-exists-p newname)))
+         (target-directory (and exists (if remote (plist-get entry :directory)
+                                        (file-directory-p newname)))))
     (when (and exists
                (or (not okay)
                    (and (integerp okay)
                         (not (y-or-n-p (format "File %s exists; overwrite? " newname))))))
       (signal 'file-already-exists (list "File exists" newname)))
-    (when (and exists (file-directory-p newname)
+    (when (and target-directory
                (or (not directory)
                    (directory-files newname nil directory-files-no-dot-files-regexp)))
       (signal 'file-error (list "Cannot overwrite a directory" newname)))
-    (when (and exists directory (not (file-directory-p newname)))
+    (when (and exists directory (not target-directory))
       (signal 'file-error (list "Cannot replace a file with a directory" newname)))))
 
 (defun zr-tramp-rcrc--same-rcd-p (file newname)
@@ -590,14 +615,18 @@ DIRECTORY permits replacing an empty directory."
   "Copy, or MOVE, regular FILE to NEWNAME; KEEP-TIME for local targets."
   (cond
    ((zr-tramp-rcrc--same-rcd-p file newname)
-    (unwind-protect
-        (zr-tramp-rcrc--call
-         (car (zr-tramp-rcrc--location file))
-         (if move "operations/movefile" "operations/copyfile")
-         (append (zr-tramp-rcrc--params file "src")
-                 (zr-tramp-rcrc--params newname "dst")))
-      (zr-tramp-rcrc--flush file)
-      (zr-tramp-rcrc--flush newname)))
+    (let (copied)
+      (unwind-protect
+          (prog1
+              (zr-tramp-rcrc--call
+               (car (zr-tramp-rcrc--location file))
+               (if move "operations/movefile" "operations/copyfile")
+               (append (zr-tramp-rcrc--params file "src")
+                       (zr-tramp-rcrc--params newname "dst")))
+            (setq copied (not move)))
+        ;; A successful copy changes only the destination.
+        (unless copied (zr-tramp-rcrc--flush file))
+        (zr-tramp-rcrc--flush newname))))
    ((zr-tramp-rcrc-file-name-p file)
     (let* ((local (not (file-remote-p newname)))
            (temp (if local newname (tramp-compat-make-temp-file file))))
@@ -738,19 +767,29 @@ DIRECTORY permits replacing an empty directory."
 (defun zr-tramp-rcrc-file-name-handler (operation &rest args)
   "Dispatch TRAMP OPERATION with ARGS to the rclone rc implementation."
   (save-match-data
-    ;; Background completion must neither contact an rcd that is not
-    ;; connected nor cache the missing answer; see `zr-tramp-rcrc--http'.
+    ;; A background cache miss must unwind past cache setters without
+    ;; storing nil as a missing resource.
     (catch 'zr-tramp-rcrc--non-essential
-      (if-let* ((handler (alist-get operation zr-tramp-rcrc-file-name-handler-alist)))
-          (apply handler args)
-        (tramp-run-real-handler operation args)))))
+      (let ((zr-tramp-rcrc--completing
+             (or zr-tramp-rcrc--completing
+                 (memq operation '(file-name-all-completions file-name-completion))))
+            (remote-file-name-inhibit-cache
+             (unless non-essential remote-file-name-inhibit-cache)))
+        (if-let* ((handler (alist-get operation zr-tramp-rcrc-file-name-handler-alist)))
+            (apply handler args)
+          (tramp-run-real-handler operation args))))))
 
 ;;;###autoload
-(defun zr-tramp-rcrc-clear-cache ()
-  "Forget cached rcrc file metadata."
+(defun zr-tramp-rcrc-clear-cache (&optional endpoint)
+  "Forget cached rcrc metadata and daemon properties.
+With ENDPOINT, clear only that HOST#PORT key."
   (interactive)
   (dolist (key (hash-table-keys tramp-cache-data))
-    (when (and (tramp-file-name-p key) (zr-tramp-rcrc-file-name-p key))
+    (when (and (tramp-file-name-p key) (zr-tramp-rcrc-file-name-p key)
+               (or (not endpoint)
+                   (equal endpoint (zr-tramp-rcrc--key
+                                    (tramp-file-name-host key)
+                                    (tramp-file-name-port-or-default key)))))
       (remhash key tramp-cache-data))))
 
 (add-to-list 'tramp-methods '("rcrc" (tramp-default-port 5572)))

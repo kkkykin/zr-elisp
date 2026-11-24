@@ -124,6 +124,71 @@
                  '(:status 200 :body "{\"ok\":1}"))))
       (should (equal (zr-tramp-rcrc--call vec "rc/noop") '((ok . 1)))))))
 
+(ert-deftest zr-tramp-rcrc-background-metadata-is-cache-only ()
+  "Known endpoints must not make speculative background metadata requests."
+  (let* ((tramp-cache-data (make-hash-table :test #'equal))
+         (zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+         (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+         (file "/rcrc:cache.example#9:/fixture:/dir/note.txt")
+         (missing "/rcrc:cache.example#9:/fixture:/unknown/name.txt")
+         (requests 0))
+    (zr-tramp-rcrc-register-endpoint "http://cache.example:9/" "u" "p")
+    (with-parsed-tramp-file-name file nil
+      (tramp-set-file-property v localname "zr-rcrc-stat" '(:size 7 :mtime (1 0))))
+    (cl-letf (((symbol-function 'zr-tramp-rcrc--retrieve)
+               (lambda (&rest _) (cl-incf requests) (error "Unexpected background request"))))
+      (let ((non-essential t) (remote-file-name-inhibit-cache t))
+        (should (= (file-attribute-size (file-attributes file)) 7))
+        (should (file-exists-p file))
+        (should-not (file-exists-p missing))
+        (should-not (file-directory-p (file-name-directory missing)))
+        (should-not (directory-files (file-name-directory missing)))))
+    (should (= requests 0))
+    (with-parsed-tramp-file-name missing nil
+      (let ((remote-file-name-inhibit-cache nil))
+        (should (eq (tramp-get-file-property v localname "zr-rcrc-stat" tramp-cache-undefined)
+                    tramp-cache-undefined))))))
+
+(ert-deftest zr-tramp-rcrc-background-authentication-failure-needs-explicit-retry ()
+  "Unauthorized completion must not retry on every keystroke."
+  (let ((tramp-cache-data (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+        (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+        (directory "/rcrc:auth.example#9:/fixture:/dir/")
+        (requests 0))
+    (zr-tramp-rcrc-register-endpoint "http://auth.example:9/" "u" "p")
+    (cl-letf (((symbol-function 'zr-tramp-rcrc--retrieve)
+               (lambda (&rest _)
+                 (cl-incf requests)
+                 (if (= requests 1) '(401 . "{}") '(200 . "{\"list\":[]}")))))
+      (let ((non-essential t))
+        (should-error (file-name-all-completions "" directory) :type 'file-error)
+        (should-not (file-name-all-completions "" directory)))
+      (should (= requests 1))
+      (should (file-name-all-completions "" directory))
+      (should (= requests 2)))))
+
+(ert-deftest zr-tramp-rcrc-endpoint-registration-invalidates-only-changed-endpoints ()
+  "Repeated registration keeps caches; changed credentials invalidate that rcd."
+  (let* ((tramp-cache-data (make-hash-table :test #'equal))
+         (zr-tramp-rcrc--endpoints (make-hash-table :test #'equal))
+         (zr-tramp-rcrc--connected (make-hash-table :test #'equal))
+         (first (tramp-dissect-file-name "/rcrc:h#9:/fixture:/a"))
+         (second (tramp-dissect-file-name "/rcrc:h#10:/fixture:/b")))
+    (zr-tramp-rcrc-register-endpoint "http://h:9/" "u" "p")
+    (zr-tramp-rcrc-register-endpoint "http://h:10/" "u" "p")
+    (tramp-set-file-property first "/fixture:/a" "zr-rcrc-stat" '(:size 1))
+    (tramp-set-file-property second "/fixture:/b" "zr-rcrc-stat" '(:size 2))
+    (tramp-set-connection-property first "zr-rcrc-os" "linux")
+    (zr-tramp-rcrc-register-endpoint "http://h:9/" "u" "p")
+    (should (tramp-get-file-property first "/fixture:/a" "zr-rcrc-stat"))
+    (should (equal (tramp-get-connection-property first "zr-rcrc-os") "linux"))
+    (zr-tramp-rcrc-register-endpoint "http://h:9/" "u" "changed")
+    (should (eq (tramp-get-file-property first "/fixture:/a" "zr-rcrc-stat" tramp-cache-undefined)
+                tramp-cache-undefined))
+    (should-not (tramp-get-connection-property first "zr-rcrc-os"))
+    (should (= (plist-get (tramp-get-file-property second "/fixture:/b" "zr-rcrc-stat") :size) 2))))
+
 ;;; Integration
 
 (defvar zr-tramp-rcrc-test--servers nil
@@ -200,6 +265,17 @@
   "Return the contents of FILE."
   (with-temp-buffer (insert-file-contents file) (buffer-string)))
 
+(defmacro zr-tramp-rcrc-test--with-requests (&rest body)
+  "Run BODY recording RC method names and GETs in `requests'."
+  (declare (indent 0) (debug body))
+  `(let ((original (symbol-function 'zr-tramp-rcrc--retrieve)) requests)
+     (cl-letf (((symbol-function 'zr-tramp-rcrc--retrieve)
+                (lambda (vec method path headers data)
+                  (push (if (equal method "POST") (car (split-string path "[?]")) method)
+                        requests)
+                  (funcall original vec method path headers data))))
+       ,@body)))
+
 (ert-deftest zr-tramp-rcrc-real-listing-attributes-and-completion ()
   (zr-tramp-rcrc-test--with-server
     (let ((name "中 文 %?#.txt"))
@@ -266,6 +342,132 @@
                 (should (equal (file-name-all-completions "" default-directory)
                                '("note.txt"))))))
         (kill-buffer buffer)))))
+
+(ert-deftest zr-tramp-rcrc-real-fido-reuses-expired-dired-cache ()
+  "Fido's typing and predicates reuse Dired data even after its TTL."
+  (require 'icomplete)
+  (zr-tramp-rcrc-test--with-server
+    (make-directory (concat local "test/nested/") t)
+    (write-region "note" nil (concat local "note.txt") nil 'silent)
+    (let ((buffer (dired-noselect remote)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (zr-tramp-rcrc-test--with-requests
+              (let ((non-essential t)
+                    (minibuffer-completing-file-name t)
+                    (completion-styles '(initials partial-completion flex))
+                    (completion-category-defaults (icomplete--fido-ccd))
+                    (completion-category-overrides nil)
+                    (completion-ignore-case t)
+                    (read-file-name-completion-ignore-case t))
+                (dolist (remote-file-name-inhibit-cache '(0 t))
+                  (dolist (name '("" "t" "te" "tes" "test" "test3"))
+                    (let* ((input (concat remote name))
+                           (candidates (completion-all-completions
+                                        input #'read-file-name-internal #'file-exists-p
+                                        (length input))))
+                      (if (equal name "test3") (should-not candidates)
+                        (should (member "test/" candidates))))))
+                (should-not requests)
+                (should (equal (file-name-all-completions "n" (concat remote "test/"))
+                               '("nested/")))
+                (should (equal requests '("operations/list"))))
+              (setq requests nil)
+              (revert-buffer nil t)
+              (should (equal (reverse requests) '("operations/stat" "operations/list")))))
+        (kill-buffer buffer)))))
+
+(ert-deftest zr-tramp-rcrc-real-top-level-reuses-daemon-os ()
+  "Refreshing configured remotes and roots does not reread the daemon OS."
+  (zr-tramp-rcrc-test--with-server
+    (zr-tramp-rcrc-test--with-requests
+      (let ((remote-file-name-inhibit-cache t))
+        (directory-files (cdr server))
+        (should (= (length requests) 3))
+        (should (member "core/version" requests))
+        (setq requests nil)
+        (directory-files (cdr server))
+        (should (= (length requests) 2))
+        (should-not (member "core/version" requests))))))
+
+(ert-deftest zr-tramp-rcrc-real-copy-counts-and-source-cache ()
+  "Copies retain source metadata and check an overwrite target only once."
+  (zr-tramp-rcrc-test--with-server
+    (let ((file (concat remote "source.txt"))
+          (copy (concat remote "copy.txt")))
+      (write-region "source" nil (concat local "source.txt") nil 'silent)
+      (directory-files remote)
+      (zr-tramp-rcrc-test--with-requests
+        (copy-file file copy)
+        (should (equal (reverse requests) '("operations/stat" "operations/copyfile")))
+        (should (file-attributes file))
+        (should (= (length requests) 2))
+        (setq requests nil)
+        (copy-file file copy t)
+        (should (equal (reverse requests) '("operations/stat" "operations/copyfile")))
+        (setq requests nil)
+        (should-error (copy-file file copy) :type 'file-already-exists)
+        (should (equal requests '("operations/stat")))
+        (let ((directory (concat remote "target")))
+          (make-directory (concat local "target"))
+          (should-error (copy-file file directory t) :type 'file-error))
+        ;; A failed copy must invalidate the source as before.
+        (let ((transport (symbol-function 'zr-tramp-rcrc--retrieve)))
+          (cl-letf (((symbol-function 'zr-tramp-rcrc--retrieve)
+                     (lambda (vec method path headers data)
+                       (if (equal path "operations/copyfile")
+                           '(500 . "{\"error\":\"copy failed\"}")
+                         (funcall transport vec method path headers data)))))
+            (should-error (copy-file file (concat remote "failed.txt")) :type 'file-error)))
+        (with-parsed-tramp-file-name file nil
+          (let ((remote-file-name-inhibit-cache nil))
+            (should (eq (tramp-get-file-property v localname "zr-rcrc-stat" tramp-cache-undefined)
+                        tramp-cache-undefined))))))))
+
+(ert-deftest zr-tramp-rcrc-real-save-checks-target-once ()
+  "With a known parent, saves avoid duplicate target metadata reads."
+  (zr-tramp-rcrc-test--with-server
+    (let* ((file (concat remote "saved.txt"))
+           (path (concat local "saved.txt"))
+           (make-backup-files nil)
+           buffer)
+      (write-region "old\n" nil path nil 'silent)
+      ;; Dired already knows the parent; a direct visit also needs to
+      ;; check its attributes when saving for the first time.
+      (should (file-directory-p remote))
+      (setq buffer (find-file-noselect file))
+      (unwind-protect
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "new\n")
+            (zr-tramp-rcrc-test--with-requests
+              (save-buffer)
+              (should (equal (reverse requests)
+                             '("operations/stat" "operations/stat" "operations/uploadfile" "operations/stat")))
+              (should-not (buffer-modified-p))
+              (setq requests nil)
+              (should (= (file-attribute-size (file-attributes file)) 8))
+              (should-not requests)
+              (write-region "other writer\n" nil path nil 'silent)
+              (set-file-times path (time-add (current-time) 5))
+              (should-not (verify-visited-file-modtime buffer))
+              (should (equal requests '("operations/stat")))))
+        (with-current-buffer buffer (set-buffer-modified-p nil))
+        (kill-buffer buffer)))))
+
+(ert-deftest zr-tramp-rcrc-real-missing-file-skips-get ()
+  "A file known to be missing needs no GET or object-server diagnostic."
+  (zr-tramp-rcrc-test--with-server
+    (file-directory-p remote)
+    (let ((file (concat remote "new.txt")) buffer)
+      (unwind-protect
+          (zr-tramp-rcrc-test--with-requests
+            (setq buffer (find-file-noselect file))
+            (should (equal requests '("operations/stat" "operations/stat")))
+            (with-current-buffer buffer
+              (should-not (buffer-modified-p))
+              (should (time-equal-p (visited-file-modtime) tramp-time-doesnt-exist))))
+        (when (buffer-live-p buffer) (kill-buffer buffer))))))
 
 (ert-deftest zr-tramp-rcrc-real-visit-save-and-append ()
   (zr-tramp-rcrc-test--with-server
