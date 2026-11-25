@@ -75,6 +75,44 @@
       (should (= (zr-org-babel-execute-named "caller") 7))
       (should-error (zr-org-babel-execute-named "missing") :type 'user-error))))
 
+(ert-deftest zr-org-babel-test-display-result-refreshes-only-result-link ()
+  "Refresh the result preview without moving point or touching nearby links."
+  (let* (seen
+         (org-link-parameters
+          (cons (list "file" :preview
+                      (lambda (overlay path _link)
+                        (push path seen)
+                        (overlay-put overlay 'display path)
+                        t))
+                org-link-parameters)))
+    (zr-test-with-org-buffer
+        "[[file:before.png]]\n\n#+begin_src emacs-lisp :results file\n\"result.png\"\n#+end_src\n\n#+RESULTS:\n[[file:result.png]]\n\n[[file:after.png]]\n"
+      (unwind-protect
+          (progn
+            (org-link-preview-region)
+            (should (= (length org-link-preview-overlays) 3))
+            (let ((neighbors
+                   (cl-remove-if
+                    (lambda (overlay)
+                      (equal (overlay-get overlay 'display) "result.png"))
+                    org-link-preview-overlays))
+                  (result
+                   (cl-find "result.png" org-link-preview-overlays
+                            :key (lambda (overlay) (overlay-get overlay 'display))
+                            :test #'equal)))
+              (search-forward "#+begin_src")
+              (let ((origin (point)))
+                (setq seen nil)
+                (zr-org-babel-display-result)
+                (should (= (point) origin)))
+              (should (equal seen '("result.png")))
+              (should-not (overlay-buffer result))
+              (should (= (length org-link-preview-overlays) 3))
+              (dolist (overlay neighbors)
+                (should (eq (overlay-buffer overlay) (current-buffer)))
+                (should (memq overlay org-link-preview-overlays)))))
+        (org-link-preview-clear)))))
+
 (ert-deftest zr-org-babel-test-json-format-is-contained-in-block ()
   (zr-test-with-org-buffer
       "* Heading\n#+begin_src json\n{\"a\":1,\"b\":2}\n#+end_src\nAfter\n"

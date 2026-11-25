@@ -654,9 +654,11 @@
 (ert-deftest zr-tramp-webdav-compressed-file-handlers ()
   (unless (executable-find "gzip") (ert-skip "gzip is required"))
   (zr-tramp-webdav-test--with-server
-    (let ((file (concat root "compressed.txt.gz")) buffer)
-      (write-region "compressed text\n" nil file nil 'silent)
-      (should (equal (zr-tramp-webdav-test--contents file) "compressed text\n"))
+    (let ((file (concat root "compressed.txt.gz"))
+          (contents "-*- mode: text; -*-\ncompressed text\n")
+          buffer)
+      (write-region contents nil file nil 'silent)
+      (should (equal (zr-tramp-webdav-test--contents file) contents))
       (let ((raw (plist-get (zr-tramp-webdav--get file) :body)))
         (should (equal (substring raw 0 2) (unibyte-string 31 139)))
         (with-temp-buffer
@@ -666,13 +668,14 @@
       (setq buffer (find-file-noselect file))
       (unwind-protect
           (with-current-buffer buffer
+            (should (eq major-mode 'text-mode))
             (goto-char (point-max))
             (insert "one\n")
             (save-buffer)
             (insert "two\n")
             (save-buffer)
             (should (equal (zr-tramp-webdav-test--contents file)
-                           "compressed text\none\ntwo\n")))
+                           (concat contents "one\ntwo\n"))))
         (with-current-buffer buffer (set-buffer-modified-p nil))
         (kill-buffer buffer)))))
 

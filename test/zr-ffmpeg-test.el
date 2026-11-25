@@ -641,23 +641,40 @@ values."
 
 ;;; Remote files
 
+(defvar zr-ffmpeg-test--remote-file-exists-p nil)
+
+(defun zr-ffmpeg-test--file-handler (operation &rest arguments)
+  "Handle remote existence checks, delegating other OPERATIONS and ARGUMENTS."
+  (if (eq operation 'file-exists-p)
+      zr-ffmpeg-test--remote-file-exists-p
+    (let ((inhibit-file-name-handlers
+           (cons #'zr-ffmpeg-test--file-handler
+                 (and (eq inhibit-file-name-operation operation)
+                      inhibit-file-name-handlers)))
+          (inhibit-file-name-operation operation))
+      (apply operation arguments))))
+
 (defmacro zr-ffmpeg-test--with-remote-requests (&rest body)
   "Evaluate BODY with readable remote files and fake HTTP requests."
   (declare (indent 0) (debug body))
-  `(cl-letf (((symbol-function 'zr-ffmpeg--remote-backend) #'ignore)
-             ((symbol-function 'zr-ffmpeg--remote-request)
-              (lambda (file &optional upload _resolve)
-                (cons (concat (if (string-prefix-p "/webdavs:" file) "https" "http")
-                              "://example.org/" (if upload "upload/" "")
-                              (file-name-nondirectory file))
-                      '(("Authorization" . "Basic eDp5") ("X-Test" . "1")))))
-             ((symbol-function 'file-regular-p) (lambda (_file) t))
-             ((symbol-function 'file-directory-p)
-              (let ((original (symbol-function 'file-directory-p)))
-                (lambda (file)
-                  (if (file-remote-p file) (directory-name-p file)
-                    (funcall original file))))))
-     ,@body))
+  `(let ((zr-ffmpeg-test--remote-file-exists-p nil)
+         (file-name-handler-alist
+          (cons '("\\`/\\(?:webdavs?\\|rcrc\\):" . zr-ffmpeg-test--file-handler)
+                file-name-handler-alist)))
+     (cl-letf (((symbol-function 'zr-ffmpeg--remote-backend) #'ignore)
+               ((symbol-function 'zr-ffmpeg--remote-request)
+                (lambda (file &optional upload _resolve)
+                  (cons (concat (if (string-prefix-p "/webdavs:" file) "https" "http")
+                                "://example.org/" (if upload "upload/" "")
+                                (file-name-nondirectory file))
+                        '(("Authorization" . "Basic eDp5") ("X-Test" . "1")))))
+               ((symbol-function 'file-regular-p) (lambda (_file) t))
+               ((symbol-function 'file-directory-p)
+                (let ((original (symbol-function 'file-directory-p)))
+                  (lambda (file)
+                    (if (file-remote-p file) (directory-name-p file)
+                      (funcall original file))))))
+       ,@body)))
 
 (ert-deftest zr-ffmpeg-test-remote-source-classification ()
   "TRAMP names are remote files, distinct from local paths and URLs."
@@ -745,11 +762,10 @@ values."
     (unwind-protect
         (zr-ffmpeg-test--with-remote-requests
           (pcase-let ((`(,argv . ,outputs)
-                       (cl-letf (((symbol-function 'file-exists-p) #'ignore))
-                         (zr-ffmpeg--remote-argv
-                          (list "ffmpeg" "-i" input "-i" "/tmp/local.srt"
-                                "-c" "copy" output)
-                          directory))))
+                       (zr-ffmpeg--remote-argv
+                        (list "ffmpeg" "-i" input "-i" "/tmp/local.srt"
+                              "-c" "copy" output)
+                        directory)))
             (should (equal (butlast argv)
                            '("ffmpeg" "-tls_verify" "1"
                              "-headers" "Authorization: Basic eDp5\r\nX-Test: 1\r\n"
@@ -771,14 +787,13 @@ values."
                              "-max_redirects" "0"
                              "-i" "http://example.org/in.mkv")))
             ;; Existing outputs are replaced after -y or consent only.
-            (cl-letf (((symbol-function 'file-exists-p) (lambda (_file) t))
-                      ((symbol-function 'y-or-n-p) #'ignore))
+            (setq zr-ffmpeg-test--remote-file-exists-p t)
+            (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
               (dolist (argv (list (list "ffmpeg" "-i" "/tmp/in.mkv" output)
                                   (list "ffmpeg" "-n" "-i" "/tmp/in.mkv" output)))
                 (should-error (zr-ffmpeg--remote-argv argv directory)
                               :type 'user-error)))
-            (cl-letf (((symbol-function 'file-exists-p) (lambda (_file) t))
-                      ((symbol-function 'y-or-n-p)
+            (cl-letf (((symbol-function 'y-or-n-p)
                        (lambda (_prompt) (error "Should not ask"))))
               (should (zr-ffmpeg--remote-argv
                        (list "ffmpeg" "-y" "-i" "/tmp/in.mkv" output) directory)))
@@ -1048,11 +1063,13 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
 
 (defun zr-ffmpeg-test--webdav-requests ()
   "Return the requests received by the WebDAV fixture."
-  (json-parse-string
-   (zr-ffmpeg-test--contents
-    (format "/webdav:127.0.0.1#%s:/__test__/requests"
-            (zr-ffmpeg-test--webdav-port)))
-   :object-type 'alist :array-type 'list))
+  (let ((response
+         (zr-http-request-sync
+          (format "http://127.0.0.1:%s/__test__/requests"
+                  (zr-ffmpeg-test--webdav-port)))))
+    (should (= (plist-get response :status) 200))
+    (json-parse-string (plist-get response :body)
+                       :object-type 'alist :array-type 'list)))
 
 (ert-deftest zr-ffmpeg-test-webdav-same-origin-redirects ()
   "Resolve input redirects and upload to a redirect's actual destination."
@@ -1171,8 +1188,11 @@ TOP is the rcrc name of the rcd, whose `fixture' remote serves DATA."
            (output (concat root "put-race.mkv"))
            (sample (make-temp-file "sample-" nil ".mkv")))
       (zr-ffmpeg-test--sample sample)
+      (should-not (file-exists-p output))
+      (should-not (member "put-race.mkv" (directory-files root)))
       (zr-ffmpeg-test--run
        (list zr-ffmpeg-program "-v" "error" "-n" "-i" sample "-c" "copy" output))
+      (should (member "put-race.mkv" (directory-files root)))
       (should (equal (zr-ffmpeg-test--contents output) "created by another writer"))
       (should (equal (mapcar #'file-name-nondirectory (zr-ffmpeg-test--kept-outputs))
                      '("put-race.mkv"))))))

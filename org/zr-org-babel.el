@@ -131,7 +131,7 @@ Negative ARGUMENT searches backward; C-u searches from the buffer start."
       (forward-line)
       (skip-chars-forward " \t\n")
       (when (looking-at org-link-bracket-re)
-        (org-display-inline-images nil t (match-beginning 0) (match-end 0))))))
+        (org-link-preview-region nil t (match-beginning 0) (match-end 0))))))
 
 (defun zr-org-babel-format-json (&optional name)
   "Format the JSON source block at point, or the block NAME."

@@ -1571,11 +1571,13 @@ not yet uploaded."
             (zr-ffmpeg--http-upload
              local remote buffer
              (lambda (success)
+               ;; A failed PUT can still change the target, for example
+               ;; when another writer wins an exclusive-create race.
+               (ignore-errors (dired-uncache (file-name-directory remote)))
                (if (not success)
                    (message "Uploading %s failed; see %s.  Output kept in %s"
                             remote (buffer-name buffer) directory)
                  (delete-file local)
-                 (ignore-errors (dired-uncache (file-name-directory remote)))
                  (message "Uploaded %s" remote)
                  (zr-ffmpeg--upload (cdr files) directory buffer)))
              (eq overwrite t)))

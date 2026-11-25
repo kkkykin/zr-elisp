@@ -664,14 +664,22 @@
    (let ((file (zr-org-srs-capture--deck-file "英語"))
          (safe-local-variable-values
           (cons '(zr-dictionary-dictionaries . dictd-db-eng-zho)
-                safe-local-variable-values)))
+                safe-local-variable-values))
+         warnings)
      (with-temp-file file
        (insert "# -*- zr-dictionary-dictionaries: dictd-db-eng-zho; -*-\n"))
-     (with-current-buffer (zr-org-srs-capture--buffer file)
-       (should (eq zr-dictionary-dictionaries 'dictd-db-eng-zho))
-       (let ((err (should-error (zr-org-srs-capture--dictionary-text "hello"))))
-         (should (string-match-p "Expected a list of dictionary search stages"
-                                 (error-message-string err))))))))
+     (cl-letf (((symbol-function 'display-warning)
+                (lambda (type message &optional level buffer)
+                  (push (list type message level buffer) warnings))))
+       (with-current-buffer (zr-org-srs-capture--buffer file)
+         (should (eq zr-dictionary-dictionaries 'dictd-db-eng-zho))
+         (let ((err (should-error (zr-org-srs-capture--dictionary-text "hello"))))
+           (should (string-match-p "Expected a list of dictionary search stages"
+                                   (error-message-string err))))))
+     (should (= (length warnings) 1))
+     (should (eq (caar warnings) 'emacs))
+     (should (string-match-p "Value does not match zr-dictionary-dictionaries"
+                             (cadar warnings))))))
 
 (ert-deftest zr-org-srs-capture-test-real-card-and-dictionaries-by-file-and-directory ()
   (zr-org-srs-capture-test--require-srs)
