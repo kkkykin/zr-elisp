@@ -53,7 +53,8 @@
 \\[nnopds-browse-read] reads a book, \\[nnopds-browse-subscribe] toggles its subscription.
 \\[nnopds-browse-search] searches the server's catalog.
 \\[nnopds-browse-up] goes back and \\[nnopds-browse-refresh] refreshes this page."
-  (setq-local revert-buffer-function (lambda (&rest _args) (nnopds-browse-refresh))))
+  (setq-local gnus-browse-current-method gnus-browse-current-method
+              revert-buffer-function (lambda (&rest _args) (nnopds-browse-refresh))))
 
 (defun nnopds-browse--title (page)
   "Return the display title of PAGE."
@@ -78,6 +79,7 @@
          (count (or (nnopds--publication-count entry) 1))
          (start (point)))
     (gnus-set-active name (cons 1 count))
+    ;; Use Gnus's native row format and keep the book ID in `gnus-group'.
     (insert (format "%c%7d: %s\n"
                     (if (<= (gnus-group-level name) gnus-level-subscribed) ?\s ?U)
                     count (nnopds--publication-title entry)))
@@ -228,15 +230,6 @@ Update the browser only after the requested page has loaded successfully."
                                      nnopds-browse--history))
     (unless (get-text-property (line-beginning-position) 'nnopds-browse-book) (user-error "No directory or book here"))
     (setq gnus-browse-current-method nnopds-browse--method)
-    ;; Subscribed groups need the real chapter count before choosing headers.
-    ;; Gnus activates unknown/ephemeral groups itself on a temporary server;
-    ;; preloading here would extract and index the same book twice.
-    (let* ((full-name (gnus-browse-group-name))
-           (group (if (gnus-native-method-p (gnus-find-method-for-group full-name))
-                      (gnus-group-short-name full-name) full-name)))
-      (when (and (gnus-get-info group) (not (gnus-ephemeral-group-p group)))
-        (unless (gnus-activate-group group)
-          (user-error "Could not open OPDS book: %s" (gnus-status-message nnopds-browse--method)))))
     (if read
         (progn
           (gnus-browse-read-group)
@@ -289,15 +282,6 @@ Update the browser only after the requested page has loaded successfully."
   "Move to the previous N directory or book rows."
   (interactive "p" nnopds-browse-mode)
   (nnopds-browse-next (- (or n 1))))
-
-(defun nnopds-browse--group-name (original)
-  "Return only book group names in OPDS buffers, using ORIGINAL elsewhere."
-  (if (derived-mode-p 'nnopds-browse-mode)
-      (when-let* ((group (get-text-property (line-beginning-position) 'gnus-group)))
-        (concat (gnus-method-to-server-name nnopds-browse--method) ":" group))
-    (funcall original)))
-
-(advice-add 'gnus-browse-group-name :around #'nnopds-browse--group-name)
 
 (provide 'nnopds-browse)
 ;;; nnopds-browse.el ends here

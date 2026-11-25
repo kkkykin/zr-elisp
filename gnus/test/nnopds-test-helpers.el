@@ -118,7 +118,7 @@
            (progn
              (gnus)
              (should-not (nnopds-test--requests opds-root))
-             (should (gnus-group-browse-foreign-server (car gnus-secondary-select-methods)))
+             (should (nnopds-browse (car gnus-secondary-select-methods)))
              (setq connection nnopds--connection)
              ,@body)
          (gnus-close-backends)

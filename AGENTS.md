@@ -6,6 +6,7 @@
 
 - 使用 `{when,if}-let*`，不要用 `{when,if}-let`。
 - 不需要 `(require 'json)`，`json-serialize/json-parse-{string/buffer}` 可直接用。
+- 优先使用 hook/function 变量，非必要不使用 advice 改内置函数逻辑。
 
 ## Conventions
 

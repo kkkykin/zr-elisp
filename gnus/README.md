@@ -45,9 +45,10 @@ HTTP 认证可以配置 server 变量 `nnopds-user`，密码从 `auth-source` �
 calibre 在原有 `/opds` 路径按 `Accept: application/opds+json` 返回 OPDS 2，
 后端已发送此请求头。反向代理有路径前缀时，需要在两个 URL 中显式写出。
 
-在 Gnus group buffer 按 `^` 进入 server buffer，选择服务器并用 `RET` 浏览；
-也可以用 `B nnopds RET 目录URL RET` 浏览，或用 `M-x nnopds-browse` 选择
-已打开的服务器。浏览保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
+用 `M-x nnopds-browse` 选择已打开的服务器，浏览 OPDS 分级目录。
+Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书籍
+索引；新服务器尚无索引时列表为空，可以先用 `nnopds-browse` 发现书籍。
+分级目录保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
 只加载当前页，不递归扫描。目录和分页链接都按 `RET` 进入，`b`/`^` 返回，
 `n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入章节
 列表，`SPC` 阅读。可以直接将某个目录或书目列表的 URL 配为 `nnopds-url`。
@@ -142,8 +143,8 @@ PDF 当前采用页图阅读；文字选择、搜索和注释需要额外文本�
 
 目录、EPUB、漫画和 PDF 缓存保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
 不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
-没有缓存时也不联网；首次浏览才请求根目录，进入未缓存的目录或分页时请求
-该页。默认重访目录和返回上级均使用缓存。新增书籍或版本更新后，在所在
+没有缓存时也不联网；首次使用 `nnopds-browse` 才请求根目录，进入未缓存的
+目录或分页时请求该页。默认重访目录和返回上级均使用缓存。新增书籍或版本更新后，在所在
 目录按 `g` 手动刷新；`M-x nnopds-refresh-catalog` 只刷新服务器根目录。
 `nnopds-catalog-cache-ttl` 默认为 nil；设为秒数可启用页面定时过期，设为 0
 则每次浏览页面都尝试联网刷新，失败时复用旧页。

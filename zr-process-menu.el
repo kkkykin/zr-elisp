@@ -25,23 +25,8 @@
 
 (defvar-local zr-process-menu-group-column nil)
 
-(defvar zr-process-menu-mode)
-
-(defun zr-process-menu--after-refresh (&rest _)
-  "Filter both initial listings and subsequent refreshes in enabled buffers."
-  (when zr-process-menu-mode
-    (zr-process-menu--refresh)))
-
-(defun zr-process-menu--cleanup ()
-  "Remove advice when the last enabled process buffer goes away."
-  (unless (cl-some (lambda (buffer)
-                     (and (not (eq buffer (current-buffer)))
-                          (buffer-local-value 'zr-process-menu-mode buffer)))
-                   (buffer-list))
-    (advice-remove 'list-processes--refresh #'zr-process-menu--after-refresh)))
-
-(defun zr-process-menu--refresh ()
-  "Filter and group the current process entries."
+(defun zr-process-menu--groups ()
+  "Filter the current process entries and return their display groups."
   (when zr-process-menu-omit-regexp
     (setq tabulated-list-entries
           (cl-remove-if
@@ -52,15 +37,18 @@
                                    name
                                  (car name)))))
            tabulated-list-entries)))
-  (setq-local tabulated-list-groups
-              (when zr-process-menu-group-column
-                (seq-group-by
-                 (lambda (entry)
-                   (let ((value (aref (cadr entry) zr-process-menu-group-column)))
-                     (concat "* " (if (stringp value)
-                                      value
-                                    (car value)))))
-                 tabulated-list-entries))))
+  (when zr-process-menu-group-column
+    (seq-group-by
+     (lambda (entry)
+       (let ((value (aref (cadr entry) zr-process-menu-group-column)))
+         (concat "* " (if (stringp value)
+                          value
+                        (car value)))))
+     tabulated-list-entries)))
+
+(defun zr-process-menu--disable ()
+  "Remove display customization before changing major modes."
+  (zr-process-menu-mode -1))
 
 (defun zr-process-menu-filter (regexp)
   "Omit process names matching REGEXP; empty shows everything."
@@ -107,13 +95,12 @@
   :lighter " ZProc"
   (if zr-process-menu-mode
       (progn
-        (advice-add 'list-processes--refresh :after #'zr-process-menu--after-refresh)
-        (add-hook 'kill-buffer-hook #'zr-process-menu--cleanup nil t)
-        (add-hook 'change-major-mode-hook #'zr-process-menu--cleanup nil t))
-    (remove-hook 'kill-buffer-hook #'zr-process-menu--cleanup t)
-    (remove-hook 'change-major-mode-hook #'zr-process-menu--cleanup t)
-    (setq-local tabulated-list-groups nil)
-    (zr-process-menu--cleanup))
+        ;; Initial listings call the refresh function directly, bypassing
+        ;; `tabulated-list-revert-hook'.  Compute groups when printing instead.
+        (setq-local tabulated-list-groups #'zr-process-menu--groups)
+        (add-hook 'change-major-mode-hook #'zr-process-menu--disable nil t))
+    (remove-hook 'change-major-mode-hook #'zr-process-menu--disable t)
+    (setq-local tabulated-list-groups nil))
   (when (derived-mode-p 'process-menu-mode)
     (revert-buffer)))
 

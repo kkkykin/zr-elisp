@@ -9,9 +9,11 @@
 ;; resources are articles.  EPUB files are downloaded on first group entry
 ;; and read using nnepub; Divina comics stream images page by page.  PDFs
 ;; are downloaded before opening and rendered on demand with mutool.
-;; Catalog directories and pagination are browsed
-;; on demand, with visited pages cached locally.  Reading formats and
-;; progress protocols have separate interfaces for future extensions.
+;; Browse catalog directories and pagination with `nnopds-browse', caching
+;; visited pages locally.  The standard Gnus server browser lists known
+;; publications through `nnopds-request-list'.
+;; Reading formats and progress protocols have separate interfaces for
+;; future extensions.
 
 ;;; Code:
 
@@ -645,15 +647,19 @@ SERVER defaults to the current OPDS server."
                           (or (nnopds--publication-count (gethash group (nnopds--connection-publications connection))) 1))))))
     t))
 
-(deffoo nnopds-request-group (group &optional server fast _info)
+(deffoo nnopds-request-group (group &optional server fast info)
   (nnopds--report-errors
-    (let ((publication (nnopds--get-publication group server (not fast))))
+    (let* ((publication (nnopds--get-publication group server t))
+           (count (nnopds--publication-count publication)))
       (setq nnopds--group group)
+      ;; Gnus can select a subscribed group using its cached active range.
+      ;; FAST skips the response, but still needs the book's real chapter count.
+      (when (and fast info)
+        (gnus-set-active (gnus-info-group info) (cons 1 count)))
       (unless fast
         (with-current-buffer nntp-server-buffer
           (erase-buffer)
-          (insert (format "211 %d 1 %d %s\n" (nnopds--publication-count publication)
-                          (nnopds--publication-count publication) group))))
+          (insert (format "211 %d 1 %d %s\n" count count group))))
       t)))
 
 (deffoo nnopds-close-group (group &optional server)
@@ -714,16 +720,6 @@ SERVER defaults to the current OPDS server."
 
 (unless (assoc "nnopds" gnus-valid-select-methods)
   (gnus-declare-backend "nnopds" 'none 'address))
-
-(defun nnopds--browse-server (original server &optional return-buffer)
-  "Browse OPDS SERVER hierarchically, delegating other servers to ORIGINAL."
-  (let ((method (gnus-server-to-method server)))
-    (if (eq (car-safe method) 'nnopds)
-        (nnopds-browse method return-buffer)
-      (funcall original server return-buffer))))
-
-(with-eval-after-load 'gnus-srvr
-  (advice-add 'gnus-browse-foreign-server :around #'nnopds--browse-server))
 
 (defun nnopds--prepare-summary ()
   "Prepare the reading format of this OPDS summary."

@@ -34,6 +34,9 @@
 
 (defvar-local zr-eshell--history-hook nil)
 
+(defvar-local zr-eshell--modules-list nil
+  "Previous local binding and value of `eshell-modules-list'.")
+
 (defvar zr-eshell-mode)
 
 (defun zr-eshell-import-bookmarks (&optional prefix)
@@ -156,21 +159,13 @@ Numerical range ends are inclusive.  Dollar means the final word."
             (user-error "History argument out of range"))
           (cons (mapconcat #'identity (seq-subseq words begin finish) " ") end))))))
 
-(defun zr-eshell--modifier (original &rest arguments)
-  "Use the correctly named prediction module for enabled Eshell buffers."
-  (if zr-eshell-mode
-      (let ((eshell-modules-list (cons 'em-pred eshell-modules-list)))
-        (apply original arguments))
-    (apply original arguments)))
-
 (defun zr-eshell--remove-global-advice ()
   "Remove shared advice when no other enabled buffer remains."
   (unless (cl-some (lambda (buffer)
                      (and (not (eq buffer (current-buffer)))
                           (buffer-local-value 'zr-eshell-mode buffer)))
                    (buffer-list))
-    (advice-remove 'eshell-hist-parse-word-designator #'zr-eshell--word-designator)
-    (advice-remove 'eshell-hist-parse-modifier #'zr-eshell--modifier)))
+    (advice-remove 'eshell-hist-parse-word-designator #'zr-eshell--word-designator)))
 
 (defun zr-eshell--disable ()
   "Remove local and shared state before changing major modes."
@@ -188,7 +183,12 @@ Numerical range ends are inclusive.  Dollar means the final word."
                       (append zr-eshell--interpreters eshell-interpreter-alist)))
         (advice-add 'eshell-hist-parse-word-designator :around
                     #'zr-eshell--word-designator)
-        (advice-add 'eshell-hist-parse-modifier :around #'zr-eshell--modifier)
+        (unless zr-eshell--modules-list
+          (setq zr-eshell--modules-list
+                (list (local-variable-p 'eshell-modules-list) eshell-modules-list))
+          ;; The history modifier parser checks the feature name `em-pred'
+          ;; instead of the module's customization group `eshell-pred'.
+          (setq-local eshell-modules-list (cl-adjoin 'em-pred eshell-modules-list)))
         (unless (memq #'eshell-expand-history-references eshell-expand-input-functions)
           (setq zr-eshell--history-hook t)
           (add-hook 'eshell-expand-input-functions #'eshell-expand-history-references
@@ -198,6 +198,11 @@ Numerical range ends are inclusive.  Dollar means the final word."
     (setq eshell-interpreter-alist
           (cl-set-difference eshell-interpreter-alist zr-eshell--interpreters))
     (setq zr-eshell--interpreters nil)
+    (when zr-eshell--modules-list
+      (if (car zr-eshell--modules-list)
+          (setq eshell-modules-list (cadr zr-eshell--modules-list))
+        (kill-local-variable 'eshell-modules-list))
+      (setq zr-eshell--modules-list nil))
     (when zr-eshell--history-hook
       (remove-hook 'eshell-expand-input-functions #'eshell-expand-history-references t)
       (setq zr-eshell--history-hook nil))

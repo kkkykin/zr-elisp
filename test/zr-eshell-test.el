@@ -60,8 +60,8 @@
 
 (ert-deftest zr-eshell-test-history-real-events-and-modifiers ()
   (with-temp-buffer
-    (let ((eshell-history-ring (make-ring 10))
-          (eshell-modules-list '(eshell-pred)))
+    (setq-local eshell-modules-list '(eshell-pred))
+    (let ((eshell-history-ring (make-ring 10)))
       (ring-insert eshell-history-ring "echo one two three")
       (unwind-protect
           (progn
@@ -72,6 +72,29 @@
                             ("!!:s/one/ONE/" . "echo ONE two three")))
               (should (equal (eshell-history-reference (car case)) (cdr case))))
             (zr-eshell-mode -1))))))
+
+(ert-deftest zr-eshell-test-prediction-module-restores-buffer-settings ()
+  (dolist (local '(nil t))
+    (with-temp-buffer
+      (when local
+        (setq-local eshell-modules-list '(eshell-hist eshell-pred)))
+      (let ((previous eshell-modules-list)
+            (default (default-value 'eshell-modules-list)))
+        (unwind-protect
+            (progn
+              (zr-eshell-mode 1)
+              (zr-eshell-mode 1)
+              (should (memq 'em-pred eshell-modules-list))
+              (should (eq default (default-value 'eshell-modules-list)))
+              (zr-eshell-mode -1)
+              (zr-eshell-mode -1)
+              (should (eq previous eshell-modules-list))
+              (should (eq local (local-variable-p 'eshell-modules-list)))
+              (zr-eshell-mode 1)
+              (text-mode)
+              (should-not (local-variable-p 'eshell-modules-list))
+              (should (eq default eshell-modules-list)))
+          (zr-eshell-mode -1))))))
 
 (provide 'zr-eshell-test)
 ;;; zr-eshell-test.el ends here
