@@ -343,6 +343,18 @@ Also check that each line is tagged with its own file."
                           (path . ,(car f)) (modified_date . ,(cadr f))))
                       files))))
 
+(ert-deftest zr-czkawka-test-flag-newest-breaks-ties-by-path ()
+  "Keep the first path among equally new files, regardless of display order."
+  (zr-czkawka-test--with-dup-buffer
+      (fs (list (zr-czkawka-test--group 1 (list (nth 0 fs) 100)
+                                          (list (nth 1 fs) 300)
+                                          (list (nth 2 fs) 300))))
+    (dired-sort-other "-alr")
+    (let ((listed (zr-czkawka-test--listed)))
+      (zr-czkawka-flag-all-except-newest)
+      (should (equal (zr-czkawka-test--flagged) (list (nth 0 fs) (nth 2 fs))))
+      (should (equal (zr-czkawka-test--listed) listed)))))
+
 (ert-deftest zr-czkawka-test-flag-skips-deleted-files ()
   "Files deleted after the scan must not count as the kept copy."
   (zr-czkawka-test--with-dup-buffer

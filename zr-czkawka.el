@@ -633,13 +633,9 @@ GROUP-ID is non-nil, only collect that group."
 SCORE is called with a file alist and returns a number; the file
 with the highest score is kept, ties being broken by path."
   (lambda (files)
-    (let ((best (car (sort (copy-sequence files)
-                           (lambda (a b)
-                             (let ((sa (funcall score a))
-                                   (sb (funcall score b)))
-                               (if (= sa sb)
-                                   (string< (alist-get 'path a) (alist-get 'path b))
-                                 (> sa sb))))))))
+    (let ((best (car (sort files :key (lambda (file)
+                                       (list (- (funcall score file))
+                                             (alist-get 'path file)))))))
       (remq best files))))
 
 (defun zr-czkawka--mtime (file)
