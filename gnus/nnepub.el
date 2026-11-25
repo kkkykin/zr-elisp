@@ -379,7 +379,7 @@ FINGERPRINT, when supplied, is the already computed SHA-256 of FILE."
 
 (defun nnepub--message-id (book number)
   "Return BOOK's stable Message-ID for article NUMBER."
-  (format "<%d.%s@nnepub>" number (nnepub--book-group book)))
+  (format "<%d.%s@nnepub>" number (secure-hash 'sha256 (nnepub--book-group book))))
 
 (defun nnepub--chapter (book article)
   "Find ARTICLE, a number or Message-ID, in BOOK."

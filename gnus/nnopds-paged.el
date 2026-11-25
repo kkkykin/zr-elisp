@@ -114,7 +114,8 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
      (concat (nnopds--publication-author publication) " <reader@nnopds.invalid>")
      (format-time-string "%a, %d %b %Y %T %z"
                          (or (ignore-errors (date-to-time (nnopds--publication-modified publication))) 0) t)
-     (format "<%d.%s@nnopds>" (plist-get page :number) (nnopds--publication-group publication)) "" 0 0)))
+     (format "<%d.%s@nnopds>" (plist-get page :number)
+             (secure-hash 'sha256 (nnopds--publication-group publication))) "" 0 0)))
 
 (cl-defmethod nnopds--article (_format (book nnopds-paged--book) page group)
   (let ((header (nnopds--header (nnopds-paged--book-source book) book page)))

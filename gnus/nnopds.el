@@ -249,6 +249,24 @@ Redirects are bounded; credentials only go to their configured origin."
 (cl-defgeneric nnopds--close-reader (format data) "Close FORMAT DATA's reading sessions.")
 (cl-defmethod nnopds--close-reader (_format _data) nil)
 
+(defun nnopds--group-label (text fallback)
+  "Return up to 64 letters or digits from TEXT, joined by hyphens.
+Use FALLBACK when TEXT contains no letters or digits."
+  (let ((label (string-trim (replace-regexp-in-string "[^[:alnum:]]+" "-" text) "-+" "-+")))
+    (if (string-empty-p label) fallback
+      (substring label 0 (min 64 (length label))))))
+
+(defun nnopds--group-name (title author source modified)
+  "Return a readable group for TITLE and AUTHOR's edition at SOURCE.
+MODIFIED distinguishes editions; nil denotes an unversioned publication."
+  (string-join
+   (list "book" (nnopds--group-label title "untitled")
+         (nnopds--group-label author "unknown-author")
+         (substring (secure-hash 'sha256
+                                 (encode-coding-string (concat source "\0" (or modified "unversioned")) 'utf-8))
+                    0 16))
+   "."))
+
 (defun nnopds--publication (document base &optional connection)
   "Convert an OPDS publication DOCUMENT at BASE into a reading entry.
 With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
@@ -275,16 +293,16 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
     (when acquisition
       (let* ((source (or (plist-get self :href) (plist-get acquisition :href)))
              (modified (plist-get metadata :modified))
-             (group (concat "book." (secure-hash 'sha256 source) "."
-                            (secure-hash 'sha256 (or modified "unversioned"))))
-             (author (plist-get metadata :author)))
+             (title (nnepub--header-text (plist-get metadata :title)))
+             (author (plist-get metadata :author))
+             (author (nnepub--header-text
+                      (if (stringp author) author
+                        (string-join (mapcar (lambda (entry) (if (stringp entry) entry (or (plist-get entry :name) "")))
+                                             (if (and (listp author) (plist-get author :name)) (list author) author)) ", "))))
+             (group (nnopds--group-name title author source modified)))
         (nnopds--make-publication
          :group group :source source :modified modified :document document
-         :title (nnepub--header-text (plist-get metadata :title))
-         :author (nnepub--header-text
-                  (if (stringp author) author
-                    (string-join (mapcar (lambda (entry) (if (stringp entry) entry (or (plist-get entry :name) "")))
-                                         (if (and (listp author) (plist-get author :name)) (list author) author)) ", ")))
+         :title title :author author
          :format format
          :acquisition (plist-get acquisition :href)
          :progress (when (and connection (eq format 'epub))

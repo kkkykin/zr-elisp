@@ -50,6 +50,48 @@
   (setq-local gnus-current-article number)
   (nnopds-progress--selected))
 
+(ert-deftest nnopds-test-readable-group-names-from-catalog-metadata ()
+  (dolist (case '(("刘慈欣" "刘慈欣")
+                  ((:name "刘慈欣") "刘慈欣")
+                  (((:name "刘慈欣") "Ann Leckie") "刘慈欣-Ann-Leckie")
+                  ([(:name "刘慈欣") "Ann Leckie"] "刘慈欣-Ann-Leckie")
+                  (nil "unknown-author")))
+    (let* ((document (list :metadata (list :title " 三体：地球往事\n" :author (car case))
+                          :links '[(:rel "self" :href "/publication/one")
+                                   (:rel "acquisition" :href "/one.epub" :type "application/epub+zip")]))
+           (publication (nnopds--publication document "https://example.test/catalog"))
+           (group (nnopds--publication-group publication)))
+      (should (string-match-p
+               (concat "\\`book\\.三体-地球往事\\." (cadr case) "\\.[[:xdigit:]]\\{16\\}\\'") group))
+      (should (equal (nnopds--publication-title publication) "三体：地球往事"))
+      (should (equal group (nnopds--publication-group
+                            (nnopds--publication (nnopds--publication-document publication) nil))))))
+  (dolist (title '(nil "\t .:/<> \n"))
+    (let ((publication (nnopds--publication
+                        (list :metadata (list :title title)
+                              :links '[(:rel "acquisition" :href "/one.epub" :type "application/epub+zip")])
+                        "https://example.test/catalog")))
+      (should (string-prefix-p "book.untitled.unknown-author." (nnopds--publication-group publication))))))
+
+(ert-deftest nnopds-test-readable-groups-distinguish-sources-editions-and-metadata ()
+  (let* ((document '(:metadata (:title "三体" :author "刘慈欣" :modified "2026-01-01T00:00:00Z")
+                    :links [(:rel "self" :href "/publication/one")
+                            (:rel "acquisition" :href "/one.epub" :type "application/epub+zip")]))
+         (group (nnopds--publication-group (nnopds--publication document "https://example.test/catalog"))))
+    (dolist (change '((:title "三体 II") (:author "另一位作者") (:modified "2026-02-01T00:00:00Z") (:modified nil)))
+      (let ((changed (copy-tree document t)))
+        (setf (plist-get (plist-get changed :metadata) (car change)) (cadr change))
+        (should-not (equal group (nnopds--publication-group
+                                  (nnopds--publication changed "https://example.test/catalog"))))))
+    (let ((changed (copy-tree document t)))
+      (setf (plist-get (aref (plist-get changed :links) 0) :href) "/publication/two")
+      (should-not (equal group (nnopds--publication-group
+                                (nnopds--publication changed "https://example.test/catalog")))))
+    (let ((changed (copy-tree document t)))
+      (setf (plist-get (aref (plist-get changed :links) 1) :href) "/renamed.epub")
+      (should (equal group (nnopds--publication-group
+                            (nnopds--publication changed "https://example.test/catalog")))))))
+
 (ert-deftest nnopds-test-catalog-navigation-pagination-and-lazy-download ()
   (nnopds-test--with-server
     (should (nnopds-request-scan nil "library"))
@@ -78,6 +120,9 @@
       (should (= 3 (length (nnopds-test--requests opds-root))))
       (nnopds-test--at-book)
       (let ((name (gnus-browse-group-name)))
+        (should (string-match-p
+                 (concat "\\`" (regexp-quote "nnopds+library:book.测试书籍-one.作者甲-作者乙.")
+                         "[[:xdigit:]]\\{16\\}\\'") name))
         (nnopds-browse-subscribe)
         (should (equal name (gnus-browse-group-name)))
         (should (<= (gnus-group-level name) gnus-level-subscribed)))
@@ -372,6 +417,9 @@
       (should (eq 'nov (nnopds-retrieve-headers '(3 . 4) group "library" t)))
       (with-current-buffer nntp-server-buffer (should (= 2 (count-lines (point-min) (point-max)))))
       (should (nnopds-request-article 1 group "library"))
+      (let ((id (mail-header-id (nnopds--header 'epub book (car chapters)))))
+        (should (string-match-p "\\`<1\\.[[:xdigit:]]\\{64\\}@nnepub>\\'" id))
+        (should (equal (nnopds-request-article id group "library") (cons group 1))))
       (with-current-buffer nntp-server-buffer
         (should (string-match-p "multipart/related" (buffer-string)))
         (should (string-match-p "Content-ID:" (buffer-string))))
@@ -524,8 +572,8 @@
           (let* ((publication (nnopds-test--publication connection))
                  (group (nnopds--publication-group publication))
                  (file (nnepub--book-file (nnopds--publication-data publication))))
-            ;; Reproduce the path lengths from a deeply nested Windows profile.
-            (should (> (length (nnopds--cache-file connection (concat group ".epub"))) 259))
+            ;; Readable group names still use fixed-length cache filenames.
+            (should (string-match-p "\\`[[:xdigit:]]\\{64\\}\\.epub\\'" (file-name-nondirectory file)))
             (check-path file)
             (should (file-readable-p file))
             (should (equal group (nnepub--book-group (nnopds--publication-data publication))))
@@ -597,6 +645,7 @@
            (gnus-agent nil) (gnus-opened-servers nil) (gnus-server-alist nil)
            (nnopds-catalog-cache-ttl 0)
            (gnus-server-method-cache nil) (gnus-have-read-active-file nil)
+           (gnus-newsrc-hashtb (gnus-make-hashtable))
            (gnus-active-hashtb (gnus-make-hashtable)))
       (with-current-buffer nntp-server-buffer
         (gnus-read-active-file-1 method nil)
