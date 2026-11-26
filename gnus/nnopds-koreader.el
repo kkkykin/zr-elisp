@@ -63,7 +63,7 @@
   "Translate KOReader PROGRESS and PERCENTAGE to FORMAT's locator in DATA.")
 
 (cl-defmethod nnopds-progress-initialize ((_protocol (eql koreader)) endpoint (_format (eql epub)) data)
-  (setf (plist-get endpoint :document) (nnopds-koreader--digest (nnepub--book-file data))
+  (setf (plist-get endpoint :document) (nnopds-koreader--digest (zr-epub-book-file data))
         (plist-get endpoint :format) 'epub
         (plist-get endpoint :data) data)
   endpoint)
@@ -75,9 +75,9 @@
 
 (cl-defmethod nnopds-koreader--encode ((_format (eql epub)) data locator)
   (let* ((location (nnopds--locate 'epub data locator))
-         (chapter (cl-find (car location) (nnepub--book-chapters data)
+         (chapter (cl-find (car location) (zr-epub-book-chapters data)
                            :key (lambda (chapter) (plist-get chapter :number))))
-         (spine (nnepub--book-spine data))
+         (spine (zr-epub-book-spine data))
          (index (cl-position (plist-get chapter :path) spine :test #'equal)))
     (unless index (error "KOReader position is outside the EPUB spine"))
     ;; This is also the XPointer Komga returns for an EPUB resource start.
@@ -93,8 +93,8 @@
                  ((string-match "DocFragment[/\\.]" progress) 0)
                  ((string-match "\\`#_doc_fragment_\\([0-9]+\\)_" progress)
                   (string-to-number (match-string 1 progress)))))
-         (path (and index (>= index 0) (nth index (nnepub--book-spine data))))
-         (chapter (and path (cl-find path (nnepub--book-chapters data)
+         (path (and index (>= index 0) (nth index (zr-epub-book-spine data))))
+         (chapter (and path (cl-find path (zr-epub-book-chapters data)
                                      :key (lambda (chapter) (plist-get chapter :path)) :test #'equal))))
     (unless chapter (error "KOReader XPointer does not match an EPUB resource: %s" progress))
     (let ((locator (nnopds--locator 'epub data chapter)))

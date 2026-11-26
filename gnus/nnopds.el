@@ -7,7 +7,7 @@
 
 ;; An OPDS 2 catalog is a server, a publication is a group, and its reading
 ;; resources are articles.  EPUB files are downloaded on first group entry
-;; and read using nnepub; Divina comics stream images page by page.  PDFs
+;; and read using zr-epub; Divina comics stream images page by page.  PDFs
 ;; are downloaded before opening and rendered on demand with mutool.
 ;; Browse catalog directories and pagination with `nnopds-browse', caching
 ;; visited pages locally.  The standard Gnus server browser lists known
@@ -26,7 +26,12 @@
 (require 'url-parse)
 (require 'auth-source)
 (require 'zr-http)
-(require 'nnepub)
+(require 'zr-epub)
+(require 'gnus-start)
+(require 'gnus-range)
+(require 'nnoo)
+(require 'nnheader)
+(require 'zr-gnus-epub)
 
 (autoload 'nnopds-progress-prepare "nnopds-progress")
 (autoload 'nnopds-progress-close "nnopds-progress")
@@ -244,7 +249,7 @@ Redirects are bounded; credentials only go to their configured origin."
 (cl-defgeneric nnopds--load-publication (format connection publication)
   "Load PUBLICATION's reading data for FORMAT using CONNECTION.")
 (cl-defgeneric nnopds--chapters (format data) "Return FORMAT DATA's numbered resources.")
-(cl-defgeneric nnopds--header (format data chapter) "Return CHAPTER's Gnus header.")
+(cl-defgeneric nnopds--header (format data chapter group) "Return CHAPTER's Gnus header for GROUP.")
 (cl-defgeneric nnopds--article (format data chapter group) "Return CHAPTER's MIME article in GROUP.")
 (cl-defgeneric nnopds--dispose (format data) "Free temporary reading DATA for FORMAT.")
 (cl-defgeneric nnopds--locator (format data chapter) "Return CHAPTER's portable locator, or nil.")
@@ -297,9 +302,9 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
     (when acquisition
       (let* ((source (or (plist-get self :href) (plist-get acquisition :href)))
              (modified (plist-get metadata :modified))
-             (title (nnepub--header-text (plist-get metadata :title)))
+             (title (zr-epub-single-line (plist-get metadata :title)))
              (author (plist-get metadata :author))
-             (author (nnepub--header-text
+             (author (zr-epub-single-line
                       (if (stringp author) author
                         (string-join (mapcar (lambda (entry) (if (stringp entry) entry (or (plist-get entry :name) "")))
                                              (if (and (listp author) (plist-get author :name)) (list author) author)) ", "))))
@@ -536,7 +541,7 @@ SERVER defaults to the current OPDS server."
               (message "nnopds: Downloaded %s (%.2fs)" (nnopds--publication-title publication)
                        (- (float-time) started))))
           (message "nnopds: Validating %s EPUB..." (if temporary "downloaded" "cached"))
-          (setq digest (nnepub--fingerprint (or temporary file)))
+          (setq digest (zr-epub-file-digest (or temporary file)))
           (when (and (plist-get index :digest) (not (equal (plist-get index :digest) digest)))
             (error "EPUB content changed within the same OPDS version"))
           ;; Checkpoint the edition identity and the completed download before
@@ -545,48 +550,52 @@ SERVER defaults to the current OPDS server."
             (setq index (plist-put index :digest digest))
             (nnopds--write-json index-file index))
           (when temporary (rename-file temporary file t))
-          (setq book (nnepub--load-book file (nnepub--file-signature file) digest))
-          (setf (nnepub--book-group book) group
-                (nnepub--book-title book) (nnopds--publication-title publication))
+          (setq book (zr-epub-open file))
           (unless (string-empty-p (nnopds--publication-author publication))
-            (setf (nnepub--book-author book) (nnopds--publication-author publication)))
-          (let ((value (list :count (length (nnepub--book-chapters book)) :digest digest)))
+            (setf (zr-epub-book-author book) (nnopds--publication-author publication)))
+          (let ((value (list :count (length (zr-epub-book-chapters book)) :digest digest)))
             (unless (equal index value) (nnopds--write-json index-file value)))
           (setq success t)
           book)
-      (unless success (when book (nnepub--dispose-book book)))
+      (unless success (when book (zr-epub-close book)))
       (when (and temporary (file-exists-p temporary)) (delete-file temporary)))))
 
-(cl-defmethod nnopds--chapters ((_format (eql epub)) data) (nnepub--book-chapters data))
-(cl-defmethod nnopds--header ((_format (eql epub)) data chapter) (nnepub--header data chapter))
-(cl-defmethod nnopds--article ((_format (eql epub)) data chapter group) (nnepub--mime data chapter group t))
-(cl-defmethod nnopds--dispose ((_format (eql epub)) data) (nnepub--dispose-book data))
-(cl-defmethod nnopds--prepare-reader ((_format (eql epub)) _data) (nnopds-progress-prepare))
+(cl-defmethod nnopds--chapters ((_format (eql epub)) data) (zr-epub-book-chapters data))
+(cl-defmethod nnopds--header ((_format (eql epub)) data chapter group)
+  (zr-gnus-epub-header data chapter (gnus-group-real-name group)))
+(cl-defmethod nnopds--article ((format (eql epub)) data chapter group)
+  (zr-gnus-epub-article data chapter group (nnopds--header format data chapter group)))
+(cl-defmethod nnopds--dispose ((_format (eql epub)) data) (zr-epub-close data))
+(cl-defmethod nnopds--prepare-reader ((_format (eql epub)) _data)
+  (zr-gnus-epub-prepare-summary)
+  (nnopds-progress-prepare))
 
 (cl-defmethod nnopds--locator ((_format (eql epub)) data chapter)
   ;; Supplementary footnotes must not replace the main reading position.
-  (when (member (plist-get chapter :path) (nnepub--book-spine data))
-    (list :href (url-encode-url (file-relative-name (plist-get chapter :path) (nnepub--book-root data)))
+  (when (member (plist-get chapter :path) (zr-epub-book-spine data))
+    (list :href (url-encode-url (file-relative-name (plist-get chapter :path) (zr-epub-book-root data)))
           :type (plist-get chapter :type) :locations (list :progression 0.0))))
 
 (cl-defmethod nnopds--locate ((_format (eql epub)) data locator)
   (when-let* ((href (plist-get locator :href))
               ((not (string-empty-p href))))
     (pcase-let* ((`(,path . ,fragment)
-                  (nnepub--resolve (nnepub--book-root data)
-                                   (expand-file-name "locator" (nnepub--book-root data)) href))
-                 (chapter (cl-find path (nnepub--book-chapters data)
+                  (zr-epub-resolve (zr-epub-book-root data)
+                                   (expand-file-name "locator" (zr-epub-book-root data)) href))
+                 (chapter (cl-find path (zr-epub-book-chapters data)
                                    :key (lambda (entry) (plist-get entry :path)) :test #'equal)))
       (when chapter (cons (plist-get chapter :number) fragment)))))
 
 (defun nnopds--chapter (publication article)
   "Find PUBLICATION's ARTICLE by number or Message-ID."
-  (let ((data (nnopds--publication-data publication)))
+  (let ((data (nnopds--publication-data publication))
+        (format (nnopds--publication-format publication))
+        (group (nnopds--publication-group publication)))
     (or (cl-find-if (lambda (chapter)
                       (if (integerp article) (= article (plist-get chapter :number))
                         (equal article (mail-header-id
-                                        (nnopds--header (nnopds--publication-format publication) data chapter)))))
-                    (nnopds--chapters (nnopds--publication-format publication) data))
+                                        (nnopds--header format data chapter group)))))
+                    (nnopds--chapters format data))
         (error "No such OPDS article: %s" article))))
 
 ;;; Gnus interface
@@ -717,7 +726,8 @@ The remote publication remains available and browsing can register it again."
       (with-current-buffer nntp-server-buffer
         (erase-buffer)
         (dolist (article (if (and (consp articles) (stringp (car articles))) articles (range-uncompress articles)))
-          (nnheader-insert-nov (nnopds--header format data (nnopds--chapter publication article)))))
+          (nnheader-insert-nov (nnopds--header format data (nnopds--chapter publication article)
+                                             (nnopds--publication-group publication)))))
       'nov)))
 
 (deffoo nnopds-request-article (article &optional group server to-buffer)
@@ -757,26 +767,24 @@ The remote publication remains available and browsing can register it again."
 (unless (assoc "nnopds" gnus-valid-select-methods)
   (gnus-declare-backend "nnopds" 'none 'address))
 
+(defun nnopds--summary-defaults ()
+  "Set overridable reading defaults in OPDS summaries."
+  (when (and gnus-newsgroup-name (eq (car (gnus-find-method-for-group gnus-newsgroup-name)) 'nnopds))
+    (zr-gnus-epub-summary-defaults)
+    (setq-local gnus-large-newsgroup nil
+                gnus-summary-goto-unread 'never)))
+
 (defun nnopds--prepare-summary ()
   "Prepare the reading format of this OPDS summary."
-  (when (string-match-p "\\`nnopds[+:]" gnus-newsgroup-name)
-    (let* ((method (gnus-find-method-for-group gnus-newsgroup-name))
-           (publication (nnopds--get-publication (gnus-group-real-name gnus-newsgroup-name)
-                                                (nth 1 method) t)))
+  (when-let* ((method (gnus-find-method-for-group gnus-newsgroup-name))
+              ((eq (car method) 'nnopds)))
+    (let ((publication (nnopds--get-publication (gnus-group-real-name gnus-newsgroup-name)
+                                               (nth 1 method) t)))
       (nnopds--prepare-reader (nnopds--publication-format publication)
                              (nnopds--publication-data publication)))))
 
-(with-eval-after-load 'gnus-sum
-  (add-to-list 'gnus-parameters
-               '("\\`nnopds[+:]"
-                 (display . all)
-                 (gnus-large-newsgroup nil)
-                 (gnus-summary-goto-unread 'never)
-                 (mm-text-html-renderer 'nnepub--render-html)
-                 (gnus-show-threads nil)
-                 (gnus-article-sort-functions '(gnus-article-sort-by-number))
-                 (gnus-thread-sort-functions '(gnus-thread-sort-by-number))))
-  (add-hook 'gnus-summary-prepared-hook #'nnopds--prepare-summary))
+(add-hook 'gnus-summary-mode-hook #'nnopds--summary-defaults)
+(add-hook 'gnus-summary-prepared-hook #'nnopds--prepare-summary)
 
 (provide 'nnopds)
 ;;; nnopds.el ends here

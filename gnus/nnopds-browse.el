@@ -58,7 +58,7 @@
 
 (defun nnopds-browse--title (page)
   "Return the display title of PAGE."
-  (let ((title (nnepub--header-text (plist-get (plist-get (plist-get page :feed) :metadata) :title))))
+  (let ((title (zr-epub-single-line (plist-get (plist-get (plist-get page :feed) :metadata) :title))))
     (if (string-empty-p title) "OPDS" title)))
 
 (defun nnopds-browse--link (link base &optional title)
@@ -67,7 +67,7 @@
              (plist-get link :href)
              (member (nnopds--media-type link) '("" "application/opds+json")))
     (let* ((url (nnopds--url (plist-get link :href) base))
-           (label (nnepub--header-text (or title (plist-get link :title) url)))
+           (label (zr-epub-single-line (or title (plist-get link :title) url)))
            (start (point)))
       (insert "  " label "\n")
       (add-text-properties start (point) (list 'nnopds-browse-link url 'face 'font-lock-type-face)))))
@@ -99,7 +99,7 @@
     (cl-labels
         ((collection (document root)
            (unless root
-             (insert (propertize (concat (nnepub--header-text (plist-get (plist-get document :metadata) :title)) "\n")
+             (insert (propertize (concat (zr-epub-single-line (plist-get (plist-get document :metadata) :title)) "\n")
                                  'face 'bold)))
            (seq-doseq (link (plist-get document :navigation)) (nnopds-browse--link link base))
            (seq-doseq (publication (plist-get document :publications))
@@ -108,7 +108,7 @@
              (seq-doseq (link (plist-get document :links))
                (when (nnopds--rel-p link "self") (nnopds-browse--link link base "More…"))))
            (seq-doseq (facet (plist-get document :facets))
-             (insert (nnepub--header-text (plist-get (plist-get facet :metadata) :title)) "\n")
+             (insert (zr-epub-single-line (plist-get (plist-get facet :metadata) :title)) "\n")
              (seq-doseq (link (plist-get facet :links)) (nnopds-browse--link link base)))
            (seq-doseq (group (plist-get document :groups))
              (insert "\n") (collection group nil))))

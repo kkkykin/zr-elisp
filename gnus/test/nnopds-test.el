@@ -165,14 +165,14 @@
         (nnopds-test--at-book)
         (when subscribe (nnopds-browse-subscribe))
         (let ((gnus-large-newsgroup 1) (gnus-large-ephemeral-newsgroup 1)
-              (load-book (symbol-function 'nnepub--load-book))
-              (fingerprint (symbol-function 'nnepub--fingerprint))
+              (load-book (symbol-function 'zr-epub-open))
+              (fingerprint (symbol-function 'zr-epub-file-digest))
               (loads 0) (hashes 0))
           (cl-letf (((symbol-function 'read-string)
                      (lambda (&rest _args) (ert-fail "Reading a book prompted for a chapter limit")))
-                    ((symbol-function 'nnepub--load-book)
+                    ((symbol-function 'zr-epub-open)
                      (lambda (&rest args) (cl-incf loads) (apply load-book args)))
-                    ((symbol-function 'nnepub--fingerprint)
+                    ((symbol-function 'zr-epub-file-digest)
                      (lambda (&rest args) (cl-incf hashes) (apply fingerprint args))))
             (nnopds-browse-read)
             (with-current-buffer gnus-summary-buffer
@@ -210,6 +210,36 @@
                   (should (string-match-p (regexp-quote (concat "nnopds: " reason))
                                           (buffer-substring-no-properties start (point-max))))))
             (set-marker start nil)))))))
+
+(ert-deftest nnopds-test-summary-honors-user-group-parameters ()
+  (nnopds-test--with-server
+    (let* ((parameters '(("\\`nnopds[+:]" (display . all)
+                          (gnus-show-threads t)
+                          (gnus-summary-goto-unread t)
+                          (gnus-large-newsgroup 20)
+                          (gnus-article-sort-functions '(gnus-article-sort-by-most-recent-number))
+                          (mm-text-html-renderer 'shr))))
+           (gnus-parameters parameters))
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (let ((group (gnus-browse-group-name)))
+          (nnopds-browse-subscribe)
+          (nnopds-browse-read)
+          (with-current-buffer gnus-summary-buffer
+            (should gnus-show-threads)
+            (should (eq gnus-summary-goto-unread t))
+            (should (= gnus-large-newsgroup 20))
+            (should (equal gnus-article-sort-functions '(gnus-article-sort-by-most-recent-number)))
+            (should-not zr-gnus-epub--reading)
+            (gnus-summary-mark-article 2 gnus-read-mark)
+            (gnus-summary-exit))
+          (with-current-buffer gnus-group-buffer
+            (should (gnus-group-read-group nil t group)))
+          (with-current-buffer gnus-summary-buffer
+            (should (memq 2 gnus-newsgroup-articles))
+            (should-not (memq 2 gnus-newsgroup-unreads))
+            (should (eq gnus-parameters parameters))
+            (gnus-summary-exit)))))))
 
 (ert-deftest nnopds-test-directory-only-catalog-is-browsed-one-level-at-a-time ()
   (nnopds-test--with-server
@@ -433,7 +463,7 @@
     (let* ((publication (nnopds-test--publication connection))
            (group (nnopds--publication-group publication))
            (book (nnopds--publication-data publication))
-           (root (nnepub--book-root book))
+           (root (zr-epub-book-root book))
            (chapters (nnopds--chapters 'epub book)))
       (should (= 4 (length chapters)))
       (should (equal (nnopds--publication-author publication) "作者甲, 作者乙"))
@@ -441,8 +471,8 @@
       (should (eq 'nov (nnopds-retrieve-headers '(3 . 4) group "library" t)))
       (with-current-buffer nntp-server-buffer (should (= 2 (count-lines (point-min) (point-max)))))
       (should (nnopds-request-article 1 group "library"))
-      (let ((id (mail-header-id (nnopds--header 'epub book (car chapters)))))
-        (should (string-match-p "\\`<1\\.[[:xdigit:]]\\{64\\}@nnepub>\\'" id))
+      (let ((id (mail-header-id (nnopds--header 'epub book (car chapters) group))))
+        (should (equal id (format "<1.%s@nnepub>" (secure-hash 'sha256 group))))
         (should (equal (nnopds-request-article id group "library") (cons group 1))))
       (with-current-buffer nntp-server-buffer
         (should (string-match-p "multipart/related" (buffer-string)))
@@ -474,8 +504,8 @@
           (nnopds-test--with-reader
             (let* ((group (nnopds--publication-group publication))
                    (book (nnopds--publication-data publication))
-                   (root (nnepub--book-root book))
-                   (file (nnepub--book-file book))
+                   (root (zr-epub-book-root book))
+                   (file (zr-epub-book-file book))
                    (index (nnopds--cache-file connection (concat (secure-hash 'sha256 group) ".json")))
                    (requests (nnopds-test--requests opds-root))
                    (other-state (nnopds-progress--make-state :connection connection :publication publication
@@ -593,7 +623,7 @@
                       (lambda (request) (equal "/content/one.epub" (plist-get request :path)))
                       (nnopds-test--requests opds-root))))
       (should (= 4 (length (nnopds--chapters 'epub book))))
-      (should (equal (nnopds--read-bytes (nnepub--book-file book))
+      (should (equal (nnopds--read-bytes (zr-epub-book-file book))
                      (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
       (should (= 2 (length requests)))
       (should (string-match-p "application/octet-stream" (plist-get (cadr requests) :accept)))
@@ -622,7 +652,7 @@
                        (error "Could not open OPDS server")))))
       ;; Terminate fresh Emacs processes without running unwinding or server
       ;; cleanup, first before extraction, then during chapter indexing.
-      (dolist (stage '(nnepub--extract nnepub--navigation))
+      (dolist (stage '(zr-epub--extract zr-epub--navigation))
         (let* ((form (append setup
                              `((advice-add ',stage :before
                                            (lambda (&rest _args)
@@ -641,7 +671,7 @@
                 (delete-process child)
                 (should (equal (nnopds--read-bytes file)
                                (nnopds--read-bytes (expand-file-name "one.epub" opds-root))))
-                (should (equal (plist-get (nnopds--read-json index-file) :digest) (nnepub--fingerprint file)))
+                (should (equal (plist-get (nnopds--read-json index-file) :digest) (zr-epub-file-digest file)))
                 (should-not (plist-get (nnopds--read-json index-file) :count))
                 (should-not (directory-files (file-name-directory file) nil "^\\.nnopds-"))
                 (delete-file marker))
@@ -711,12 +741,11 @@
             (should-not (directory-files directory nil "^\\.nnopds-")))
           (let* ((publication (nnopds-test--publication connection))
                  (group (nnopds--publication-group publication))
-                 (file (nnepub--book-file (nnopds--publication-data publication))))
+                 (file (zr-epub-book-file (nnopds--publication-data publication))))
             ;; Readable group names still use fixed-length cache filenames.
             (should (string-match-p "\\`[[:xdigit:]]\\{64\\}\\.epub\\'" (file-name-nondirectory file)))
             (check-path file)
             (should (file-readable-p file))
-            (should (equal group (nnepub--book-group (nnopds--publication-data publication))))
             (nnopds-close-server "library")
             (should (nnopds-open-server "library" `((nnopds-url ,opds-url) (nnopds-headers (("X-API-Key" . "test-key"))))))
             (should (nnopds-request-group group "library"))
@@ -1251,7 +1280,7 @@
                                 (goto-char (point-min))
                                 (unless (search-forward "中文内容 α" nil t) (error "EPUB text missing"))
                                 (goto-char (point-min))
-                                (search-forward "下一章") (backward-char) (nnepub-follow-link))
+                                (search-forward "下一章") (backward-char) (zr-gnus-epub-follow-link))
                               (unless (= gnus-current-article 2) (error "Chapter link did not select article 2"))
                               (with-current-buffer gnus-article-buffer
                                 (unless (looking-at "脚注目标") (error "Chapter anchor missing"))))

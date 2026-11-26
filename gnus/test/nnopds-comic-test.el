@@ -58,8 +58,8 @@
         (should (eq 'nov (nnopds-retrieve-headers '(1 2 3 4 5 6 7) group "library")))
         (should (nnopds-request-article 2 group "library"))
         (should (string-match-p "\\`<2\\.[[:xdigit:]]\\{64\\}@nnopds>\\'"
-                                (mail-header-id (nnopds--header 'comic book page))))
-        (should (nnopds-request-article (mail-header-id (nnopds--header 'comic book page)) group "library"))
+                                (mail-header-id (nnopds--header 'comic book page group))))
+        (should (nnopds-request-article (mail-header-id (nnopds--header 'comic book page group)) group "library"))
         (should (equal (nnopds--locate 'comic book (nnopds--locator 'comic book page)) '(2)))
         (should (= 1.0 (plist-get (plist-get (nnopds--locator 'comic book (nnopds-paged--page book 7)) :locations)
                                   :totalProgression)))

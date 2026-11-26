@@ -107,7 +107,7 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
 (cl-defmethod nnopds--chapters (_format (book nnopds-paged--book))
   (nnopds-paged--book-pages book))
 
-(cl-defmethod nnopds--header (_format (book nnopds-paged--book) page)
+(cl-defmethod nnopds--header (_format (book nnopds-paged--book) page _group)
   (let ((publication (nnopds-paged--book-publication book)))
     (make-full-mail-header
      (plist-get page :number) (plist-get page :title)
@@ -118,7 +118,7 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
              (secure-hash 'sha256 (nnopds--publication-group publication))) "" 0 0)))
 
 (cl-defmethod nnopds--article (_format (book nnopds-paged--book) page group)
-  (let ((header (nnopds--header (nnopds-paged--book-source book) book page)))
+  (let ((header (nnopds--header (nnopds-paged--book-source book) book page group)))
     (concat "Subject: " (rfc2047-encode-string (mail-header-subject header)) "\n"
             "From: " (rfc2047-encode-string (mail-header-from header)) "\n"
             "Date: " (mail-header-date header) "\nMessage-ID: " (mail-header-id header) "\n"

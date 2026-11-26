@@ -1,11 +1,11 @@
 # Gnus 工具
 
-需要 Emacs 31.1 及以上。将本目录加入 `load-path`，按需加载。
+需要 Emacs 31.1 及以上。将仓库根目录和本目录加入 `load-path`，按需加载。
 
 ## nnopds
 
 `nnopds` 将 OPDS 2 目录作为 Gnus server，每本书是一个 group，正文资源
-是 articles。首次进入 EPUB 时下载整本，章节、图片及脚注处理复用 `nnepub`。
+是 articles。首次进入 EPUB 时下载整本，章节解析复用 `zr-epub`。
 漫画通过 Divina manifest 按页取图；PDF 首次打开时完整下载，再按需渲染。
 漫画和 PDF 的一张原始页面对应一篇 article，共用分页阅读器。
 HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`；PDF 需要提供
@@ -15,7 +15,7 @@ HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`；PDF 需要提供
 模块；它们共享的结构体访问器会在编译时内联：
 
 ```sh
-make byte-compile FILE='gnus/nnopds.el gnus/nnopds-browse.el gnus/nnopds-paged.el gnus/nnopds-comic.el gnus/nnopds-pdf.el gnus/nnopds-progress.el gnus/nnopds-koreader.el'
+make byte-compile FILE='zr-epub.el $(wildcard gnus/*.el)'
 ```
 
 ```elisp
@@ -70,15 +70,21 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 具体搜索范围和语法由服务器决定，客户端遵循其
 [OPDS 2 搜索链接](https://specs.opds.io/opds-2.0#3-search)，无需按服务器配置路径。
 
-书籍默认显示完整章节列表，包括已读章节，并保留 Gnus 的已读标记。
-`gnus-summary-goto-unread` 默认为 `never`，前后阅读不会跳过已读章节；
-可通过书籍的 group 参数覆盖。
-`gnus-large-newsgroup` 不限制书籍章节；目录按服务器提供的分页逐页加载。
+书籍的章节顺序、`gnus-summary-goto-unread`（`never`）和 `gnus-large-newsgroup`
+（`nil`）是 Summary 的局部默认值，可由书籍的 group 参数覆盖。
+后端不改写 `gnus-parameters`。如果希望进入书籍时始终显示已读章节，可在
+`~/.gnus.el` 中添加以下规则，或在 Group 缓冲区用 `C-u RET` 进入该组：
+
+```elisp
+(add-to-list 'gnus-parameters '("\\`nnopds[+:]" (display . all)) t)
+```
+
+目录按服务器提供的分页逐页加载。
 
 首次列出书籍时只取书目，章节数或页数在首次打开后更新。支持
 `application/divina+json` 漫画 manifest、`application/epub+zip` 和
 `application/pdf` 取书链接；多个入口同时存在时按漫画、EPUB、PDF 的顺序选择。
-EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注沿用 `nnepub`。
+EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注由 `zr-gnus-epub` 处理。
 
 Komga 的 OPDS 2 目录在 `self` 链接提供漫画 manifest，用户需要页面流式阅读
 权限。calibre 9.18 及以上在 `/opds` 的 acquisition 链接提供 CBZ 漫画 manifest；
@@ -224,58 +230,27 @@ Divina 取图位于 `nnopds-comic.el`，PDF 下载和 MuPDF 适配位于 `nnopds
 共用布局、导航、调度与本地位置位于 `nnopds-paged.el`。服务器漫画和 PDF 进度
 协议可在现有位置接口上另行适配。
 
-## nnepub
+## zr-epub
 
-`nnepub` 把一个本地目录作为 Gnus select method，每本 EPUB 是一个 group，
-书内资源按 OPF spine 顺序作为 articles。EPUB 2 NCX 和 EPUB 3 导航中的标题
-用于章节摘要；spine 外的 XHTML 附录、脚注和导航文档排在正文之后。
-
-需要支持 libxml 的 Emacs，以及 `7zz` 或 `7z`。默认先查找 `7zz`，再查找 `7z`；
-可以通过 `nnepub-7z-program` 指定命令名称或完整路径。
-EPUB 解析参考 [nov.el](https://depp.brause.cc/nov.el/nov.el)，无需安装 nov 或 esxml。
+`zr-epub` 是独立的 EPUB 库，不加载 Gnus，也不提供 `nnepub` select method。
+原来配置了 `nnepub` 的话，移除对应的 select method；本地单本仍可用 `zr-nndoc-epub` 打开。
+它解析 EPUB 2 NCX、EPUB 3 导航和 OPF spine；脚注等补充 XHTML 资源排在正文之后。
+需要支持 libxml 的 Emacs，以及 `7zz` 或 `7z`；可用 `zr-epub-7z-program` 指定程序。
+EPUB 解析参考 nov.el，无需安装 nov 或 esxml。
 
 ```elisp
-(add-to-list 'load-path "/path/to/zr-elisp/gnus")
-(require 'nnepub)
-
-;; 可选：显式指定 7-Zip。
-;; (setq nnepub-7z-program "7zz")
-
-;; 配置书库。
-(add-to-list 'gnus-secondary-select-methods
-             '(nnepub "books" (nnepub-directory "~/Books/")))
+(require 'zr-epub)
+(let ((book (zr-epub-open "~/Books/book.epub")))
+  (unwind-protect
+      (zr-epub-chapter-html book (zr-epub-chapter book 1))
+    (zr-epub-close book)))
 ```
 
-启动 Gnus 后，在 group buffer 中按 `^` 进入 server buffer，再用 `RET` 浏览
-配置的 `books` 服务器。也可以在 group buffer 中用
-`B nnepub RET ~/Books/ RET` 直接浏览目录。组列表中的每一项对应一本 EPUB，
-用 `u` 订阅、`RET` 阅读，`q` 返回；只扫描目录直接包含的 `.epub` 文件。
-
-Summary 是章节列表，使用 Gnus 的 `RET`、`SPC`、`n`、`p` 等阅读命令。
-正文链接的 `RET` 或鼠标中键支持跨章跳转及脚注锚点；外部链接沿用 shr 的行为。
-图片封装为 `multipart/related` MIME 内容，重复图片只封装一次；简单 SVG 图片
-包装也会转换。图片显示遵循 `gnus-inhibit-images` 和 `gnus-blocked-images`；
-后端保留 MIME 中的图片，便于使用 Gnus 的图片显示命令。内嵌 CID 图片沿用
-Gnus 的内嵌图片规则，`gnus-blocked-images` 主要过滤外部图片 URL。
-
-订阅、已读和收藏标记由 Gnus 保存。进入书籍时默认显示全部章节，初始位置
-沿用 Gnus 的设置。`gnus-summary-goto-unread` 默认为 `never`，前后阅读不会
-跳过已读章节；可通过书籍的 group 参数覆盖。阅读状态以文章为单位，书内的
-段落或滚动位置使用 Gnus 现有行为，不另存一套位置文件。
-
-Group 身份包含文件路径和 EPUB 内容摘要。更换文件内容或移动文件后会建立
-新的 group，旧版本的已读标记保留在 Gnus 中，避免把旧文章编号用于不同章节。
-内部 group 名称是稳定标识，后端另提供书名作为 group description；可在
-`gnus-group-line-format` 中使用 `%D` 显示描述。
-
-首次扫描会读取目录内每本书的目录和元数据；会话内按文件修改时间及大小复用
-缓存。章节资源和目录标题用哈希表建立索引，路径校验在建索引期间复用；查找
-正文标题时找到首个标题即停止遍历。Messages 分别显示解压和建索引的耗时。
-损坏的 EPUB 会跳过，并在 Messages 中显示原因。解压内容存放在临时目录，
-关闭服务器或退出 Gnus 时清理；原始 EPUB 文件保持只读。
-
-目前处理常规 XHTML 和图片书籍。CSS、脚本、字体和 EPUB 固定版式的显示效果
-取决于 shr；不支持 DRM 解密。
+`zr-epub-book-chapters` 返回章节列表。调用者可向 `zr-epub-chapter-html` 传入
+章节链接和图片 URL 的转换函数。Gnus 适配层 `zr-gnus-epub` 将图片封装为
+`multipart/related`，保留跨章链接和脚注锚点；外部链接沿用 shr 的行为。
+图片显示遵循 `gnus-inhibit-images` 和 `gnus-blocked-images`。
+CSS、脚本、字体和固定版式的显示效果取决于渲染器；不支持 DRM 解密。
 
 ## zr-nndoc-epub
 
@@ -286,8 +261,8 @@ Group 身份包含文件路径和 EPUB 内容摘要。更换文件内容或移�
 ```
 
 在 Gnus group buffer 中按 `G f`，选择 EPUB 文件，然后用 `RET` 进入创建的
-group。类型会自动识别，EPUB 2/3 的章节、图片和脚注处理复用 `nnepub`；
-图片显示同样遵循 Gnus 设置。普通 mbox 等 `nndoc` 文档继续沿用原有处理。
+group。类型会自动识别，章节、图片和脚注处理与 `nnopds` 共用；普通 mbox
+等 `nndoc` 文档继续沿用原有处理。
 
 `G f` 创建的是普通 group，订阅和已读标记由 Gnus 保留。需要临时阅读、
 不保存订阅和已读状态时，可以在 group buffer 中用 `M-:` 调用 Gnus 原生接口：
@@ -297,9 +272,8 @@ group。类型会自动识别，EPUB 2/3 的章节、图片和脚注处理复用
  "epub" `(nndoc ,(expand-file-name "~/Downloads/book.epub")) t)
 ```
 
-用 summary buffer 的 `q` 退出阅读时，解压目录和该 group 的临时显示参数一并
-清理。单本入口沿用 `nndoc` 的 group 身份；需要按 EPUB 版本分别保存阅读状态
-时，使用上面的 `nnepub` 书库。
+用 summary buffer 的 `q` 退出阅读时清理解压目录；排序和 EPUB 渲染设置只作用于
+对应的阅读缓冲区。单本入口沿用 `nndoc` 的 group 身份。
 
 ## zr-gnus-article-follow
 
@@ -341,13 +315,13 @@ Gnus 的原有命令及函数保持不变。
 ## 检查
 
 ```sh
-make test TEST_FILE='gnus/test/nnepub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el gnus/test/nnopds-pdf-test.el'
-make check-parens byte-compile FILE='$(wildcard gnus/*.el)'
+make test TEST_FILE='gnus/test/zr-epub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el gnus/test/nnopds-pdf-test.el'
+make check-parens byte-compile FILE='zr-epub.el $(wildcard gnus/*.el)'
 make clean
 ```
 
-测试会使用实际 7-Zip 创建 EPUB 2/3 文件，并在独立 Gnus 会话中验证书库、
-单本和临时 group 的正文、脚注跳转、资源清理及已读状态保存和恢复。
+测试会使用实际 7-Zip 创建 EPUB 2/3 文件，验证独立解析、OPDS 阅读，以及
+单本和临时 group 的正文、脚注跳转、资源清理和用户参数覆盖。
 OPDS 测试启动本地 Python HTTP 服务，验证导航、分页、下载缓存、认证、
 进度同步及独立 Gnus 会话的恢复位置。KOReader 测试依据
 [Komga 接口](https://github.com/gotson/komga/blob/master/komga/src/main/kotlin/org/gotson/komga/interfaces/api/kosync/KoreaderSyncController.kt)

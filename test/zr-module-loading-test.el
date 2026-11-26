@@ -12,7 +12,7 @@
                         (file-name-directory (or load-file-name buffer-file-name)))))
 
 (defconst zr-module-loading-test--modules
-  '(zr-http nnepub nnopds nnopds-progress nnopds-koreader zr-nndoc-epub zr-gnus-article-follow zr-dictionary zr-org-srs zr-org-srs-capture zr-org-srs-review zr-android zr-comint zr-data zr-dired zr-elisp zr-eshell zr-eww
+  '(zr-http zr-epub zr-gnus-epub nnopds nnopds-progress nnopds-koreader zr-nndoc-epub zr-gnus-article-follow zr-dictionary zr-org-srs zr-org-srs-capture zr-org-srs-review zr-android zr-comint zr-data zr-dired zr-elisp zr-eshell zr-eww
     zr-network zr-notify zr-org zr-org-babel zr-org-export zr-org-link zr-org-protocol
     zr-org-tangle zr-pcmpl zr-process-menu zr-speedbar zr-terminal zr-termux zr-vc
     zr-viper zr-wezterm zr-window zr-windows))
@@ -81,6 +81,24 @@
                                  "--eval" (prin1-to-string form))))
       (ert-info ((buffer-string))
         (should (eq status 0))))))
+
+(ert-deftest zr-module-loading-test-epub-backends-leave-user-group-parameters-alone ()
+  (with-temp-buffer
+    (let* ((form '(progn
+                   (require 'gnus)
+                   (let* ((parameters '((".*" (gnus-show-threads t))))
+                          (gnus-parameters (copy-tree parameters))
+                          (original gnus-parameters))
+                     (require 'nnopds)
+                     (require 'zr-nndoc-epub)
+                     (require 'gnus-sum)
+                     (unless (and (eq gnus-parameters original) (equal gnus-parameters parameters))
+                       (error "EPUB support changed user group parameters")))))
+           (status (call-process invocation-name nil t nil "--batch" "-Q" "-L"
+                                 zr-module-loading-test--root
+                                 "-L" (expand-file-name "gnus" zr-module-loading-test--root)
+                                 "--eval" (prin1-to-string form))))
+      (ert-info ((buffer-string)) (should (eq status 0))))))
 
 (ert-deftest zr-module-loading-test-org-links-load-dictionary-on-use ()
   (with-temp-buffer
