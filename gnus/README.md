@@ -51,7 +51,8 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 分级目录保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
 只加载当前页，不递归扫描。目录和分页链接都按 `RET` 进入，`b`/`^` 返回，
 `n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入章节
-列表，`SPC` 阅读。可以直接将某个目录或书目列表的 URL 配为 `nnopds-url`。
+或页码列表并定位到上次读到的位置，不打开正文；`SPC` 直接从该位置阅读。
+可以直接将某个目录或书目列表的 URL 配为 `nnopds-url`。
 
 在目录浏览器按 `s`（`M-x nnopds-browse-search`）输入关键词进行服务端搜索。
 后端自动读取当前页的 OPDS 2 `rel=search` URI 模板，当前页未提供时使用根目录
@@ -209,7 +210,7 @@ EPUB 的 CREngine XPointer 按 OPF spine 对应到 Gnus 章节；Komga 的无时
 
 配置同步后，自动恢复和保存章级位置：
 
-- 进入书籍时获取服务器位置，跳到对应章节。
+- 进入书籍时获取服务器位置，在 Summary 定位到对应章节；`SPC` 阅读该章。
 - 实际显示章节后延迟保存，`nnopds-progress-sync-delay` 默认 1 秒。
 - 预取文章和查看正文之外的附录脚注不会改变同步位置；退出 group 时完成
   待保存的位置。Gnus 的订阅、已读和收藏标记继续由 Gnus 保存。

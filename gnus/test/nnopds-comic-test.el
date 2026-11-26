@@ -350,7 +350,16 @@
       (nnopds-test--write opds-root "requests.jsonl" "")
       (nnopds-test--with-browser
         (nnopds-test--at-book)
-        (nnopds-browse-read)
+        (nnopds-browse-select)
+        (with-current-buffer gnus-summary-buffer
+          (should (= (gnus-summary-article-number) 3))
+          (should-not gnus-current-article)
+          (should-not (nnopds-paged--reader-article nnopds-paged--reader))
+          (should-not (nnopds-test--requests opds-root))
+          (gnus-summary-exit))
+        (with-current-buffer gnus-browse-buffer
+          (nnopds-test--at-book)
+          (nnopds-browse-read))
         (with-current-buffer gnus-summary-buffer
           (let* ((reader nnopds-paged--reader) (book (nnopds-paged--reader-book reader)))
             (nnopds-paged-test--settled reader 3)

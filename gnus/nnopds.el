@@ -254,7 +254,9 @@ Redirects are bounded; credentials only go to their configured origin."
 (cl-defgeneric nnopds--dispose (format data) "Free temporary reading DATA for FORMAT.")
 (cl-defgeneric nnopds--locator (format data chapter) "Return CHAPTER's portable locator, or nil.")
 (cl-defgeneric nnopds--locate (format data locator) "Return (NUMBER . FRAGMENT) for LOCATOR, or nil.")
-(cl-defgeneric nnopds--prepare-reader (format data) "Prepare FORMAT DATA's current Gnus summary.")
+(cl-defgeneric nnopds--prepare-reader (format data)
+  "Prepare FORMAT DATA's current Gnus summary.
+Return the saved article number, or nil if none.")
 (cl-defgeneric nnopds--close-reader (format data) "Close FORMAT DATA's reading sessions.")
 (cl-defmethod nnopds--close-reader (_format _data) nil)
 
@@ -774,17 +776,26 @@ The remote publication remains available and browsing can register it again."
     (setq-local gnus-large-newsgroup nil
                 gnus-summary-goto-unread 'never)))
 
-(defun nnopds--prepare-summary ()
-  "Prepare the reading format of this OPDS summary."
+(defun nnopds--setup-summary ()
+  "Arrange to prepare the OPDS reader when Gnus positions the initial subject."
   (when-let* ((method (gnus-find-method-for-group gnus-newsgroup-name))
               ((eq (car method) 'nnopds)))
-    (let ((publication (nnopds--get-publication (gnus-group-real-name gnus-newsgroup-name)
-                                               (nth 1 method) t)))
-      (nnopds--prepare-reader (nnopds--publication-format publication)
-                             (nnopds--publication-data publication)))))
+    (let ((select-subject gnus-auto-select-subject)
+          (local-select-subject (local-variable-p 'gnus-auto-select-subject)))
+      (setq-local gnus-auto-select-subject
+                  (lambda ()
+                    (if local-select-subject
+                        (setq gnus-auto-select-subject select-subject)
+                      (kill-local-variable 'gnus-auto-select-subject))
+                    (let* ((publication (nnopds--get-publication
+                                         (gnus-group-real-name gnus-newsgroup-name) (nth 1 method) t))
+                           (article (nnopds--prepare-reader (nnopds--publication-format publication)
+                                                            (nnopds--publication-data publication))))
+                      (unless (and article (gnus-summary-goto-subject article t t))
+                        (gnus-summary-auto-select-subject))))))))
 
 (add-hook 'gnus-summary-mode-hook #'nnopds--summary-defaults)
-(add-hook 'gnus-summary-prepared-hook #'nnopds--prepare-summary)
+(add-hook 'gnus-select-group-hook #'nnopds--setup-summary)
 
 (provide 'nnopds)
 ;;; nnopds.el ends here

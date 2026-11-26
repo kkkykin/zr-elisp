@@ -510,8 +510,7 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
                                          :anchor (or (nnopds-paged--book-position book) 1)))
   (push nnopds-paged--reader (nnopds-paged--book-readers book))
   (nnopds-paged-mode 1)
-  (when (nnopds-paged--book-position book)
-    (gnus-summary-goto-article (nnopds-paged--book-position book) nil t)))
+  (nnopds-paged--book-position book))
 
 (defvar-keymap nnopds-paged-mode-map
   "1" #'nnopds-paged-single-page
@@ -670,9 +669,11 @@ arrow keys turn one original page according to the reading direction."
       (nnopds-paged-goto-page target))))
 
 (defun nnopds-paged-next (&optional count)
-  "Advance COUNT screens in original reading order."
+  "Open the page at point, or advance COUNT screens in original reading order."
   (interactive "p")
-  (nnopds-paged--move-screens (or count 1)))
+  (if (and (derived-mode-p 'gnus-summary-mode) (null gnus-current-article))
+      (gnus-summary-next-page)
+    (nnopds-paged--move-screens (or count 1))))
 
 (defun nnopds-paged-previous (&optional count)
   "Go back COUNT screens in original reading order."

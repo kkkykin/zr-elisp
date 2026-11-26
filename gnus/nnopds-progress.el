@@ -119,7 +119,7 @@ A synchronization failure leaves the publication readable locally."
         (gnus-summary-goto-article (car location) nil t)))))
 
 (defun nnopds-progress-prepare ()
-  "Install local position hooks in an OPDS summary and resume its book."
+  "Install position hooks in an OPDS summary and return the saved chapter number."
   (when (and nnopds-progress-sync
              (string-match-p "\\`nnopds[+:]" gnus-newsgroup-name))
     (let* ((method (gnus-find-method-for-group gnus-newsgroup-name))
@@ -140,11 +140,10 @@ A synchronization failure leaves the publication readable locally."
               ;; Initial group selection must not overwrite another reader's
               ;; more precise chapter position, even when Gnus selects again.
               (setf (nnopds-progress--state-suppress nnopds-progress--state)
-                    (car (nnopds-progress--location nnopds-progress--state progression)))
-              (nnopds-progress--display nnopds-progress--state progression)
-              (unless progression (nnopds-progress--selected)))
+                    (car (nnopds-progress--location nnopds-progress--state progression))))
           (error (message "nnopds: Could not read server position; sync disabled for this book: %s"
-                          (error-message-string err))))))))
+                          (error-message-string err))
+                 nil))))))
 
 (defun nnopds-progress--selected ()
   "Queue the displayed article's position; backend prefetch never calls this."

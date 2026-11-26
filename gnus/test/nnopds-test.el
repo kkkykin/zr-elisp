@@ -1270,7 +1270,24 @@
                       (nnopds-browse-subscribe))
                     (goto-char (point-min))
                     (while (and (not (eobp)) (not (equal group (gnus-browse-group-name)))) (forward-line 1))
-                    (nnopds-browse-read)
+                    (dolist (read '(nil t))
+                      ,(if (eq session 'first)
+                           '(with-current-buffer gnus-browse-buffer
+                              (if read (nnopds-browse-read) (nnopds-browse-select)))
+                         '(with-current-buffer gnus-group-buffer
+                            (unless (gnus-group-read-group nil (not read) group)
+                              (error "Could not enter OPDS group"))))
+                      (unless read
+                        (with-current-buffer gnus-summary-buffer
+                          (unless (and (= (gnus-summary-article-number) ,(if (eq session 'first) 1 2))
+                                       (not gnus-current-article)
+                                       (not (and gnus-article-buffer (get-buffer-window gnus-article-buffer)))
+                                       (not (nnopds-progress--state-pending nnopds-progress--state)))
+                            (error "Summary-only entry did not locate the saved chapter"))
+                          ,(when (eq session 'first)
+                             '(unless (memq 1 gnus-newsgroup-unreads)
+                                (error "Summary-only entry marked the saved chapter read")))
+                          (gnus-summary-exit))))
                     (with-current-buffer gnus-summary-buffer
                       (unless (and nnopds-progress--state (= gnus-current-article ,(if (eq session 'first) 1 2)))
                         (error "KOReader position was not resumed"))

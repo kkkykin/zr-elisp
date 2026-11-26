@@ -230,13 +230,10 @@ Update the browser only after the requested page has loaded successfully."
                                      nnopds-browse--history))
     (unless (get-text-property (line-beginning-position) 'nnopds-browse-book) (user-error "No directory or book here"))
     (setq gnus-browse-current-method nnopds-browse--method)
-    (if read
-        (progn
-          (gnus-browse-read-group)
-          (with-current-buffer gnus-summary-buffer
-            (unless gnus-current-article
-              (gnus-summary-display-article (gnus-summary-article-number)))))
-      (gnus-browse-select-group))))
+    (gnus-browse-select-group)
+    (when read
+      (with-current-buffer gnus-summary-buffer
+        (gnus-summary-display-article (gnus-summary-article-number))))))
 
 (defun nnopds-browse-select ()
   "Enter the directory or select the book at point."
