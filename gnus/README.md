@@ -163,6 +163,11 @@ curl 直接写入文件，避免把整个 EPUB 在 Emacs 内存中来回复制�
 “group couldn't be activated” 是后续的通用报错。最近一次 backend 错误也可用
 `M-: (nnheader-get-report-string 'nnopds) RET` 查看。
 
+在 Gnus 的 Group buffer 对书籍执行 `M-x gnus-group-delete-group`，会移除
+本地 group 和书目索引并关闭阅读会话，保留已下载的书籍。加 `C-u` 前缀还会
+清理该书的本地下载缓存和阅读设置。此操作不删除服务器上的书籍或已同步的进度；
+再次浏览相应目录时仍可发现并订阅该书。仅想退订并保留 Gnus 阅读状态时，用 `u`。
+
 EPUB 和单书索引使用书籍 ID 的摘要作短文件名，临时文件使用固定短前缀，
 避免 Windows 用户目录较深时超出路径长度限制。
 

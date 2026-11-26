@@ -12,6 +12,8 @@
 ;; Browse catalog directories and pagination with `nnopds-browse', caching
 ;; visited pages locally.  The standard Gnus server browser lists known
 ;; publications through `nnopds-request-list'.
+;; Group deletion forgets a publication locally; with a prefix argument it
+;; also removes its downloaded cache.  Browsing can discover the book again.
 ;; Reading formats and progress protocols have separate interfaces for
 ;; future extensions.
 
@@ -358,6 +360,19 @@ With nil BASE, DOCUMENT already has absolute URLs, as in the catalog cache."
             (push group catalog)))))
     (setf (nnopds--connection-catalog connection) (nreverse catalog))))
 
+(defun nnopds--save-catalog (connection catalog)
+  "Persist CATALOG's known publications on CONNECTION."
+  (let ((table (nnopds--connection-publications connection))
+        (fetched (float-time)))
+    (nnopds--write-json (nnopds--cache-file connection "catalog.json")
+                        (list :fetched fetched
+                              :publications
+                              (vconcat (mapcar (lambda (group)
+                                                 (nnopds--publication-document (gethash group table)))
+                                               catalog))))
+    (setf (nnopds--connection-catalog connection) catalog
+          (nnopds--connection-fetched connection) fetched)))
+
 (defun nnopds--cache-fresh-p (fetched)
   "Whether a cache FETCHED at a Unix timestamp can be reused."
   (and (numberp fetched)
@@ -446,16 +461,8 @@ publications stay available for subscriptions and offline reading."
           (setq changed t))
         (puthash (car pair) entry entries)))
     (when changed
-      (let ((catalog (append (nnopds--connection-catalog connection) (nreverse additions)))
-            (fetched (float-time)))
-        (nnopds--write-json (nnopds--cache-file connection "catalog.json")
-                            (list :fetched fetched
-                                  :publications
-                                  (vconcat (mapcar (lambda (group)
-                                                     (nnopds--publication-document (gethash group table)))
-                                                   catalog))))
-        (setf (nnopds--connection-catalog connection) catalog
-              (nnopds--connection-fetched connection) fetched)))
+      (nnopds--save-catalog connection
+                            (append (nnopds--connection-catalog connection) (nreverse additions))))
     (plist-put page :entries entries)))
 
 (defun nnopds-refresh-catalog (&optional server)
@@ -672,6 +679,35 @@ SERVER defaults to the current OPDS server."
         (nnopds--close-reader (nnopds--publication-format publication) data)))
     (setq nnopds--group nil)
     t))
+
+(deffoo nnopds-request-delete-group (group &optional force server)
+  "Forget GROUP locally on SERVER, closing its reading sessions.
+With FORCE, also delete its downloaded files and local reading settings.
+The remote publication remains available and browsing can register it again."
+  (nnopds--report-errors
+    (let* ((connection (nnopds--change-server server))
+           (table (nnopds--connection-publications connection))
+           (publication (gethash group table))
+           (catalog (remove group (nnopds--connection-catalog connection)))
+           (counts (copy-hash-table (nnopds--connection-counts connection))))
+      (dolist (reader (copy-sequence (nnopds--connection-readers connection)))
+        (when (equal group (car reader)) (nnopds-progress-close (cdr reader))))
+      (when-let* ((data (and publication (nnopds--publication-data publication))))
+        (nnopds--close-reader (nnopds--publication-format publication) data)
+        (nnopds--dispose (nnopds--publication-format publication) data)
+        (setf (nnopds--publication-data publication) nil))
+      (when force
+        ;; All formats keep their files under the fixed-length group hash.
+        (dolist (file (directory-files (nnopds--connection-directory connection) t
+                                      (concat "\\`" (secure-hash 'sha256 group) "\\.")))
+          (if (file-directory-p file) (delete-directory file t) (delete-file file))))
+      (remhash group counts)
+      (nnopds--write-json (nnopds--cache-file connection "counts.json") counts)
+      (nnopds--save-catalog connection catalog)
+      (remhash group table)
+      (setf (nnopds--connection-counts connection) counts)
+      (when (equal nnopds--group group) (setq nnopds--group nil))
+      t)))
 
 (deffoo nnopds-retrieve-headers (articles &optional group server _fetch-old)
   (nnopds--report-errors
