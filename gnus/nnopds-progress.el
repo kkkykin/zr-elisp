@@ -109,6 +109,20 @@ A synchronization failure leaves the publication readable locally."
     (nnopds--locate (nnopds--publication-format publication)
                     (nnopds--publication-data publication) (plist-get progression :locator))))
 
+(defun nnopds-progress--sync-read-marks (state progression)
+  "Mark chapters before PROGRESSION as read in STATE's summary.
+Return the saved chapter number, preserving deliberate Gnus marks."
+  (when-let* ((article (car (nnopds-progress--location state progression)))
+              (buffer (nnopds-progress--state-buffer state))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (save-excursion
+        (dolist (number gnus-newsgroup-unreads)
+          (when (and (< number article)
+                     (gnus-unread-mark-p (gnus-summary-article-mark number)))
+            (gnus-summary-mark-article number gnus-read-mark t)))))
+    article))
+
 (defun nnopds-progress--display (state progression)
   "Display PROGRESSION in STATE's summary without saving it again."
   (when-let* ((location (nnopds-progress--location state progression))
@@ -140,7 +154,7 @@ A synchronization failure leaves the publication readable locally."
               ;; Initial group selection must not overwrite another reader's
               ;; more precise chapter position, even when Gnus selects again.
               (setf (nnopds-progress--state-suppress nnopds-progress--state)
-                    (car (nnopds-progress--location nnopds-progress--state progression))))
+                    (nnopds-progress--sync-read-marks nnopds-progress--state progression)))
           (error (message "nnopds: Could not read server position; sync disabled for this book: %s"
                           (error-message-string err))
                  nil))))))
@@ -277,7 +291,7 @@ A synchronization failure leaves the publication readable locally."
     (while (nnopds-progress--state-in-flight state) (accept-process-output nil 0.05))
     (let ((progression (nnopds-progress--read-now state)))
       (setf (nnopds-progress--state-verified state) t
-            (nnopds-progress--state-suppress state) (car (nnopds-progress--location state progression)))
+            (nnopds-progress--state-suppress state) (nnopds-progress--sync-read-marks state progression))
       (unless (nnopds-progress--display state progression)
         (message "nnopds: No matching saved chapter")))))
 

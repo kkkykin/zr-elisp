@@ -772,6 +772,8 @@ The remote publication remains available and browsing can register it again."
 (defun nnopds--summary-defaults ()
   "Set overridable reading defaults in OPDS summaries."
   (when (and gnus-newsgroup-name (eq (car (gnus-find-method-for-group gnus-newsgroup-name)) 'nnopds))
+    (unless (assq 'display (gnus-group-find-parameter gnus-newsgroup-name))
+      (gnus-group-add-parameter gnus-newsgroup-name '(display . all)))
     (zr-gnus-epub-summary-defaults)
     (setq-local gnus-large-newsgroup nil
                 gnus-summary-goto-unread 'never)))

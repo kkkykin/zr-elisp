@@ -100,14 +100,10 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 `limit:20` 限制结果数；`C-u G G` 可临时使用字面查询。
 不支持的字段会报告错误。
 
+书籍没有显示配置时，nnopds 为该书添加 `(display . all)` group 参数，
+全部章节按顺序列出，`gnus-parameters` 保持原样。
 书籍的章节顺序、`gnus-summary-goto-unread`（`never`）和 `gnus-large-newsgroup`
-（`nil`）是 Summary 的局部默认值，可由书籍的 group 参数覆盖。
-后端不改写 `gnus-parameters`。如果希望进入书籍时始终显示已读章节，可在
-`~/.gnus.el` 中添加以下规则，或在 Group 缓冲区用 `C-u RET` 进入该组：
-
-```elisp
-(add-to-list 'gnus-parameters '("\\`nnopds[+:]" (display . all)) t)
-```
+（`nil`）是 Summary 的局部默认值。这些阅读设置均可由书籍的 group 参数覆盖。
 
 目录按服务器提供的分页逐页加载。
 
@@ -239,13 +235,15 @@ EPUB 的 CREngine XPointer 按 OPF spine 对应到 Gnus 章节；Komga 的无时
 
 配置同步后，自动恢复和保存章级位置：
 
-- 进入书籍时获取服务器位置，在 Summary 定位到对应章节；`SPC` 阅读该章。
+- 进入书籍时获取服务器位置，在 Summary 定位到对应章节，并把之前的普通
+  未读章节标为已读，保留收藏、休眠等手动标记。仅定位不会把当前章节标为
+  已读；`SPC` 阅读该章。
 - 实际显示章节后延迟保存，`nnopds-progress-sync-delay` 默认 1 秒。
 - 预取文章和查看正文之外的附录脚注不会改变同步位置；退出 group 时完成
   待保存的位置。Gnus 的订阅、已读和收藏标记继续由 Gnus 保存。
 - 服务器读取失败、另一个设备位置更靠后或写入返回 `409` 时保留服务器状态。
-  用 `M-x nnopds-resume` 重新获取位置；用 `M-x nnopds-save-position` 立即尝试
-  保存当前章。两个命令也可在 article buffer 调用。
+  用 `M-x nnopds-resume` 重新获取位置并更新前面章节的已读标记；用
+  `M-x nnopds-save-position` 立即尝试保存当前章。两个命令也可在 article buffer 调用。
 
 `nnopds-progress-device-id` 和 `nnopds-progress-device-name` 标识本设备。
 设置 `nnopds-progress-sync` 为 nil 可关闭自动恢复和保存。

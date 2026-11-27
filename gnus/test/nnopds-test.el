@@ -50,6 +50,16 @@
   (setq-local gnus-current-article number)
   (nnopds-progress--selected))
 
+(defun nnopds-test--summary-articles ()
+  "Return article numbers in the current summary's display order."
+  (save-excursion
+    (goto-char (point-min))
+    (let (articles)
+      (while (not (eobp))
+        (when-let* ((number (gnus-summary-article-number))) (push number articles))
+        (forward-line 1))
+      (nreverse articles))))
+
 (ert-deftest nnopds-test-readable-group-names-from-catalog-metadata ()
   (dolist (case '(("刘慈欣" "刘慈欣")
                   ((:name "刘慈欣") "刘慈欣")
@@ -210,6 +220,33 @@
                   (should (string-match-p (regexp-quote (concat "nnopds: " reason))
                                           (buffer-substring-no-properties start (point-max))))))
             (set-marker start nil)))))))
+
+(ert-deftest nnopds-test-summary-displays-read-chapters-unless-overridden ()
+  (dolist (display '(all nil))
+    (let* ((parameters
+            (if display gnus-parameters
+              (append gnus-parameters '(("\\`nnopds[+:]" (display . nil))))))
+           (gnus-parameters parameters))
+      (nnopds-test--with-server
+        (skip-unless (and (or (executable-find "7zz") (executable-find "7z")) (libxml-available-p)))
+        (nnopds-test--with-browser
+          (nnopds-test--at-book)
+          (let ((group (gnus-browse-group-name)))
+            (nnopds-browse-subscribe)
+            (nnopds-browse-select)
+            (with-current-buffer gnus-summary-buffer
+              (gnus-summary-mark-article 2 gnus-read-mark t)
+              (gnus-summary-exit))
+            (with-current-buffer gnus-group-buffer
+              (should (gnus-group-read-group nil t group)))
+            (with-current-buffer gnus-summary-buffer
+              (should (eq (gnus-group-find-parameter group 'display) display))
+              (should (equal (nnopds-test--summary-articles)
+                             (if display '(1 2 3 4) '(1 3 4))))
+              (should-not (memq 2 gnus-newsgroup-unreads))
+              (should (eq gnus-parameters parameters))
+              (should (eq (gnus-group-get-parameter group 'display) display))
+              (gnus-summary-exit))))))))
 
 (ert-deftest nnopds-test-summary-honors-user-group-parameters ()
   (nnopds-test--with-server
@@ -1143,6 +1180,55 @@
       (should (nnopds--publication-data publication))
       (should-not (nnopds--publication-progress publication))
       (should-not (nnopds-test--requests opds-root "PUT")))))
+
+(ert-deftest nnopds-test-koreader-resume-marks-earlier-chapters-read ()
+  (nnopds-test--with-koreader 'komga
+    (skip-unless (and (or (executable-find "7zz") (executable-find "7z")) (libxml-available-p)))
+    (nnopds-test--write
+     opds-root "koreader-progress.json"
+     (json-serialize
+      (list :document (nnopds-koreader--digest (expand-file-name "one.epub" opds-root))
+            :progress "/body/DocFragment[2]/body/p[1]/text().20" :percentage 0.7
+            :device "Kobo" :device_id "phone")))
+    (let ((nnopds-test--server-definitions
+           `((nnopds-url ,opds-url) (nnopds-headers (("X-API-Key" . "komga-key")))
+             (nnopds-koreader-url ,sync-url) (nnopds-koreader-user "komga-key"))))
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (let ((group (gnus-browse-group-name)))
+          (nnopds-browse-subscribe)
+          (nnopds-browse-select)
+          (with-current-buffer gnus-summary-buffer
+            (should (equal (nnopds-test--summary-articles) '(1 2 3 4)))
+            (should (= (gnus-summary-article-number) 2))
+            (should-not gnus-current-article)
+            (should (eq (gnus-summary-article-mark 1) gnus-read-mark))
+            (should (equal gnus-newsgroup-unreads '(2 3 4)))
+            (gnus-summary-mark-article 1 gnus-unread-mark t)
+            (gnus-summary-mark-article 3 gnus-dormant-mark t)
+            (gnus-summary-mark-article 4 gnus-read-mark t)
+            (nnopds-resume)
+            (should (= gnus-current-article 2))
+            (should (eq (gnus-summary-article-mark 1) gnus-read-mark))
+            (should (eq (gnus-summary-article-mark 3) gnus-dormant-mark))
+            (should (eq (gnus-summary-article-mark 4) gnus-read-mark))
+            (dolist (mark (list gnus-ticked-mark gnus-dormant-mark))
+              (gnus-summary-mark-article 1 mark t)
+              (nnopds-resume)
+              (should (eq (gnus-summary-article-mark 1) mark)))
+            (should-not (nnopds-progress--state-pending nnopds-progress--state))
+            (gnus-summary-mark-article 1 gnus-read-mark t)
+            (gnus-summary-mark-article 3 gnus-unread-mark t)
+            (gnus-summary-exit))
+          (with-current-buffer gnus-group-buffer
+            (should (gnus-group-read-group nil t group)))
+          (with-current-buffer gnus-summary-buffer
+            (should (equal (nnopds-test--summary-articles) '(1 2 3 4)))
+            (should (= (gnus-summary-article-number) 2))
+            (should-not gnus-current-article)
+            (should-not (memq 2 gnus-newsgroup-unreads))
+            (gnus-summary-exit)))
+        (should-not (nnopds-test--requests opds-root "PUT"))))))
 
 (ert-deftest nnopds-test-calibre-proxy-header-and-manual-resume ()
   (nnopds-test--with-server
