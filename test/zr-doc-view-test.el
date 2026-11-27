@@ -1,0 +1,617 @@
+;;; zr-doc-view-test.el --- DocView multiple-page reader tests -*- lexical-binding: t; -*-
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'zr-test-helpers)
+(require 'zr-doc-view)
+
+(defconst zr-doc-view-test--sizes
+  '((200 . 300) (200 . 300) (400 . 600) (400 . 200)
+    (200 . 300) (100 . 300) (200 . 300)))
+
+(defun zr-doc-view-test--write-pdf (file)
+  "Write a valid seven-page document with portrait and landscape pages to FILE."
+  (let ((objects
+         (list "<< /Type /Catalog /Pages 2 0 R >>"
+               "<< /Type /Pages /Count 7 /Kids [3 0 R 4 0 R 5 0 R 6 0 R 7 0 R 8 0 R 9 0 R] >>")))
+    (cl-loop for size in zr-doc-view-test--sizes for page from 1 do
+             (setq objects
+                   (append objects
+                           (list (format
+                                  "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Resources << >> /Contents %d 0 R >>"
+                                  (car size) (cdr size) (+ page 9))))))
+    (dotimes (index 7)
+      (let ((content (format "0.%d 0.3 0.4 rg 0 0 400 600 re f\n" (1+ index))))
+        (setq objects (append objects
+                              (list (format "<< /Length %d >>\nstream\n%sendstream"
+                                            (length content) content))))))
+    (with-temp-buffer
+      (set-buffer-multibyte nil)
+      (insert "%PDF-1.7\n")
+      (let (offsets)
+        (cl-loop for object in objects for number from 1 do
+                 (push (1- (point)) offsets)
+                 (insert (format "%d 0 obj\n%s\nendobj\n" number object)))
+        (let ((xref (1- (point))))
+          (insert (format "xref\n0 %d\n0000000000 65535 f \n" (1+ (length objects))))
+          (dolist (offset (nreverse offsets)) (insert (format "%010d 00000 n \n" offset)))
+          (insert (format "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+                          (1+ (length objects)) xref))))
+      (write-region (point-min) (point-max) file nil 'silent))))
+
+(defun zr-doc-view-test--cache-page (directory page)
+  "Write a valid SVG image for PAGE in DIRECTORY."
+  (let ((size (nth (1- page) zr-doc-view-test--sizes)))
+    (with-temp-file (expand-file-name (format "page-%d.svg" page) directory)
+      (insert (format
+               "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\"><rect width=\"100%%\" height=\"100%%\" fill=\"white\"/></svg>"
+               (car size) (cdr size))))))
+
+(defun zr-doc-view-test--image-size (image &optional pixels frame)
+  "Read IMAGE's real SVG or PNG dimensions without a native graphical decoder."
+  (let* ((file (plist-get (cdr image) :file))
+         (size
+          (ignore-errors
+            (with-temp-buffer
+              (set-buffer-multibyte nil)
+              (insert-file-contents-literally file nil 0 (if (eq (plist-get (cdr image) :type) 'png) 24 nil))
+              (if (eq (plist-get (cdr image) :type) 'png)
+                  (let ((bytes (buffer-string)))
+                    (unless (string-prefix-p "\211PNG\r\n\032\n" bytes) (error "Not a PNG"))
+                    (cl-flet ((uint (offset)
+                                (+ (ash (aref bytes offset) 24) (ash (aref bytes (+ offset 1)) 16)
+                                   (ash (aref bytes (+ offset 2)) 8) (aref bytes (+ offset 3)))))
+                      (cons (uint 16) (uint 20))))
+                (goto-char (point-min))
+                (unless (re-search-forward "width=\"\\([0-9]+\\)\"" nil t) (error "Not an SVG"))
+                (let ((width (string-to-number (match-string 1))))
+                  (unless (re-search-forward "height=\"\\([0-9]+\\)\"" nil t) (error "Not an SVG"))
+                  (cons width (string-to-number (match-string 1))))))))
+         (margin (if size (or (plist-get (cdr image) :margin) 0) 0))
+         ;; Native image-size returns an unpadded placeholder on failure.
+         (width (or (plist-get (cdr image) :width) (car size) 30))
+         (height (or (plist-get (cdr image) :height)
+                     (and size (round (* (cdr size) (/ (float width) (car size)))))
+                     30)))
+    (cl-incf width (* 2 (if (consp margin) (car margin) margin)))
+    (cl-incf height (* 2 (if (consp margin) (cdr margin) margin)))
+    (if pixels (cons width height)
+      (cons (/ (float width) (frame-char-width frame))
+            (/ (float height) (frame-char-height frame))))))
+
+(defmacro zr-doc-view-test--with-images (&rest body)
+  "Run BODY using real files and DocView with graphical primitives emulated.
+Only native image decoding and frame capabilities are substituted on nox
+Emacs.  Overlays, window state, DocView commands, processes and caches are real."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t))
+             ((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+             ((symbol-function 'image-type-available-p) (lambda (type) (memq type '(png svg))))
+             ((symbol-function 'create-image)
+              (lambda (file &optional type _data-p &rest properties)
+                (unless (file-readable-p file) (error "Image file is missing"))
+                (append (list 'image :type type :file file) properties)))
+             ((symbol-function 'image-size) #'zr-doc-view-test--image-size)
+             ((symbol-function 'image-flush) (lambda (&rest _)))
+             ((symbol-function 'clear-image-cache) (lambda (&rest _))))
+     ,@body))
+
+(defmacro zr-doc-view-test--with-document (&rest body)
+  "Run BODY in a real DocView buffer with a fully cached SVG document.
+DOC-FILE, DOC-CACHE and DOC-ORIGINAL expose the fixture and original contents."
+  (declare (indent 0) (debug t))
+  `(save-window-excursion
+     (zr-test-with-temp-directory
+       (let ((doc-view-cache-directory (expand-file-name "cache/"))
+             ;; The cache is complete; no converter is executed in this fixture.
+             (doc-view-pdfdraw-program (expand-file-name invocation-name invocation-directory))
+             (doc-view-pdf->png-converter-function #'doc-view-pdf->png-converter-mupdf)
+             (doc-view-mupdf-use-svg t)
+             (doc-view-imenu-enabled nil)
+             (doc-view-conversion-refresh-interval nil)
+             (doc-view-mode-hook nil)
+             (zr-doc-view-visible-pages 2)
+             (zr-doc-view-direction 'ltr)
+             (zr-doc-view-cover-single nil)
+             (zr-doc-view-landscape-single t)
+             (zr-doc-view-gap 12)
+             (doc-file (expand-file-name "book.pdf")))
+         (zr-doc-view-test--write-pdf doc-file)
+         (zr-doc-view-test--with-images
+           (with-temp-buffer
+             (insert-file-contents-literally doc-file)
+             (setq buffer-file-name doc-file)
+             (setq-local doc-view--buffer-file-name doc-file)
+             (let ((doc-cache (doc-view--current-cache-dir))
+                   (doc-original (buffer-string)))
+               (make-directory doc-cache t)
+               (with-temp-file (expand-file-name "resolution.el" doc-cache) (prin1 100 (current-buffer)))
+               (dotimes (index 7) (zr-doc-view-test--cache-page doc-cache (1+ index)))
+               (switch-to-buffer (current-buffer))
+               (delete-other-windows)
+               (doc-view-mode)
+               (should (derived-mode-p 'doc-view-mode))
+               (unwind-protect
+                   (progn ,@body)
+                 (zr-doc-view-mode -1)
+                 (doc-view-kill-proc)))))))))
+
+(defun zr-doc-view-test--shown (&optional window)
+  "Return WINDOW's page image numbers in screen order."
+  (with-selected-window (or window (selected-window))
+    (let ((display (overlay-get (doc-view-current-overlay) 'before-string)) pages)
+      (when (stringp display)
+        (dotimes (position (length display))
+          (when-let* ((page (get-text-property position 'zr-doc-view-page display)))
+            (push page pages))))
+      (nreverse pages))))
+
+(defun zr-doc-view-test--assert-removed ()
+  "Assert that the last enabled reader left no global layout extensions."
+  (should-not zr-doc-view--buffers)
+  (should-not (advice-member-p #'zr-doc-view--insert-image 'doc-view-insert-image))
+  (should-not (advice-member-p #'zr-doc-view--after-conversion 'doc-view-display))
+  (should-not (advice-member-p #'zr-doc-view--display-size 'image-display-size))
+  (should-not (memq #'zr-doc-view--windows-changed (default-value 'window-configuration-change-hook))))
+
+(ert-deftest zr-doc-view-test-mode-rejects-other-buffers ()
+  (with-temp-buffer
+    (should-error (zr-doc-view-mode 1) :type 'user-error)
+    (should-not zr-doc-view-mode)
+    (should-not zr-doc-view--saved-variables))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-sliding-pages-direction-and-screen-keys ()
+  (zr-doc-view-test--with-document
+    (let ((tick (buffer-chars-modified-tick)))
+      (zr-doc-view-mode 1)
+      (zr-doc-view-toggle-landscape)
+      (zr-doc-view-set-visible-pages 3)
+      (zr-doc-view-goto-page 2)
+      (should (equal (zr-doc-view-test--shown) '(2 3 4)))
+      (call-interactively (key-binding (kbd "<right>")))
+      (should (equal (zr-doc-view-test--shown) '(3 4 5)))
+      (call-interactively (key-binding (kbd "SPC")))
+      (should (equal (zr-doc-view-test--shown) '(6 7)))
+      (should-error (zr-doc-view-next-screen) :type 'user-error)
+      (call-interactively (key-binding (kbd "DEL")))
+      (should (equal (zr-doc-view-test--shown) '(3 4 5)))
+      (zr-doc-view-set-direction 'rtl)
+      (should (= 3 (doc-view-current-page)))
+      (should (equal (zr-doc-view-test--shown) '(5 4 3)))
+      (should (equal (zr-doc-view-current-pages) '(3 4 5)))
+      (call-interactively (key-binding (kbd "<right>")))
+      (should (equal (zr-doc-view-test--shown) '(4 3 2)))
+      (call-interactively (key-binding (kbd "SPC")))
+      (should (equal (zr-doc-view-test--shown) '(7 6 5)))
+      (zr-doc-view-single-page)
+      (should (= 5 (doc-view-current-page)))
+      (should (equal (zr-doc-view-test--shown) '(5)))
+      (zr-doc-view-double-page)
+      (should (equal (zr-doc-view-test--shown) '(6 5)))
+      (should (equal doc-original (buffer-string)))
+      (should (= tick (buffer-chars-modified-tick))))))
+
+(ert-deftest zr-doc-view-test-images-are-displayed-in-overlay-strings ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (let* ((overlay (doc-view-current-overlay))
+           (replacement (overlay-get overlay 'display))
+           (images (overlay-get overlay 'before-string)))
+      ;; Emacs ignores recursive display properties in replacement strings.
+      (should (eq (car replacement) 'space))
+      (should (plist-get (cdr replacement) :zr-doc-view-size))
+      (should (stringp images))
+      (should (equal (zr-doc-view-test--shown) '(1 2)))
+      (dotimes (position (length images))
+        (when (get-text-property position 'zr-doc-view-page images)
+          (should (eq 'image (car (get-text-property position 'display images)))))))))
+
+(ert-deftest zr-doc-view-test-cover-landscape-and-end-ranges ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (zr-doc-view-set-visible-pages 3)
+    (zr-doc-view-toggle-cover)
+    (should (equal (zr-doc-view-test--shown) '(1)))
+    (zr-doc-view-next-screen)
+    (should (equal (zr-doc-view-test--shown) '(2 3)))
+    (zr-doc-view-next-screen)
+    (should (equal (zr-doc-view-test--shown) '(4)))
+    (zr-doc-view-next-screen)
+    (should (equal (zr-doc-view-test--shown) '(5 6 7)))
+    (zr-doc-view-previous-screen)
+    (should (equal (zr-doc-view-test--shown) '(4)))
+    (zr-doc-view-previous-screen)
+    (should (equal (zr-doc-view-test--shown) '(2 3)))
+    (zr-doc-view-previous-screen)
+    (should (equal (zr-doc-view-test--shown) '(1)))
+    (should-error (zr-doc-view-previous-screen) :type 'user-error)
+    (zr-doc-view-goto-page 7)
+    (should (equal (zr-doc-view-test--shown) '(7)))
+    (should-error (zr-doc-view-right) :type 'user-error)))
+
+(ert-deftest zr-doc-view-test-invalid-settings-preserve-view ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (zr-doc-view-goto-page 5)
+    (let ((shown (zr-doc-view-test--shown)))
+      (dolist (count '(0 -1 1.5 nil))
+        (should-error (zr-doc-view-set-visible-pages count) :type 'user-error))
+      (should-error (zr-doc-view-set-direction 'auto) :type 'user-error)
+      (dolist (page '(0 -1 8 2.5))
+        (should-error (zr-doc-view-goto-page page) :type 'user-error))
+      (should (= 5 (doc-view-current-page)))
+      (should (equal shown (zr-doc-view-test--shown))))
+    (zr-doc-view-mode -1)
+    (setq-local zr-doc-view-visible-pages 0)
+    (should-error (zr-doc-view-mode 1) :type 'user-error)
+    (should-not zr-doc-view-mode)
+    (should-not zr-doc-view--saved-variables))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-native-zoom-and-fit-use-the-complete-view ()
+  (zr-doc-view-test--with-document
+    (let (reported)
+      (setq-local zr-doc-view-after-display-functions
+                  (list (lambda (_window pages) (push pages reported))))
+      (zr-doc-view-mode 1)
+      (let* ((initial (image-display-size (image-get-display-property) t))
+             (images (zr-doc-view--view-images (zr-doc-view--view)))
+             (first-size (image-size (car images) t))
+             (second-size (image-size (cadr images) t)))
+        (should (= (cdr first-size) (cdr second-size)))
+        (should (= (car initial) (+ (car first-size) (car second-size) zr-doc-view-gap)))
+        (doc-view-enlarge 2)
+        (let ((zoomed (image-display-size (image-get-display-property) t)))
+          (should (= (cdr zoomed) (* 2 (cdr initial))))
+          (should (<= (abs (- (car zoomed) (* 2 (car initial)))) 2)))
+        (doc-view-scale-reset)
+        (should (equal initial (image-display-size (image-get-display-property) t)))
+        (doc-view-fit-width-to-window)
+        (should (<= (abs (- (car (image-display-size (image-get-display-property) t))
+                            (window-body-width nil t))) 4))
+        (doc-view-fit-page-to-window)
+        (should (<= (cdr (image-display-size (image-get-display-property) t))
+                    (window-body-height nil t)))
+        (should (equal reported '((1 2))))))))
+
+(ert-deftest zr-doc-view-test-windows-keep-independent-anchors-and-zoom ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (zr-doc-view-toggle-landscape)
+    (zr-doc-view-set-visible-pages 3)
+    (let* ((left (selected-window))
+           (right (split-window-right))
+           left-size right-size)
+      (with-selected-window right
+        (doc-view-goto-page 5)
+        (setq right-size (image-display-size (image-get-display-property) t)))
+      (with-selected-window left
+        (doc-view-goto-page 1)
+        (setq left-size (image-display-size (image-get-display-property) t))
+        (doc-view-enlarge 2))
+      (should (equal (zr-doc-view-test--shown left) '(1 2 3)))
+      (should (equal (zr-doc-view-test--shown right) '(5 6 7)))
+      (with-selected-window right
+        (should (equal right-size (image-display-size (image-get-display-property) t)))
+        (doc-view-enlarge 2)
+        (doc-view-scale-reset)
+        (should (equal right-size (image-display-size (image-get-display-property) t))))
+      (with-selected-window left
+        (should (<= (abs (- (* 2 (cdr left-size))
+                            (cdr (image-display-size (image-get-display-property) t)))) 1))
+        (doc-view-scale-reset)
+        (enlarge-window-horizontally 5)
+        (run-hook-with-args 'window-size-change-functions left)
+        (should-not (equal left-size (image-display-size (image-get-display-property) t)))
+        (should (= 1 (doc-view-current-page))))
+      (with-selected-window right (should (= 5 (doc-view-current-page))))
+      (should (equal doc-original (buffer-string))))))
+
+(ert-deftest zr-doc-view-test-companion-conversion-notifies-only-after-complete ()
+  (zr-doc-view-test--with-document
+    (let (changed displayed)
+      (setq-local zr-doc-view-page-change-functions
+                  (list (lambda (_window page) (push page changed)))
+                  zr-doc-view-after-display-functions
+                  (list (lambda (_window pages) (push pages displayed))))
+      (zr-doc-view-mode 1)
+      (zr-doc-view-set-visible-pages 3)
+      (setq changed nil displayed nil)
+      (delete-file (expand-file-name "page-7.svg" doc-cache))
+      (let ((doc-view--current-converter-processes '(fixture-conversion)))
+        (doc-view-goto-page 5)
+        (should (equal changed '(5)))
+        (should-not displayed)
+        (should-not (zr-doc-view-test--shown))
+        (should (equal (zr-doc-view-current-pages) '(5 6 7)))
+        (zr-doc-view-test--cache-page doc-cache 7)
+        ;; The anchor file already existed; the after-conversion adapter must
+        ;; notice its newly completed companion without a page navigation.
+        (doc-view-display (current-buffer))
+        (should (equal (zr-doc-view-test--shown) '(5 6 7)))
+        (should (equal displayed '((5 6 7))))
+        (doc-view-display (current-buffer))
+        (zr-doc-view-toggle-direction)
+        (should (equal displayed '((5 6 7))))))))
+
+(ert-deftest zr-doc-view-test-screen-navigation-waits-for-page-boundaries ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (zr-doc-view-set-visible-pages 3)
+    (delete-file (expand-file-name "page-4.svg" doc-cache))
+    (delete-file (expand-file-name "resolution.el" doc-cache))
+    (let ((doc-view--current-converter-processes '(fixture-conversion)))
+      (should-not (zr-doc-view-page-count))
+      (zr-doc-view-goto-page 2)
+      (should-error (zr-doc-view-next-screen) :type 'user-error)
+      (should (= (doc-view-current-page) 2))
+      (zr-doc-view-goto-page 5)
+      (should-error (zr-doc-view-previous-screen) :type 'user-error)
+      (should (= (doc-view-current-page) 5))
+      (zr-doc-view-test--cache-page doc-cache 4)
+      (zr-doc-view-previous-screen)
+      (should (equal (zr-doc-view-test--shown) '(4)))
+      (zr-doc-view-previous-screen)
+      (should (= (doc-view-current-page) 1))
+      (zr-doc-view-next-screen)
+      (should (equal (zr-doc-view-test--shown) '(4)))
+      (zr-doc-view-goto-page 7)
+      (should-error (zr-doc-view-next-screen) :type 'user-error)
+      (should (= (doc-view-current-page) 7)))
+    (with-temp-file (expand-file-name "resolution.el" doc-cache) (insert "100"))
+    (doc-view-display (current-buffer) t)
+    (should (= (zr-doc-view-page-count) 7))
+    (should (equal (zr-doc-view-test--shown) '(7)))))
+
+(ert-deftest zr-doc-view-test-open-reports-only-the-requested-start ()
+  (zr-doc-view-test--with-document
+    (let ((document (current-buffer)) changed displayed)
+      (setq-local zr-doc-view-page-change-functions
+                  (list (lambda (_window page) (push page changed)))
+                  zr-doc-view-after-display-functions
+                  (list (lambda (_window pages) (push pages displayed))))
+      (should (eq (zr-doc-view-open doc-file 5) document))
+      (should (equal changed '(5)))
+      (should (equal displayed '((5 6))))
+      (zr-doc-view-goto-page 1)
+      (switch-to-buffer (other-buffer document t))
+      (run-hooks 'window-configuration-change-hook)
+      (setq changed nil displayed nil)
+      (should (eq (zr-doc-view-open doc-file 5) document))
+      (should (equal changed '(5)))
+      (should (equal displayed '((5 6)))))))
+
+(ert-deftest zr-doc-view-test-decoder-failure-can-recover-without-read-event ()
+  (zr-doc-view-test--with-document
+    (let (displayed)
+      (zr-doc-view-mode 1)
+      (setq-local zr-doc-view-after-display-functions
+                  (list (lambda (_window pages) (push pages displayed))))
+      (with-temp-file (expand-file-name "page-3.svg" doc-cache) (insert "invalid image"))
+      (zr-doc-view-set-visible-pages 3)
+      (should-not displayed)
+      (should-not (zr-doc-view-test--shown))
+      (zr-doc-view-test--cache-page doc-cache 3)
+      (doc-view-display (current-buffer))
+      (should (equal displayed '((1 2 3))))
+      (should (equal (zr-doc-view-test--shown) '(1 2 3))))))
+
+(ert-deftest zr-doc-view-test-page-change-consumer-can-navigate-again ()
+  (zr-doc-view-test--with-document
+    (let (displayed)
+      (zr-doc-view-mode 1)
+      (setq-local zr-doc-view-page-change-functions
+                  (list (lambda (_window page) (when (= page 2) (doc-view-goto-page 5))))
+                  zr-doc-view-after-display-functions
+                  (list (lambda (_window pages) (push pages displayed))))
+      (doc-view-goto-page 2)
+      (should (= 5 (doc-view-current-page)))
+      (should (equal (zr-doc-view-test--shown) '(5 6)))
+      (should (equal displayed '((5 6)))))))
+
+(ert-deftest zr-doc-view-test-native-slice-restores-the-multiple-page-view ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (let ((left (selected-window)) (right (split-window-right)))
+      (zr-doc-view--refresh)
+      (let ((width (car (image-size (doc-view-current-image) t))))
+        (doc-view-set-slice 0 0 100 150)
+        (should (equal (zr-doc-view-current-pages) '(1)))
+        (should (eq 'slice (caar (overlay-get (doc-view-current-overlay) 'display))))
+        (should (= (car (image-size (doc-view-current-image) t)) width))
+        (with-selected-window right (doc-view-enlarge 2))
+        (zr-doc-view--refresh)
+        (with-selected-window left
+          (should (= (car (image-size (doc-view-current-image) t)) width))
+          (doc-view-enlarge 2)
+          (should (= (car (image-size (doc-view-current-image) t)) (* 2 width)))
+          (doc-view-reset-slice)
+          (should (equal (zr-doc-view-test--shown) '(1 2))))))
+    (should (equal doc-original (buffer-string)))))
+
+(ert-deftest zr-doc-view-test-disabled-and-hidden-buffers-release-views ()
+  (zr-doc-view-test--with-document
+    (let ((buffer (current-buffer))
+          (original-map doc-view-mode-map)
+          (original-settings
+           (mapcar (lambda (variable) (list variable (local-variable-p variable) (symbol-value variable)))
+                   '(doc-view-scale-internally doc-view-image-width truncate-lines mode-line-position))))
+      (zr-doc-view-mode 1)
+      (zr-doc-view-mode 1)
+      (let ((view (zr-doc-view--view)))
+        (switch-to-buffer (get-buffer-create " *zr-doc-view-hidden-test*"))
+        (unwind-protect
+            (progn
+              (run-hooks 'window-configuration-change-hook)
+              (should-not (zr-doc-view--view-images view))
+              (with-current-buffer buffer
+                (should (equal (zr-doc-view-current-pages) '(1 2)))
+                (should (stringp (zr-doc-view--mode-line))))
+              (switch-to-buffer buffer)
+              (run-hooks 'window-configuration-change-hook)
+              (should (equal (zr-doc-view-test--shown) '(1 2))))
+          (kill-buffer " *zr-doc-view-hidden-test*")))
+      (zr-doc-view-mode -1)
+      (zr-doc-view-mode -1)
+      (should (eq original-map doc-view-mode-map))
+      (dolist (entry original-settings)
+        (should (eq (nth 1 entry) (local-variable-p (car entry))))
+        (should (equal (nth 2 entry) (symbol-value (car entry)))))
+      (should (eq 'image (car (overlay-get (doc-view-current-overlay) 'display))))
+      (should-not (eq (key-binding (kbd "SPC")) #'zr-doc-view-next-screen))
+      (should (equal doc-original (buffer-string)))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-disabling-a-hidden-view-restores-its-native-page ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (zr-doc-view-goto-page 5)
+    (let ((document (current-buffer)))
+      (switch-to-buffer (other-buffer document t))
+      (run-hooks 'window-configuration-change-hook)
+      (with-current-buffer document (zr-doc-view-mode -1))
+      (switch-to-buffer document)
+      (run-hook-with-args 'window-buffer-change-functions (selected-window))
+      (should (= (doc-view-current-page) 5))
+      (should (eq 'image (car (overlay-get (doc-view-current-overlay) 'display))))
+      (should-not (local-variable-p 'window-buffer-change-functions))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-indirect-clone-remains-enabled-after-parent-stops ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (let ((parent (current-buffer))
+          (clone (clone-indirect-buffer " *zr-doc-view-clone-test*" nil)))
+      (unwind-protect
+          (progn
+            (should (memq clone zr-doc-view--buffers))
+            (zr-doc-view-mode -1)
+            (switch-to-buffer clone)
+            (run-hooks 'window-configuration-change-hook)
+            (should zr-doc-view-mode)
+            (should (equal (zr-doc-view-test--shown) '(1 2)))
+            (doc-view-goto-page 5)
+            (should (equal (zr-doc-view-test--shown) '(5 6)))
+            (zr-doc-view-mode -1))
+        (switch-to-buffer parent)
+        (kill-buffer clone))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-changing-major-mode-removes-the-adapters ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (fundamental-mode)
+    (should-not zr-doc-view-mode)
+    (should-not zr-doc-view--saved-variables)
+    (should-not (overlays-at (point-min))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-disabled-clone-keeps-native-display ()
+  (zr-doc-view-test--with-document
+    (zr-doc-view-mode 1)
+    (let ((parent (current-buffer))
+          (window (selected-window))
+          (clone (clone-indirect-buffer " *zr-doc-view-native-test*" nil)))
+      (unwind-protect
+          (progn
+            (switch-to-buffer clone)
+            (zr-doc-view-mode -1)
+            (should (advice-member-p #'zr-doc-view--insert-image 'doc-view-insert-image))
+            (doc-view-goto-page 5)
+            (should (eq 'image (car (overlay-get (doc-view-current-overlay) 'display))))
+            (should-not (zr-doc-view-current-pages))
+            (switch-to-buffer parent)
+            (run-hooks 'window-configuration-change-hook)
+            (should (equal (zr-doc-view-test--shown) '(1 2)))
+            (should (eq (overlay-buffer (doc-view-current-overlay)) parent))
+            (with-current-buffer clone
+              (should (equal (zr-doc-view-current-pages window) '(1 2)))))
+        (switch-to-buffer parent)
+        (kill-buffer clone))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-real-mupdf-conversion-and-cached-reopen ()
+  (skip-unless (executable-find "mutool"))
+  (save-window-excursion
+    (zr-doc-view-test--with-images
+      (zr-test-with-temp-directory
+        (let ((doc-view-cache-directory (expand-file-name "cache/"))
+              (doc-view-pdfdraw-program "mutool")
+              (doc-view-pdf->png-converter-function #'doc-view-pdf->png-converter-mupdf)
+              (doc-view-mupdf-use-svg nil)
+              (doc-view-conversion-refresh-interval 0.02)
+              (zr-doc-view-visible-pages 2)
+              (zr-doc-view-landscape-single t)
+              (file (expand-file-name "book.pdf")))
+          (zr-doc-view-test--write-pdf file)
+          (let ((buffer (zr-doc-view-open file 5))
+                (deadline (+ (float-time) 10)))
+            (while (and (or doc-view--current-converter-processes
+                            (not (equal (zr-doc-view-test--shown) '(5 6))))
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.02))
+            (should-not doc-view--current-converter-processes)
+            (should (equal (zr-doc-view-test--shown) '(5 6)))
+            (should (= 7 (doc-view-last-page-number)))
+            (should (= 7 (length (directory-files (doc-view--current-cache-dir) nil "page-[0-9]+\\.png\\'"))))
+            (zr-doc-view-goto-page 4)
+            (should (equal (zr-doc-view-test--shown) '(4)))
+            (let* ((image (doc-view-current-image))
+                   (size (zr-doc-view-test--image-size (list 'image :type 'png :file (plist-get (cdr image) :file)) t)))
+              (should (> (car size) (cdr size))))
+            (let ((undo-outer-limit 24000000))
+              (revert-buffer t t))
+            (should zr-doc-view-mode)
+            (setq deadline (+ (float-time) 10))
+            (while (and (or doc-view--current-converter-processes
+                            (not (equal (zr-doc-view-test--shown) '(4))))
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.02))
+            (should-not doc-view--current-converter-processes)
+            (should (= 4 (doc-view-current-page)))
+            (should (equal (zr-doc-view-test--shown) '(4)))
+            (set-buffer-modified-p nil)
+            (kill-buffer buffer)
+            (cl-letf (((symbol-function 'doc-view-start-process)
+                       (lambda (&rest _) (ert-fail "Cached reopen started a converter"))))
+              (setq buffer (zr-doc-view-open file 2))
+              (should (equal (zr-doc-view-test--shown) '(2 3))))
+            (kill-buffer buffer))))))
+  (zr-doc-view-test--assert-removed))
+
+(ert-deftest zr-doc-view-test-mupdf-cbz-uses-the-same-pagination ()
+  (skip-unless (and (executable-find "mutool") (executable-find "python3")))
+  (save-window-excursion
+    (zr-doc-view-test--with-images
+      (zr-test-with-temp-directory
+        (let ((doc-view-cache-directory (expand-file-name "cache/"))
+              (doc-view-pdfdraw-program "mutool")
+              (doc-view-mupdf-use-svg nil)
+              (doc-view-conversion-refresh-interval 0.02)
+              (zr-doc-view-visible-pages 2)
+              (zr-doc-view-landscape-single nil)
+              (pdf (expand-file-name "fixture.pdf"))
+              (cbz (expand-file-name "book.cbz")))
+          (zr-doc-view-test--write-pdf pdf)
+          (should (zerop (call-process "mutool" nil nil nil "draw" "-q" "-F" "png" "-r" "32"
+                                       "-o" (expand-file-name "page-%d.png") pdf)))
+          (should (zerop (apply #'call-process "python3" nil nil nil "-m" "zipfile" "-c" cbz
+                                (directory-files default-directory nil "^page-"))))
+          (zr-doc-view-open cbz 3)
+          (let ((deadline (+ (float-time) 10)))
+            (while (and doc-view--current-converter-processes (< (float-time) deadline))
+              (accept-process-output nil 0.02)))
+          (should (eq doc-view-doc-type 'cbz))
+          (should (= (zr-doc-view-page-count) 7))
+          (should (equal (zr-doc-view-test--shown) '(3 4)))
+          (zr-doc-view-next-screen)
+          (should (equal (zr-doc-view-test--shown) '(5 6)))
+          (zr-doc-view-previous-screen)
+          (should (equal (zr-doc-view-test--shown) '(3 4)))))))
+  (zr-doc-view-test--assert-removed))
+
+(provide 'zr-doc-view-test)
+;;; zr-doc-view-test.el ends here

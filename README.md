@@ -7,7 +7,7 @@
 
 | 代码目录 | 内容 | 测试目录 |
 | --- | --- | --- |
-| 仓库根目录 | 编辑、词典、进程、网络、媒体和平台工具 | `test/` |
+| 仓库根目录 | 编辑、文档阅读、词典、进程、网络、媒体和平台工具 | `test/` |
 | [`org/`](org/README.md) | Org 编辑、Babel、Tangle、导出、链接、协议和 Org-srs | `org/test/` |
 | [`erc/`](erc/README.md) | ERC 消息显示、补全、链接、回复和文件上传 | `erc/test/` |
 | [`gnus/`](gnus/README.md) | Gnus 后端和本地 EPUB 阅读 | `gnus/test/` |
@@ -44,6 +44,49 @@ Follow 连续显示。栏数按实际可显示的字符数计算，包含边缘�
 
 `zr-window-arrange-follow-columns` 提供同样的布局操作，返回分栏窗口列表，
 供其他模块复用；Follow 状态由调用方管理。
+
+`zr-doc-view` 在 DocView 窗口中并排显示连续页，复用 DocView 的转换器、
+PNG/SVG 缓存、文字搜索和书签。通过 `M-x zr-doc-view-open` 打开文档，
+或在已有 DocView buffer 中执行 `M-x zr-doc-view-mode`：
+
+```elisp
+(use-package zr-doc-view
+  :commands (zr-doc-view-open zr-doc-view-mode)
+  :custom
+  (zr-doc-view-visible-pages 2)
+  (zr-doc-view-cover-single nil)
+  (zr-doc-view-landscape-single t))
+```
+
+默认显示最多两页，各页按窗口宽高等比适配，具有相同显示高度。当前原始页码
+是显示起点：N=3 时，`[2,3,4]` 按前进方向键变为 `[3,4,5]`，按
+`SPC` 变为 `[5,6,7]`。右向左布局反转页面摆放和左右方向键，`SPC/DEL`
+始终按文件原始顺序翻屏。封面或横页独占时截断显示范围，末尾显示剩余页面。
+转换过程中，若仍无法确定翻屏目标，翻屏命令会提示等待页图就绪。方向键仍可逐页移动。
+
+| 按键 | 操作 |
+| --- | --- |
+| `←/→` | 按阅读方向移动一个原始页 |
+| `SPC/DEL`、`PageDown/PageUp` | 前后移动一个显示范围 |
+| `1/2/v` | 单页、双页或指定最大页数 |
+| `d` | 切换左右阅读方向 |
+| `C/L` | 切换封面、横页独占 |
+| `g` | 用 DocView 重新转换文档 |
+
+`+/−/0`、`W/H/P` 继续使用 DocView 的缩放和窗口适配命令。
+切换页数、阅读方向和窗口尺寸保留当前原始页码；同一 buffer 的布局选项共享，
+每个窗口的页码和缩放独立。DocView 裁剪临时使用单页显示，清除裁剪后恢复多页。
+转换沿用 DocView 默认流程，会继续转换全书。图形 Emacs 和转换器依赖也沿用
+DocView 的配置；加载新包不会自动启用模式，关闭模式恢复原生显示及 buffer 设置。
+
+其他阅读入口可调用 `(zr-doc-view-open file page)` 获取文档 buffer，
+用 `zr-doc-view-goto-page` 定位，或用 `zr-doc-view-current-pages` 获取窗口
+请求的原始页码范围。`zr-doc-view-page-count` 返回当前文档转换完成后的总页数，
+转换未完成时返回 `nil`。启用模式前可设置两个 buffer-local hook：
+`zr-doc-view-page-change-functions` 接收 `(window page)`，
+`zr-doc-view-after-display-functions` 接收 `(window pages)`。后者只在完整显示
+成功后触发，页码始终按文件顺序排列；加载失败及缩放、方向切换等重绘不会重复
+报告。这些接口可供 nnopds 等入口同步页文章和已读标记。
 
 HTTP 客户端请求统一使用 `zr-http`，需要本机安装 curl。全局默认、包级
 `*-http-options`、单次请求参数按顺序覆盖，显式 nil 也会覆盖默认值：
