@@ -88,27 +88,51 @@ DocView 的配置；加载新包不会自动启用模式，关闭模式恢复原
 成功后触发，页码始终按文件顺序排列；加载失败及缩放、方向切换等重绘不会重复
 报告。这些接口可供 nnopds 等入口同步页文章和已读标记。
 
-`zr-shadowfile` 修正内置 shadowfile 对 Windows 盘符、cluster 和 regexp
-文件组的路径处理，通过 TRAMP 维护跨机器的文件副本：
+`zr-shadowfile` 根据独立规则维护文件副本。目录规则保留相对路径，文件规则
+固定映射一个文件，允许目标文件名不同。路径使用标准 Emacs 文件名，支持
+Windows 盘符、UNC 路径以及 TRAMP 远程路径。例如将 Windows 的 `~/org/`
+复制到 Koofr，忽略各层级的 `.git`：
 
 ```elisp
-(use-package zr-shadowfile
-  :config (zr-shadowfile-mode 1))
+(require 'zr-tramp-webdav)
+(require 'zr-shadowfile)
+(setq zr-shadowfile-rules
+      '((:source "~/org/"
+         :destination "/webdavs:xxxx@app.koofr.net:/dav/Koofr/org/"
+         :exclude "\\(?:\\`\\|/\\)\\.git\\(?:/\\|\\'\\)")))
+(zr-shadowfile-mode 1)
 ```
 
-用此模式代替 `shadow-initialize`，继续使用 `shadow-define-literal-group`、
-`shadow-define-regexp-group`、`shadow-define-cluster` 和 `shadow-cancel`。
-定义 literal 文件组时，逐个输入站点及该站点的文件路径，例如本机的
-`C:/Users/user/notes.txt` 与远端的 `/home/user/notes.txt`；`~/` 在所选站点
-展开。Regexp 文件组要求各站点的文件名相同，Windows 与 Linux 的不同路径
-应使用 literal 文件组。
+单文件规则使用 `:type file`，源和目标都填写完整文件名，可与目录规则混用：
 
-保存文件后记录待复制队列，执行 `C-x 4 s` 或 `shadow-copy-files` 更新副本。
-默认退出 Emacs 时也询问复制；将 `zr-shadowfile-copy-on-exit` 设为 nil 可关闭
-退出复制。确认行为沿用 `shadow-noquery`，配置和队列分别保存在
-`shadow-info-file`、`shadow-todo-file`。复制失败保留队列，供下次重试。
-TRAMP 连接须能独立访问目标，目标目录须已存在；副本更新会覆盖目标文件，
-不合并两端的并行修改。加载库不会自动启用，关闭模式撤销替换、hook 和快捷键。
+```elisp
+(add-to-list 'zr-shadowfile-rules
+             '(:type file
+               :source "~/notes.org"
+               :destination "/webdavs:xxxx@app.koofr.net:/dav/Koofr/notes-backup.org"))
+```
+
+首次执行 `M-x zr-shadowfile-queue-directory RET ~/org/ RET`，再用
+`C-x 4 s` 或 `zr-shadowfile-copy-files` 复制；`C-u C-x 4 s` 执行所有待复制项，
+不再询问。随后在 Emacs 中保存目录内的文件会自动入队。规则可选的 `:include`
+匹配文件相对路径，例如 `"\\.org\\'"`；`:exclude` 匹配相对路径及其父目录，
+因此排除目录后，该规则也会排除其后代文件；其他规则仍可选取其中的文件。
+文件规则的过滤匹配源文件名。多个规则可映射到不同目标，各自应用过滤条件。
+
+只选一个文件时，用 `M-x zr-shadowfile-queue-file` 按规则入队；加前缀参数
+`C-u` 可指定一次性目标文件名，无需配置规则。随后用 `C-x 4 s` 执行复制。
+保存已配置的源文件也会自动入队，文件规则和目录规则共享去重、持久化与重试。
+
+复制会创建目标父目录，并保留磁盘上已保存的字节；失败或跳过的任务自动保存
+到本机的 `zr-shadowfile-pending-file`，下次启用模式时恢复。规则修改只影响
+新任务，已入队任务保留原来的源和目标；用 `zr-shadowfile-cancel` 选择取消，
+加前缀参数可取消全部任务。规则放在个人配置或通过 Custom 保存。
+
+默认复制前询问，`zr-shadowfile-noquery` 可关闭询问；默认退出 Emacs 时也
+询问复制，`zr-shadowfile-copy-on-exit` 设为 nil 可关闭退出复制。加载库不自动
+启用，关闭模式撤销 hook 和快捷键。扫描跳过符号链接，源文件删除不会删除
+目标副本，复制覆盖目标文件。Koofr 用户名和 WebDAV 凭据由个人配置及
+`auth-source` 提供，TRAMP 连接须能独立访问目标。
 
 HTTP 客户端请求统一使用 `zr-http`，需要本机安装 curl。全局默认、包级
 `*-http-options`、单次请求参数按顺序覆盖，显式 nil 也会覆盖默认值：
