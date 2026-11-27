@@ -21,8 +21,8 @@
                      (if (eq kind 'komga)
                          '((nnopds-headers (("X-API-Key" . "test-key"))))
                        '((nnopds-user "reader") (nnopds-password "test-password") (nnopds-auth-method digest)))))
-            (nnopds-paged-visible-pages 1) (nnopds-paged-cover-single t)
-            (nnopds-paged-landscape-single t) (nnopds-paged-direction 'auto)
+            (zr-doc-view-visible-pages 1) (zr-doc-view-cover-single t)
+            (zr-doc-view-landscape-single t) (zr-doc-view-direction 'auto)
             (nnopds-paged-max-requests 2) (nnopds-paged-prefetch-pages 0))
        (nnopds-test--write opds-root "comic-catalog.txt" (symbol-name kind))
        (when (eq kind 'calibre) (nnopds-test--write opds-root "digest-auth.txt" "enabled"))
@@ -37,7 +37,8 @@
   (let* ((group (car (nnopds--connection-catalog connection)))
          (publication (gethash group (nnopds--connection-publications connection))))
     (should (nnopds-request-group group "library"))
-    (should (eq (nnopds--publication-format publication) 'comic))
+    (should (eq (nnopds--publication-format publication) 'cbz))
+    (should (eq (nnopds--publication-data-source publication) 'stream))
     (nnopds--publication-data publication)))
 
 (ert-deftest nnopds-comic-test-both-manifests-are-lazy-and-preferred ()
@@ -114,7 +115,7 @@
     (should-error (nnopds-paged--screen-target book 5 1) :type 'user-error)))
 
 (ert-deftest nnopds-comic-test-fit-keeps-aspect-and-common-height ()
-  (let ((pages '((:width 20 :height 30) (:width 30 :height 40))) (nnopds-paged-gap 12))
+  (let ((pages '((:width 20 :height 30) (:width 30 :height 40))) (zr-doc-view-gap 12))
     (should (equal (nnopds-paged--sizes pages '(500 . 300)) '((200 . 300) (225 . 300))))
     (should (equal (nnopds-paged--sizes pages '(210 . 300)) '((92 . 139) (104 . 139))))
     (should (equal (nnopds-paged--sizes '((:width 40 :height 20)) '(600 . 200)) '((400 . 200))))))
@@ -374,7 +375,7 @@
 (ert-deftest nnopds-comic-test-calibre-resume-keeps-sliding-window ()
   (nnopds-comic-test--with-server 'calibre
     (nnopds-test--write opds-root "comic-landscape.txt" "enabled")
-    (let ((nnopds-paged-visible-pages 2) (nnopds-paged-prefetch-pages 4))
+    (let ((zr-doc-view-visible-pages 2) (nnopds-paged-prefetch-pages 4))
       (nnopds-paged-test--with-images
         (nnopds-test--with-browser
           (nnopds-test--at-book)
@@ -411,6 +412,7 @@
       (with-current-buffer gnus-browse-buffer
         (nnopds-test--at-book)
         (forward-line 1)
+        (nnopds-browse-download)
         (nnopds-browse-read))
       (with-current-buffer gnus-summary-buffer
         (should-not nnopds-paged-mode)
@@ -419,6 +421,100 @@
           (should-not nnopds-paged-mode)
           (should (string-match-p "中文内容 α" (buffer-string))))
         (gnus-summary-exit)))))
+
+(ert-deftest nnopds-comic-test-calibre-downloads-cbz-for-offline-reading ()
+  (dolist (manifest '(t nil))
+    (nnopds-comic-test--with-server 'calibre
+      (skip-unless (executable-find "mutool"))
+      (unless manifest (nnopds-test--write opds-root "cbz-only.txt" "enabled"))
+      (nnopds-test--with-browser
+        (nnopds-test--at-book)
+        (let* ((connection (nnopds--change-server "library"))
+               (publication (nnopds-browse--publication connection)))
+          (should (eq (nnopds--publication-format publication) 'cbz))
+          (should (eq (not (null (nnopds--publication-stream publication))) manifest))
+          (unless manifest (should-error (nnopds-browse-read) :type 'user-error))
+          (let ((file (call-interactively (key-binding (kbd "D"))))
+                (paths (mapcar (lambda (request) (plist-get request :path))
+                               (nnopds-test--requests opds-root))))
+            (should (equal (delete-dups paths) '("/calibre/opds" "/calibre/get/cbz/2/main")))
+            (should (string-suffix-p ".cbz" file))
+            (should (equal (nnopds--read-bytes file)
+                           (nnopds--read-bytes (expand-file-name "comic.cbz" opds-root))))
+            (nnopds-test--write opds-root "requests.jsonl" "")
+            (nnopds-close-server "library")
+            (should (nnopds-browse (car gnus-secondary-select-methods)))
+            (nnopds-test--at-book)
+            (should (equal file (nnopds-browse-download)))
+            (nnopds-paged-test--with-images
+              (call-interactively (key-binding (kbd "SPC")))
+              (with-current-buffer gnus-summary-buffer
+                (let ((book (nnopds-paged--reader-book nnopds-paged--reader)))
+                  (should (eq (nnopds-paged--book-source book) 'mupdf))
+                  (nnopds-paged-test--settled nnopds-paged--reader 1))
+                (with-current-buffer gnus-article-buffer
+                  (should (derived-mode-p 'gnus-article-mode))
+                  (should nnopds-paged-mode))
+                (gnus-summary-exit)))
+            (unless manifest
+              (with-current-buffer gnus-browse-buffer
+                (nnopds-test--at-book)
+                (call-interactively (key-binding (kbd "RET"))))
+              (with-current-buffer gnus-summary-buffer
+                (should (equal (mapcar #'mail-header-number gnus-newsgroup-headers) '(1 2 3 4 5 6 7)))
+                (should-not gnus-current-article)
+                (gnus-summary-exit)))
+            (should-not (nnopds-test--requests opds-root))))))))
+
+(ert-deftest nnopds-comic-test-stream-and-download-share-reading-state ()
+  (nnopds-comic-test--with-server 'calibre
+    (skip-unless (executable-find "mutool"))
+    (nnopds-test--with-browser
+      (nnopds-test--at-book)
+      (nnopds-browse-subscribe)
+      (nnopds-paged-test--with-images
+          (nnopds-browse-read)
+          (with-current-buffer gnus-summary-buffer
+            (should (eq (nnopds-paged--book-source (nnopds-paged--reader-book nnopds-paged--reader)) 'comic))
+            (nnopds-paged-test--settled nnopds-paged--reader 1)
+            (nnopds-paged-double-page)
+            (nnopds-paged-toggle-cover)
+            (nnopds-paged-goto-page 3)
+            (nnopds-paged-test--settled nnopds-paged--reader 3)
+            (gnus-summary-exit))
+          (with-current-buffer gnus-browse-buffer
+            (nnopds-test--at-book)
+            (nnopds-browse-download)
+            (nnopds-test--write opds-root "requests.jsonl" "")
+            (nnopds-browse-read))
+          (with-current-buffer gnus-summary-buffer
+            (let ((book (nnopds-paged--reader-book nnopds-paged--reader)))
+              (should (eq (nnopds-paged--book-source book) 'mupdf))
+              (nnopds-paged-test--settled nnopds-paged--reader 3)
+              (should (eq (nnopds-paged--direction book) 'rtl))
+              (should (= (nnopds-paged--book-visible-pages book) 2))
+              (should-not (nnopds-paged--book-cover book))
+              (should (equal (nnopds-paged-test--shown) '(4 3)))
+              (with-current-buffer gnus-article-buffer
+                (should (derived-mode-p 'gnus-article-mode))
+                (call-interactively (key-binding (kbd "n")))
+                (call-interactively (key-binding (kbd "r")))
+                (call-interactively (key-binding (kbd "l")))
+                (call-interactively (key-binding (kbd "1"))))
+              (nnopds-paged-test--settled nnopds-paged--reader 5))
+            (gnus-summary-exit))
+          (with-current-buffer gnus-browse-buffer
+            (nnopds-test--at-book)
+            (nnopds-browse-select))
+          (with-current-buffer gnus-summary-buffer
+            (let ((book (nnopds-paged--reader-book nnopds-paged--reader)))
+              (should (= (gnus-summary-article-number) 5))
+              (should (eq (nnopds-paged--book-direction book) 'ltr))
+              (should-not (nnopds-paged--book-landscape book))
+              (should (= (nnopds-paged--book-visible-pages book) 1))
+              (should (= (length (nnopds-paged--book-pages book)) 7)))
+            (gnus-summary-exit))
+          (should-not (nnopds-test--requests opds-root))))))
 
 (provide 'nnopds-comic-test)
 ;;; nnopds-comic-test.el ends here

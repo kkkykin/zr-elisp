@@ -106,7 +106,7 @@ A synchronization failure leaves the publication readable locally."
 (defun nnopds-progress--location (state progression)
   "Locate PROGRESSION in STATE's current reading data."
   (let ((publication (nnopds-progress--state-publication state)))
-    (nnopds--locate (nnopds--publication-format publication)
+    (nnopds--locate (nnopds--publication-reader publication)
                     (nnopds--publication-data publication) (plist-get progression :locator))))
 
 (defun nnopds-progress--sync-read-marks (state progression)
@@ -172,7 +172,7 @@ Return the saved chapter number, preserving deliberate Gnus marks."
         (if (eq article (nnopds-progress--state-suppress state))
             nil
           (setf (nnopds-progress--state-suppress state) nil)
-          (when-let* ((locator (nnopds--locator (nnopds--publication-format publication)
+          (when-let* ((locator (nnopds--locator (nnopds--publication-reader publication)
                                                (nnopds--publication-data publication)
                                                (nnopds--chapter publication article))))
             (let ((endpoint (nnopds--publication-progress publication)))

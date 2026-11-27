@@ -131,8 +131,11 @@ def search_links(kind="generic", full_text=False):
 def comic_publication(kind):
     manifest = ("/komga/opds/v2/books/comic/manifest" if kind == "komga"
                 else "/calibre/comic-manifest/2?library_id=main")
-    links = [{"rel": "http://opds-spec.org/acquisition", "href": "/comic.cbz",
-              "type": "application/vnd.comicbook+zip"}]
+    links = [{"rel": "http://opds-spec.org/acquisition",
+              "href": "/calibre/get/cbz/2/main" if kind == "calibre" else "/comic.cbz",
+              "type": "application/x-cbz" if kind == "calibre" else "application/vnd.comicbook+zip"}]
+    if (root / "cbz-only.txt").exists():
+        return {"metadata": {"title": "测试 CBZ"}, "links": links}
     if kind == "calibre":
         # A streamable comic must win even if an EPUB link precedes it.
         links.insert(0, {"rel": "http://opds-spec.org/acquisition", "href": "/content/one.epub",
@@ -152,6 +155,11 @@ def comic_image(number):
     pixels = b"".join(b"\0" + bytes((number * 30, 80, 120)) * width for _ in range(height))
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(pixels)) + chunk(b"IEND", b""))
+
+
+with zipfile.ZipFile(root / "comic.cbz", "w") as archive:
+    for number in range(1, 8):
+        archive.writestr(f"page-{number:02d}.png", comic_image(number))
 
 
 def comic_manifest(kind):
@@ -248,7 +256,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         media_type = root / "download-media-type.txt"
         content_type = (media_type.read_text().strip() if media_type.exists()
-                        else "application/pdf" if file.suffix == ".pdf" else "application/epub+zip")
+                        else {".pdf": "application/pdf", ".cbz": "application/x-cbz"}.get(
+                            file.suffix, "application/epub+zip"))
         accepted = {value.split(";", 1)[0].strip() for value in self.headers.get("Accept", "*/*").split(",")}
         if content_type not in accepted and "*/*" not in accepted:
             self.respond(406, headers={"Accept": content_type})
@@ -487,6 +496,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(200, comic_image(number), "image/png")
         elif path.startswith("/content/"):
             self.download(root / path.rsplit("/", 1)[-1])
+        elif path in ("/calibre/get/cbz/2/main", "/comic.cbz"):
+            self.download(root / "comic.cbz")
         elif path == "/calibre/get/epub/1/main":
             if (root / "kosync-enabled.txt").exists():
                 (root / "kosync-registered.txt").write_text(partial_md5(root / "one.epub"))

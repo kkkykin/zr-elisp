@@ -6,7 +6,7 @@
 ;;; Commentary:
 
 ;; Navigation, search and pagination load one OPDS page at a time.  Publications
-;; use Gnus groups for subscriptions, reading and local article marks.
+;; use Gnus groups for subscriptions and can be streamed or read from a file.
 
 ;;; Code:
 
@@ -25,6 +25,7 @@
   "RET" #'nnopds-browse-select
   "=" #'nnopds-browse-select
   "SPC" #'nnopds-browse-read
+  "D" #'nnopds-browse-download
   "u" #'nnopds-browse-subscribe
   "g" #'nnopds-browse-refresh
   "s" #'nnopds-browse-search
@@ -38,8 +39,9 @@
 (easy-menu-define nnopds-browse-menu nnopds-browse-mode-map
   "OPDS browsing commands."
   '("Browse"
-    ["Enter" nnopds-browse-select t]
+    ["Enter directory or open summary" nnopds-browse-select t]
     ["Read book" nnopds-browse-read t]
+    ["Download book" nnopds-browse-download t]
     ["Toggle subscription" nnopds-browse-subscribe t]
     ["Search" nnopds-browse-search t]
     ["Back" nnopds-browse-up nnopds-browse--history]
@@ -49,8 +51,10 @@
 (define-derived-mode nnopds-browse-mode gnus-browse-mode "OPDS"
   "Browse OPDS directories while retaining Gnus book subscriptions.
 \\<nnopds-browse-mode-map>
-\\[nnopds-browse-select] enters a directory or selects a book.
-\\[nnopds-browse-read] reads a book, \\[nnopds-browse-subscribe] toggles its subscription.
+\\[nnopds-browse-select] enters a directory or opens the Gnus summary.
+\\[nnopds-browse-read] reads a downloaded book or streams a comic.
+\\[nnopds-browse-download] downloads the complete book.
+\\[nnopds-browse-subscribe] toggles the book's subscription.
 \\[nnopds-browse-search] searches the server's catalog.
 \\[nnopds-browse-up] goes back and \\[nnopds-browse-refresh] refreshes this page."
   (setq-local gnus-browse-current-method gnus-browse-current-method
@@ -88,6 +92,7 @@
 (defun nnopds-browse--render (page)
   "Display PAGE's embedded groups, navigation and publications."
   (let ((inhibit-read-only t)
+        (connection (nnopds--change-server (cadr nnopds-browse--method)))
         (base (plist-get page :url))
         (entries (plist-get page :entries))
         (feed (plist-get page :feed)))
@@ -95,7 +100,8 @@
     (insert (propertize (concat "OPDS — " (nnopds-browse--title page) "\n") 'face 'bold))
     (when nnopds-browse--history
       (insert (mapconcat #'cadr (reverse nnopds-browse--history) " / ") " / " (nnopds-browse--title page) "\n"))
-    (insert "RET enter   SPC read   u subscribe   s search   b back   g refresh   q quit\n\n")
+    (insert "RET enter/summary   SPC read   D download   u subscribe\n"
+            "s search   b back   g refresh   q quit\n\n")
     (cl-labels
         ((collection (document root)
            (unless root
@@ -103,7 +109,8 @@
                                  'face 'bold)))
            (seq-doseq (link (plist-get document :navigation)) (nnopds-browse--link link base))
            (seq-doseq (publication (plist-get document :publications))
-             (when-let* ((entry (gethash publication entries))) (nnopds-browse--book entry)))
+             (when-let* ((entry (gethash publication entries)))
+               (nnopds-browse--book (nnopds--preferred-publication connection entry))))
            (unless root
              (seq-doseq (link (plist-get document :links))
                (when (nnopds--rel-p link "self") (nnopds-browse--link link base "More…"))))
@@ -223,32 +230,74 @@ Update the browser only after the requested page has loaded successfully."
       (switch-to-buffer gnus-browse-buffer)
       t)))
 
-(defun nnopds-browse--activate (read)
-  "Enter the selected directory or book, displaying an article with READ."
-  (if-let* ((url (get-text-property (line-beginning-position) 'nnopds-browse-link)))
-      (nnopds-browse--show url (cons (list nnopds-browse--url (nnopds-browse--title nnopds-browse--page) (point))
-                                     nnopds-browse--history))
-    (unless (get-text-property (line-beginning-position) 'nnopds-browse-book) (user-error "No directory or book here"))
-    (setq gnus-browse-current-method nnopds-browse--method)
-    (gnus-browse-select-group)
-    (when read
-      (with-current-buffer gnus-summary-buffer
-        (gnus-summary-display-article (gnus-summary-article-number))))))
+(defun nnopds-browse--open-link ()
+  "Follow the directory or pagination link at point, if any."
+  (when-let* ((url (get-text-property (line-beginning-position) 'nnopds-browse-link)))
+    (nnopds-browse--show url (cons (list nnopds-browse--url (nnopds-browse--title nnopds-browse--page) (point))
+                                  nnopds-browse--history))
+    t))
+
+(defun nnopds-browse--publication (connection)
+  "Select the group for the current row's book on CONNECTION."
+  (let* ((entry (get-text-property (line-beginning-position) 'nnopds-browse-book))
+         (edition (and entry (nnopds--publication-edition entry))))
+    (unless edition (user-error "No directory or book here"))
+    (let* ((book (or (nnopds--find-publication connection edition)
+                     (user-error "Book unavailable. Refresh the catalog with g")))
+           (publication (nnopds--preferred-publication connection book)))
+      (unless (eq publication entry)
+        (let ((inhibit-read-only t))
+          (goto-char (line-beginning-position))
+          (delete-region (point) (min (point-max) (1+ (line-end-position))))
+          (save-excursion (nnopds-browse--book publication))))
+      publication)))
+
+(defun nnopds-browse--open-summary (&optional read)
+  "Open the book's summary, displaying its selected article with READ."
+  (setq gnus-browse-current-method nnopds-browse--method)
+  (gnus-browse-select-group)
+  (when read
+    (with-current-buffer gnus-summary-buffer
+      (gnus-summary-display-article (gnus-summary-article-number)))))
 
 (defun nnopds-browse-select ()
-  "Enter the directory or select the book at point."
+  "Enter the directory or open the Gnus summary of the book at point."
   (interactive nil nnopds-browse-mode)
-  (nnopds-browse--activate nil))
+  (unless (nnopds-browse--open-link)
+    (nnopds-browse--publication (nnopds--change-server (cadr nnopds-browse--method)))
+    (nnopds-browse--open-summary)))
+
+(defun nnopds-browse-download ()
+  "Download the complete book at point."
+  (interactive nil nnopds-browse-mode)
+  (let* ((connection (nnopds--change-server (cadr nnopds-browse--method)))
+         (publication (nnopds-browse--publication connection))
+         (file (nnopds--download-file connection publication)))
+    (unless file (user-error "This book has no supported download link"))
+    (if (file-readable-p file)
+        (message "%s is already downloaded" (nnopds--publication-title publication))
+      (pcase (nnopds--publication-format publication)
+        ('epub (nnopds--cache-epub connection publication file))
+        ((or 'pdf 'cbz)
+         (nnopds-mupdf--cache-document connection publication file (nnopds-mupdf--program)))))
+    file))
 
 (defun nnopds-browse-read ()
-  "Enter the directory or read the book at point."
+  "Enter a directory, read a downloaded book, or stream a comic."
   (interactive nil nnopds-browse-mode)
-  (nnopds-browse--activate t))
+  (unless (nnopds-browse--open-link)
+    (let* ((connection (nnopds--change-server (cadr nnopds-browse--method)))
+           (publication (nnopds-browse--publication connection))
+           (file (nnopds--download-file connection publication)))
+      (unless (or (and file (file-readable-p file)) (nnopds--publication-stream publication))
+        (user-error "Download this book with %s first"
+                    (substitute-command-keys "\\[nnopds-browse-download]")))
+      (nnopds-browse--open-summary t))))
 
 (defun nnopds-browse-subscribe ()
   "Toggle the selected book's Gnus subscription."
   (interactive nil nnopds-browse-mode)
-  (unless (get-text-property (line-beginning-position) 'nnopds-browse-book) (user-error "Select a book to subscribe"))
+  (nnopds-browse--publication (nnopds--change-server (cadr nnopds-browse--method)))
   (let ((position (point)))
     (gnus-browse-toggle-subscription-at-point 1)
     (nnopds-browse--render nnopds-browse--page)

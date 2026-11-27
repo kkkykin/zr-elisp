@@ -40,11 +40,12 @@
   :group 'zr-doc-view)
 (make-variable-buffer-local 'zr-doc-view-visible-pages)
 
-(defcustom zr-doc-view-direction 'ltr
+(defcustom zr-doc-view-direction 'auto
   "Horizontal reading direction in an enabled buffer.
+Auto follows the publication when a reader provides a direction.
 Right-to-left reverses page placement and arrow keys.  SPC and DEL always
 follow the original document order."
-  :type '(choice (const ltr) (const rtl))
+  :type '(choice (const auto) (const ltr) (const rtl))
   :group 'zr-doc-view)
 (make-variable-buffer-local 'zr-doc-view-direction)
 
@@ -154,22 +155,49 @@ An incomplete conversion may already have generated some page images."
              (file-readable-p (expand-file-name "resolution.el" (doc-view--current-cache-dir))))
     (doc-view-last-page-number)))
 
-(defun zr-doc-view--pages-from (page &optional require-size)
-  "Return a view starting at PAGE in document order.
-REQUIRE-SIZE means page orientations must be known when they affect the view."
-  (let ((limit (zr-doc-view-page-count))
-        (number page)
-        pages)
-    (when (or (null limit) (<= page limit))
-      (if (or (= zr-doc-view-visible-pages 1) (doc-view-current-slice)
-              (zr-doc-view--standalone-p page require-size))
-          (list page)
-        (while (and (< (length pages) zr-doc-view-visible-pages)
-                    (or (null limit) (<= number limit))
-                    (not (zr-doc-view--standalone-p number require-size)))
-          (push number pages)
-          (cl-incf number))
+(defun zr-doc-view-page-range (page page-count visible-pages standalone-p)
+  "Return up to VISIBLE-PAGES consecutive pages starting at PAGE.
+Page numbers start at one.  PAGE-COUNT is nil if the last page is unknown.
+STANDALONE-P takes a page number and returns non-nil if it must appear alone."
+  (when (or (null page-count) (<= page page-count))
+    (if (or (= visible-pages 1) (funcall standalone-p page))
+        (list page)
+      (let ((end (+ page (1- visible-pages)))
+            (pages (list page)))
+        (cl-loop for number from (1+ page) to (if page-count (min end page-count) end)
+                 until (funcall standalone-p number)
+                 do (push number pages))
         (nreverse pages)))))
+
+(defun zr-doc-view-screen-target
+    (page direction page-count visible-pages standalone-p &optional check-page)
+  "Return the adjacent screen's start from PAGE in DIRECTION, or nil at an end.
+A positive DIRECTION moves forward.  PAGE-COUNT, VISIBLE-PAGES and
+STANDALONE-P are as in `zr-doc-view-page-range'.
+If CHECK-PAGE is non-nil, call it on each page being left when moving
+forward and on the target page.  It can signal if a page is unavailable."
+  (let ((target
+         (cond
+          ((> direction 0)
+           (let ((pages (zr-doc-view-page-range page page-count visible-pages standalone-p)))
+             (when check-page (mapc check-page pages))
+             (1+ (or (car (last pages)) page))))
+          ((> page 1)
+           (let ((number (1- page))
+                 (earliest (max 1 (- page visible-pages))))
+             (unless (or (= visible-pages 1) (funcall standalone-p number))
+               (while (and (> number earliest) (not (funcall standalone-p (1- number))))
+                 (cl-decf number)))
+             number)))))
+    (when (and target (or (null page-count) (<= target page-count)))
+      (when check-page (funcall check-page target))
+      target)))
+
+(defun zr-doc-view--pages-from (page)
+  "Return a view starting at PAGE in document order."
+  (zr-doc-view-page-range
+   page (zr-doc-view-page-count) (if (doc-view-current-slice) 1 zr-doc-view-visible-pages)
+   #'zr-doc-view--standalone-p))
 
 (defun zr-doc-view--view ()
   "Return the selected document window's independent view state."
@@ -195,16 +223,19 @@ REQUIRE-SIZE means page orientations must be known when they affect the view."
   (cons (max 1 (- (window-body-width nil t) 2))
         (max 1 (- (window-body-height nil t) 2))))
 
+(defun zr-doc-view-fit-pages (sizes viewport gap &optional zoom)
+  "Fit page SIZES to VIEWPORT with equal heights and a GAP, then apply ZOOM.
+SIZES is a list of (WIDTH . HEIGHT) pairs."
+  (when sizes
+    (let* ((ratios (mapcar (lambda (size) (/ (float (car size)) (cdr size))) sizes))
+           (width (max 1 (- (car viewport) (* gap (1- (length sizes))))))
+           (height (max 1 (floor (* (or zoom 1) (min (cdr viewport) (/ width (apply #'+ ratios))))))))
+      (mapcar (lambda (ratio) (cons (max 1 (floor (* height ratio))) height)) ratios))))
+
 (defun zr-doc-view--sizes (infos viewport zoom)
   "Fit INFOS to VIEWPORT with equal heights, then apply ZOOM."
-  (let* ((ratios (mapcar (lambda (info)
-                          (let ((size (plist-get info :size)))
-                            (/ (float (car size)) (cdr size))))
-                        infos))
-         (width (max 1 (- (car viewport) (* zr-doc-view-gap (1- (length infos))))))
-         (height (max 1 (floor (* zoom (min (cdr viewport)
-                                           (/ width (apply #'+ ratios))))))))
-    (mapcar (lambda (ratio) (cons (max 1 (floor (* height ratio))) height)) ratios)))
+  (zr-doc-view-fit-pages (mapcar (lambda (info) (plist-get info :size)) infos)
+                        viewport zr-doc-view-gap zoom))
 
 (defun zr-doc-view--notify (view page pages ready)
   "Report VIEW's changed PAGE and completely displayed PAGES when READY."
@@ -561,8 +592,8 @@ display and the buffer's original display settings."
               (user-error "Enable zr-doc-view-mode in a DocView buffer"))
             (unless (and (integerp zr-doc-view-visible-pages) (> zr-doc-view-visible-pages 0))
               (user-error "Visible page count must be positive"))
-            (unless (memq zr-doc-view-direction '(ltr rtl))
-              (user-error "Reading direction must be ltr or rtl"))
+            (unless (memq zr-doc-view-direction '(auto ltr rtl))
+              (user-error "Reading direction must be auto, ltr or rtl"))
             (unless (and (integerp zr-doc-view-gap) (>= zr-doc-view-gap 0))
               (user-error "Page gap must be a nonnegative integer"))
             (unless zr-doc-view--saved-variables
@@ -626,17 +657,17 @@ Return the document buffer.  Conversion uses DocView's configured backend."
   (zr-doc-view-set-visible-pages 2))
 
 (defun zr-doc-view-set-direction (direction)
-  "Set DIRECTION to ltr or rtl without changing original page anchors."
-  (interactive (list (intern (completing-read "Reading direction: " '("ltr" "rtl") nil t))))
+  "Set DIRECTION to auto, ltr or rtl without changing original page anchors."
+  (interactive (list (intern (completing-read "Reading direction: " '("auto" "ltr" "rtl") nil t))))
   (zr-doc-view--check)
-  (unless (memq direction '(ltr rtl)) (user-error "Direction must be ltr or rtl"))
+  (unless (memq direction '(auto ltr rtl)) (user-error "Direction must be auto, ltr or rtl"))
   (setq-local zr-doc-view-direction direction)
   (zr-doc-view--refresh))
 
 (defun zr-doc-view-toggle-direction ()
   "Reverse horizontal page placement and arrow navigation."
   (interactive)
-  (zr-doc-view-set-direction (if (eq zr-doc-view-direction 'ltr) 'rtl 'ltr)))
+  (zr-doc-view-set-direction (if (eq zr-doc-view-direction 'rtl) 'ltr 'rtl)))
 
 (defun zr-doc-view-toggle-cover ()
   "Toggle whether the first page occupies its own view."
@@ -679,25 +710,12 @@ Return the document buffer.  Conversion uses DocView's configured backend."
 
 (defun zr-doc-view--screen-target (page direction)
   "Return the adjacent view's start from PAGE in DIRECTION."
-  (let* ((limit (zr-doc-view-page-count))
-         (target
-          (if (> direction 0)
-              (let ((pages (zr-doc-view--pages-from page t)))
-                (unless limit
-                  (dolist (number pages) (zr-doc-view--page-size number t)))
-                (1+ (or (car (last pages)) page)))
-            (when (= page 1) (user-error "Beginning of document"))
-            (let ((number (1- page)) (count 1))
-              (unless (or (= zr-doc-view-visible-pages 1) (doc-view-current-slice)
-                          (zr-doc-view--standalone-p number t))
-                (while (and (< count zr-doc-view-visible-pages) (> number 1)
-                            (not (zr-doc-view--standalone-p (1- number) t)))
-                  (cl-decf number)
-                  (cl-incf count)))
-              number))))
-    (when (and limit (> target limit)) (user-error "End of document"))
-    (unless limit (zr-doc-view--page-size target t))
-    target))
+  (let ((limit (zr-doc-view-page-count)))
+    (or (zr-doc-view-screen-target
+         page direction limit (if (doc-view-current-slice) 1 zr-doc-view-visible-pages)
+         (lambda (number) (zr-doc-view--standalone-p number t))
+         (unless limit (lambda (number) (zr-doc-view--page-size number t))))
+        (user-error (if (> direction 0) "End of document" "Beginning of document")))))
 
 (defun zr-doc-view--move-screens (count)
   "Move COUNT display ranges, rendering only the destination view."

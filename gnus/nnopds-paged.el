@@ -16,27 +16,12 @@
 (require 'gnus-art)
 (require 'gnus-sum)
 (require 'image)
+(require 'zr-doc-view)
 
 (declare-function image-size "image.c" (spec &optional pixels frame))
 (declare-function image-flush "image.c" (spec &optional frame))
 
 (defgroup nnopds-paged nil "Page-based reading in Gnus." :group 'nnopds)
-
-(defcustom nnopds-paged-visible-pages 1
-  "Initial maximum number of pages shown side by side."
-  :type 'integer :group 'nnopds-paged)
-
-(defcustom nnopds-paged-cover-single t
-  "Whether a comic's cover is displayed alone by default."
-  :type 'boolean :group 'nnopds-paged)
-
-(defcustom nnopds-paged-landscape-single t
-  "Whether landscape comic pages are displayed alone by default."
-  :type 'boolean :group 'nnopds-paged)
-
-(defcustom nnopds-paged-direction 'auto
-  "Initial reading direction; auto follows the publication."
-  :type '(choice (const auto) (const ltr) (const rtl)) :group 'nnopds-paged)
 
 (defcustom nnopds-paged-prefetch-pages 4
   "Number of original pages to prepare on either side of the displayed pages."
@@ -45,10 +30,6 @@
 (defcustom nnopds-paged-max-requests 2
   "Maximum simultaneous page jobs per publication."
   :type 'integer :group 'nnopds-paged)
-
-(defcustom nnopds-paged-gap 12
-  "Space in pixels between displayed pages."
-  :type 'natnum :group 'nnopds-paged)
 
 (cl-defstruct (nnopds-paged--book (:constructor nnopds-paged--make-book))
   source source-data connection publication pages directory progression visible-pages cover landscape direction position
@@ -73,14 +54,51 @@
 Call CALLBACK with nil on success or an error string on failure.
 Return a function that cancels this job.  WIDTH is a requested pixel width.")
 
-(cl-defun nnopds-paged--open-book (source connection publication pages directory
-                                          &key (progression 'ltr) cover landscape source-data)
-  "Create a page book with its saved position and display preferences."
+(defun nnopds-paged--directory (connection publication)
+  "Return the per-edition reading state directory for PUBLICATION on CONNECTION."
+  (let ((format (nnopds--publication-format publication)))
+    (nnopds--cache-file connection
+                       (format "%s.%s/" (secure-hash 'sha256 (nnopds--publication-edition publication))
+                               (cond ((eq format 'epub) "epub-pages")
+                                     ((nnopds--publication-stream publication) "comic")
+                                     (t format))))))
+
+(defun nnopds-paged--reading-progression (document)
+  "Return DOCUMENT's advertised horizontal reading direction, if present."
+  (pcase (plist-get (plist-get document :metadata) :readingProgression)
+    ("ltr" 'ltr)
+    ("rtl" 'rtl)))
+
+(defun nnopds-paged--settings (directory)
+  "Read the position and display preferences in DIRECTORY."
   (let* ((settings (nnopds--read-json (expand-file-name "position.json" directory)))
-         (sizes (plist-get settings :sizes))
          (count (plist-get settings :visiblePages))
          (direction (plist-get settings :direction))
+         (position (plist-get settings :page))
+         (visible-pages (default-value 'zr-doc-view-visible-pages)))
+    (unless (and (integerp visible-pages) (> visible-pages 0))
+      (error "zr-doc-view-visible-pages must be positive"))
+    (list :page (and (integerp position) (> position 0) position)
+          :sizes (plist-get settings :sizes)
+          :visiblePages (if (and (integerp count) (> count 0)) count visible-pages)
+          :cover (if (plist-member settings :cover) (eq (plist-get settings :cover) t)
+                   (default-value 'zr-doc-view-cover-single))
+          :landscape (if (plist-member settings :landscape) (eq (plist-get settings :landscape) t)
+                       (default-value 'zr-doc-view-landscape-single))
+          :direction (if (member direction '("auto" "ltr" "rtl")) (intern direction)
+                       (default-value 'zr-doc-view-direction)))))
+
+(defun nnopds-paged--restore-settings (book)
+  "Refresh BOOK's saved position and display preferences."
+  (let* ((settings (nnopds-paged--settings (nnopds-paged--book-directory book)))
+         (pages (nnopds-paged--book-pages book))
+         (sizes (plist-get settings :sizes))
          (position (plist-get settings :page)))
+    (setf (nnopds-paged--book-position book) (and position (<= position (length pages)) position)
+          (nnopds-paged--book-visible-pages book) (plist-get settings :visiblePages)
+          (nnopds-paged--book-cover book) (plist-get settings :cover)
+          (nnopds-paged--book-landscape book) (plist-get settings :landscape)
+          (nnopds-paged--book-direction book) (plist-get settings :direction))
     (when (and (vectorp sizes) (= (length sizes) (length pages)))
       (seq-do-indexed
        (lambda (page index)
@@ -91,23 +109,22 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
                       (numberp (aref size 1)) (> (aref size 1) 0))
              (setf (plist-get page :width) (aref size 0)
                    (plist-get page :height) (aref size 1)))))
-       pages))
-    (unless (and (integerp nnopds-paged-visible-pages) (> nnopds-paged-visible-pages 0))
-      (error "nnopds-paged-visible-pages must be positive"))
-    (nnopds-paged--make-book
-     :source source :source-data source-data :connection connection :publication publication
-     :pages pages :directory directory :progression progression
-     :visible-pages (if (and (integerp count) (> count 0)) count nnopds-paged-visible-pages)
-     :cover (if (plist-member settings :cover) (eq (plist-get settings :cover) t) cover)
-     :landscape (if (plist-member settings :landscape) (eq (plist-get settings :landscape) t) landscape)
-     :direction (if (member direction '("auto" "ltr" "rtl")) (intern direction) nnopds-paged-direction)
-     :position (when (and (integerp position) (<= 1 position (length pages))) position)
-     :active (make-hash-table :test #'equal) :errors (make-hash-table))))
+       pages))))
 
-(cl-defmethod nnopds--chapters (_format (book nnopds-paged--book))
+(cl-defun nnopds-paged--open-book (source connection publication pages directory
+                                          &key (progression 'ltr) source-data)
+  "Create a page book with its saved position and display preferences."
+  (let ((book (nnopds-paged--make-book
+               :source source :source-data source-data :connection connection :publication publication
+               :pages pages :directory directory :progression progression
+               :active (make-hash-table :test #'equal) :errors (make-hash-table))))
+    (nnopds-paged--restore-settings book)
+    book))
+
+(cl-defmethod nnopds--chapters (_reader (book nnopds-paged--book))
   (nnopds-paged--book-pages book))
 
-(cl-defmethod nnopds--header (_format (book nnopds-paged--book) page _group)
+(cl-defmethod nnopds--header (_reader (book nnopds-paged--book) page _group)
   (let ((publication (nnopds-paged--book-publication book)))
     (make-full-mail-header
      (plist-get page :number) (plist-get page :title)
@@ -117,21 +134,21 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
      (format "<%d.%s@nnopds>" (plist-get page :number)
              (secure-hash 'sha256 (nnopds--publication-group publication))) "" 0 0)))
 
-(cl-defmethod nnopds--article (_format (book nnopds-paged--book) page group)
-  (let ((header (nnopds--header (nnopds-paged--book-source book) book page group)))
+(cl-defmethod nnopds--article (reader (book nnopds-paged--book) page group)
+  (let ((header (nnopds--header reader book page group)))
     (concat "Subject: " (rfc2047-encode-string (mail-header-subject header)) "\n"
             "From: " (rfc2047-encode-string (mail-header-from header)) "\n"
             "Date: " (mail-header-date header) "\nMessage-ID: " (mail-header-id header) "\n"
             "Newsgroups: " group "\nMIME-Version: 1.0\nContent-Type: text/plain; charset=utf-8\n\n"
             (plist-get page :title) "\n")))
 
-(cl-defmethod nnopds--locator (_format (book nnopds-paged--book) page)
+(cl-defmethod nnopds--locator (_reader (book nnopds-paged--book) page)
   (list :href (plist-get page :href) :type (plist-get page :type)
         :locations (list :position (plist-get page :number)
                          :totalProgression (/ (float (1- (plist-get page :number)))
                                               (max 1 (1- (length (nnopds-paged--book-pages book))))))))
 
-(cl-defmethod nnopds--locate (_format (book nnopds-paged--book) locator)
+(cl-defmethod nnopds--locate (_reader (book nnopds-paged--book) locator)
   (let ((number (plist-get (plist-get locator :locations) :position)))
     (if (and (integerp number) (<= 1 number (length (nnopds-paged--book-pages book))))
         (cons number nil)
@@ -139,20 +156,37 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
                                  :key (lambda (entry) (plist-get entry :href)) :test #'equal)))
         (cons (plist-get page :number) nil)))))
 
-(defun nnopds-paged--save (book)
-  "Persist BOOK's original page number and local view preferences."
-  (nnopds--write-json
-   (expand-file-name "position.json" (nnopds-paged--book-directory book))
-   (list :page (nnopds-paged--book-position book)
-         :visiblePages (nnopds-paged--book-visible-pages book)
-         :landscape (if (nnopds-paged--book-landscape book) t :false)
-         :cover (if (nnopds-paged--book-cover book) t :false)
-         :direction (symbol-name (nnopds-paged--book-direction book))
-         ;; Reuse discovered comic dimensions when reopening the book.
-         :sizes (vconcat (seq-map (lambda (page)
-                                    (when (and (numberp (plist-get page :width)) (numberp (plist-get page :height)))
-                                      (vector (plist-get page :width) (plist-get page :height))))
-                                  (nnopds-paged--book-pages book))))))
+(defun nnopds-paged--write-settings (directory updates &optional defaults)
+  "Merge UPDATES into DIRECTORY's reading state, filling absent keys from DEFAULTS."
+  (let* ((file (expand-file-name "position.json" directory))
+         (old (nnopds--read-json file))
+         (settings (copy-sequence old)))
+    (cl-flet ((put (key value)
+                (setq settings
+                      (plist-put settings key
+                                 (pcase key
+                                   ((or :cover :landscape) (if value t :false))
+                                   (:direction (symbol-name value))
+                                   (_ value))))))
+      (cl-loop for (key value) on updates by #'cddr do (put key value))
+      (cl-loop for (key value) on defaults by #'cddr
+               unless (plist-member settings key) do (put key value)))
+    (unless (equal settings old) (nnopds--write-json file settings))))
+
+(defun nnopds-paged--save (book &optional preference)
+  "Persist BOOK's displayed page and dimensions, or an explicit PREFERENCE."
+  (nnopds-paged--write-settings
+   (nnopds-paged--book-directory book)
+   (or preference
+       (list :page (nnopds-paged--book-position book)
+             :sizes (vconcat (seq-map (lambda (page)
+                                       (when (and (numberp (plist-get page :width)) (numberp (plist-get page :height)))
+                                         (vector (plist-get page :width) (plist-get page :height))))
+                                     (nnopds-paged--book-pages book)))))
+   (list :visiblePages (nnopds-paged--book-visible-pages book)
+         :landscape (nnopds-paged--book-landscape book)
+         :cover (nnopds-paged--book-cover book)
+         :direction (nnopds-paged--book-direction book))))
 
 (defun nnopds-paged--page (book number)
   "Return BOOK's original page NUMBER, numbered from one."
@@ -171,15 +205,9 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
 
 (defun nnopds-paged--pages-from (book anchor)
   "Return BOOK's display range starting at original page ANCHOR."
-  (let* ((end (min (length (nnopds-paged--book-pages book))
-                   (+ anchor (1- (nnopds-paged--book-visible-pages book)))))
-         (number anchor) pages)
-    (if (nnopds-paged--standalone-p book anchor)
-        (list anchor)
-      (while (and (<= number end) (not (nnopds-paged--standalone-p book number)))
-        (push number pages)
-        (cl-incf number))
-      (nreverse pages))))
+  (zr-doc-view-page-range
+   anchor (length (nnopds-paged--book-pages book)) (nnopds-paged--book-visible-pages book)
+   (lambda (number) (nnopds-paged--standalone-p book number))))
 
 (defun nnopds-paged--visible (reader)
   "Return consecutive pages starting at READER's original page anchor."
@@ -329,10 +357,9 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
 
 (defun nnopds-paged--sizes (pages viewport)
   "Fit PAGES into VIEWPORT with equal display heights and preserved aspect ratios."
-  (let* ((ratios (mapcar (lambda (page) (/ (float (plist-get page :width)) (plist-get page :height))) pages))
-         (width (max 1 (- (car viewport) (* nnopds-paged-gap (1- (length pages))))))
-         (height (max 1 (floor (min (cdr viewport) (/ width (apply #'+ ratios)))))))
-    (mapcar (lambda (ratio) (cons (max 1 (floor (* height ratio))) height)) ratios)))
+  (zr-doc-view-fit-pages
+   (mapcar (lambda (page) (cons (plist-get page :width) (plist-get page :height))) pages)
+   viewport zr-doc-view-gap))
 
 (defun nnopds-paged--commit (reader visible)
   "Record READER's original page after VISIBLE images were displayed."
@@ -408,10 +435,10 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
                      (viewport (nnopds-paged--viewport))
                      (sizes (nnopds-paged--sizes pages viewport))
                      (padding (max 0 (/ (- (car viewport) (apply #'+ (mapcar #'car sizes))
-                                           (* nnopds-paged-gap (1- (length pages)))) 2))))
+                                           (* zr-doc-view-gap (1- (length pages)))) 2))))
                 (when (> padding 0) (insert (propertize " " 'display `(space :width (,padding)))))
                 (cl-loop for page in pages for size in sizes for index from 0 do
-                         (when (> index 0) (insert (propertize " " 'display `(space :width (,nnopds-paged-gap)))))
+                         (when (> index 0) (insert (propertize " " 'display `(space :width (,zr-doc-view-gap)))))
                          (let ((start (point))
                                (image (create-image (nnopds-paged--file source book page
                                                                         (cdr (assq (plist-get page :number) targets)))
@@ -495,16 +522,20 @@ Return a function that cancels this job.  WIDTH is a requested pixel width.")
   "Close the page reader owning the killed buffer."
   (when nnopds-paged--reader (nnopds-paged--close nnopds-paged--reader)))
 
-(cl-defmethod nnopds--close-reader (_format (book nnopds-paged--book))
+(cl-defmethod nnopds--close-reader (_reader (book nnopds-paged--book))
   (dolist (reader (copy-sequence (nnopds-paged--book-readers book))) (nnopds-paged--close reader)))
 
-(cl-defmethod nnopds--dispose (_format (book nnopds-paged--book))
+(cl-defmethod nnopds--reading-p ((book nnopds-paged--book))
+  (nnopds-paged--book-readers book))
+
+(cl-defmethod nnopds--dispose (reader (book nnopds-paged--book))
   (setf (nnopds-paged--book-closed book) t)
-  (nnopds--close-reader (nnopds-paged--book-source book) book)
+  (nnopds--close-reader reader book)
   (nnopds-paged--cancel book))
 
-(cl-defmethod nnopds--prepare-reader (_format (book nnopds-paged--book))
+(cl-defmethod nnopds--prepare-reader (_reader (book nnopds-paged--book))
   (when nnopds-paged--reader (nnopds-paged--close nnopds-paged--reader))
+  (nnopds-paged--restore-settings book)
   (setq-local nnopds-paged--reader
               (nnopds-paged--make-reader :book book :summary (current-buffer)
                                          :anchor (or (nnopds-paged--book-position book) 1)))
@@ -569,24 +600,24 @@ arrow keys turn one original page according to the reading direction."
   "Set view preference KEY to VALUE while retaining the original page anchor."
   (let* ((reader (nnopds-paged--current)) (book (nnopds-paged--reader-book reader)))
     (pcase key
-      ('visible-pages (setf (nnopds-paged--book-visible-pages book) value))
-      ('landscape (setf (nnopds-paged--book-landscape book) value))
-      ('cover (setf (nnopds-paged--book-cover book) value))
-      ('direction (setf (nnopds-paged--book-direction book) value)))
-    (nnopds-paged--save book)
+      (:visiblePages (setf (nnopds-paged--book-visible-pages book) value))
+      (:landscape (setf (nnopds-paged--book-landscape book) value))
+      (:cover (setf (nnopds-paged--book-cover book) value))
+      (:direction (setf (nnopds-paged--book-direction book) value)))
+    (nnopds-paged--save book (list key value))
     (nnopds-paged--notify book)))
 
 (defun nnopds-paged-set-visible-pages (count)
   "Show up to COUNT consecutive pages, retaining the current original page."
   (interactive "nVisible pages: ")
   (unless (and (integerp count) (> count 0)) (user-error "Page count must be positive"))
-  (nnopds-paged--preference 'visible-pages count))
+  (nnopds-paged--preference :visiblePages count))
 
 (defun nnopds-paged-toggle-landscape ()
   "Toggle whether landscape pages are displayed alone."
   (interactive)
   (nnopds-paged--preference
-   'landscape (not (nnopds-paged--book-landscape
+   :landscape (not (nnopds-paged--book-landscape
                     (nnopds-paged--reader-book (nnopds-paged--current))))))
 
 (defun nnopds-paged-single-page ()
@@ -602,13 +633,13 @@ arrow keys turn one original page according to the reading direction."
 (defun nnopds-paged-toggle-cover ()
   "Toggle whether the cover occupies its own view."
   (interactive)
-  (nnopds-paged--preference 'cover (not (nnopds-paged--book-cover (nnopds-paged--reader-book (nnopds-paged--current))))))
+  (nnopds-paged--preference :cover (not (nnopds-paged--book-cover (nnopds-paged--reader-book (nnopds-paged--current))))))
 
 (defun nnopds-paged-set-direction (direction)
   "Set DIRECTION to auto, ltr or rtl, keeping the same original page."
   (interactive (list (intern (completing-read "Reading direction: " '("auto" "ltr" "rtl") nil t))))
   (unless (memq direction '(auto ltr rtl)) (user-error "Direction must be auto, ltr or rtl"))
-  (nnopds-paged--preference 'direction direction))
+  (nnopds-paged--preference :direction direction))
 
 (defun nnopds-paged-toggle-direction ()
   "Switch between left-to-right and right-to-left reading."
@@ -643,20 +674,10 @@ arrow keys turn one original page according to the reading direction."
 
 (defun nnopds-paged--screen-target (book anchor direction)
   "Return BOOK's adjacent screen start from ANCHOR in DIRECTION."
-  (if (> direction 0)
-      (let ((target (1+ (car (last (nnopds-paged--pages-from book anchor))))))
-        (when (> target (length (nnopds-paged--book-pages book)))
-          (user-error "End of publication"))
-        target)
-    (when (= anchor 1) (user-error "Beginning of publication"))
-    (let ((number (1- anchor)) (count 1))
-      (unless (nnopds-paged--standalone-p book number)
-        (while (and (< count (nnopds-paged--book-visible-pages book))
-                    (> number 1)
-                    (not (nnopds-paged--standalone-p book (1- number))))
-          (cl-decf number)
-          (cl-incf count)))
-      number)))
+  (or (zr-doc-view-screen-target
+       anchor direction (length (nnopds-paged--book-pages book)) (nnopds-paged--book-visible-pages book)
+       (lambda (number) (nnopds-paged--standalone-p book number)))
+      (user-error (if (> direction 0) "End of publication" "Beginning of publication"))))
 
 (defun nnopds-paged--move-screens (amount)
   "Move AMOUNT screens, preparing only the destination page."

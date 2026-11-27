@@ -1,32 +1,33 @@
-;;; nnopds-pdf-test.el --- Downloaded PDF reader tests -*- lexical-binding: t; -*-
+;;; nnopds-mupdf-test.el --- Downloaded PDF reader tests -*- lexical-binding: t; -*-
 
 ;;; Code:
 
 (require 'nnopds-paged-test-helpers
          (expand-file-name "nnopds-paged-test-helpers.el"
                            (file-name-directory (or load-file-name buffer-file-name))))
-(require 'nnopds-pdf)
+(require 'nnopds-mupdf)
 
-(defmacro nnopds-pdf-test--with-server (&rest body)
+(defmacro nnopds-mupdf-test--with-server (&rest body)
   "Run BODY with a real PDF catalog and installed MuPDF."
   (declare (indent 0) (debug t))
   `(nnopds-test--with-server
-    (skip-unless (executable-find nnopds-pdf-mutool-program))
-    (let ((nnopds-paged-visible-pages 1) (nnopds-paged-direction 'auto)
+    (skip-unless (executable-find nnopds-mupdf-program))
+    (let ((zr-doc-view-visible-pages 1) (zr-doc-view-direction 'auto)
+          (zr-doc-view-landscape-single nil)
           (nnopds-paged-prefetch-pages 0) (nnopds-paged-max-requests 2))
       (nnopds-test--write opds-root "pdf-catalog.txt" "enabled")
       ,@body)))
 
-(defun nnopds-pdf-test--publication (connection)
+(defun nnopds-mupdf-test--publication (connection)
   "Return the fixture PDF publication without downloading it."
   (nnopds--catalog-page connection (nnopds--connection-url connection))
   (gethash (car (nnopds--connection-catalog connection))
            (nnopds--connection-publications connection)))
 
-(defun nnopds-pdf-test--wrapper (root)
+(defun nnopds-mupdf-test--wrapper (root)
   "Create a MuPDF wrapper in ROOT with controllable render errors and delays."
   (let ((program (expand-file-name "mutool-test.py" root))
-        (mutool (nnopds-pdf--program)))
+        (mutool (nnopds-mupdf--program)))
     (nnopds-test--write
      root "mutool-test.py"
      (format "#!/usr/bin/env python3
@@ -43,13 +44,13 @@ os.execv(%s, [%s] + sys.argv[1:])
     (set-file-modes program #o755)
     program))
 
-(ert-deftest nnopds-pdf-test-missing-mutool-is-reported ()
-  (let ((nnopds-pdf-mutool-program "nnopds-missing-mutool"))
-    (should-error (nnopds-pdf--program))))
+(ert-deftest nnopds-mupdf-test-missing-mutool-is-reported ()
+  (let ((nnopds-mupdf-program "nnopds-missing-mutool"))
+    (should-error (nnopds-mupdf--program))))
 
-(ert-deftest nnopds-pdf-test-catalog-is-lazy-and-effective-bounds-are-correct ()
-  (nnopds-pdf-test--with-server
-   (let* ((publication (nnopds-pdf-test--publication connection))
+(ert-deftest nnopds-mupdf-test-catalog-is-lazy-and-effective-bounds-are-correct ()
+  (nnopds-mupdf-test--with-server
+   (let* ((publication (nnopds-mupdf-test--publication connection))
           (group (nnopds--publication-group publication)))
      (should (eq (nnopds--publication-format publication) 'pdf))
      (should-not (nnopds--publication-data publication))
@@ -66,7 +67,7 @@ os.execv(%s, [%s] + sys.argv[1:])
                       '((200 . 300) (260 . 180) (400 . 600) (400 . 200))))
        (should (equal (nnopds--read-bytes file)
                       (nnopds--read-bytes (expand-file-name "book.pdf" opds-root))))
-       (should (equal (plist-get data :digest) (nnopds-pdf--fingerprint file)))
+       (should (equal (plist-get data :digest) (nnopds-mupdf--pdf-fingerprint file)))
        (should (= 7 (nnopds--publication-count publication)))
        (should (eq 'nov (nnopds-retrieve-headers '(1 2 3) group "library")))
        (should (nnopds-request-article 3 group "library"))
@@ -79,13 +80,14 @@ os.execv(%s, [%s] + sys.argv[1:])
        (should (= 1 (cl-count "/content/book.pdf" (nnopds-test--requests opds-root)
                               :key (lambda (request) (plist-get request :path)) :test #'equal)))))))
 
-(ert-deftest nnopds-pdf-test-reader-shares-screen-arrow-and-resolution-behavior ()
-  (nnopds-pdf-test--with-server
+(ert-deftest nnopds-mupdf-test-reader-shares-screen-arrow-and-resolution-behavior ()
+  (nnopds-mupdf-test--with-server
    (nnopds-paged-test--with-images
     (nnopds-test--with-browser
      (nnopds-test--at-book)
-     (nnopds-browse-read)
+     (nnopds-browse-select)
      (with-current-buffer gnus-summary-buffer
+       (gnus-summary-display-article (gnus-summary-article-number))
        (let* ((reader nnopds-paged--reader)
               (book (nnopds-paged--reader-book reader))
               (directory (nnopds-paged--book-directory book)))
@@ -122,12 +124,12 @@ os.execv(%s, [%s] + sys.argv[1:])
          (should (equal (nnopds-paged-test--shown) '(7)))
          (let* ((page (nnopds-paged--page book 7))
                 (old-width (cdar (nnopds-paged--targets reader)))
-                (old-file (nnopds-paged--file 'pdf book page old-width)))
+                (old-file (nnopds-paged--file 'mupdf book page old-width)))
            (should (file-readable-p old-file))
            (cl-letf (((symbol-function 'nnopds-paged--viewport) (lambda () '(1800 . 2600))))
              (nnopds-paged--update reader)
              (nnopds-paged-test--settled reader 7)
-             (let ((new-file (nnopds-paged--file 'pdf book page (cdar (nnopds-paged--targets reader)))))
+             (let ((new-file (nnopds-paged--file 'mupdf book page (cdar (nnopds-paged--targets reader)))))
                (should-not (equal new-file old-file))
                (should (file-readable-p old-file))
                (should (file-readable-p new-file))
@@ -137,13 +139,14 @@ os.execv(%s, [%s] + sys.argv[1:])
                                 :key (lambda (request) (plist-get request :path)) :test #'equal)))
          (gnus-summary-exit)))))))
 
-(ert-deftest nnopds-pdf-test-reopen-restores-local-settings-without-http-or-inspection ()
-  (nnopds-pdf-test--with-server
+(ert-deftest nnopds-mupdf-test-reopen-restores-local-settings-without-http-or-inspection ()
+  (nnopds-mupdf-test--with-server
    (nnopds-paged-test--with-images
     (nnopds-test--with-browser
      (nnopds-test--at-book)
-     (nnopds-browse-read)
+     (nnopds-browse-select)
      (with-current-buffer gnus-summary-buffer
+       (gnus-summary-display-article (gnus-summary-article-number))
        (let ((reader nnopds-paged--reader))
          (nnopds-paged-test--settled reader 1)
          (nnopds-paged-double-page)
@@ -153,7 +156,7 @@ os.execv(%s, [%s] + sys.argv[1:])
          (nnopds-paged-set-direction 'rtl)
          (gnus-summary-exit))))
     (nnopds-test--write opds-root "requests.jsonl" "")
-    (cl-letf (((symbol-function 'nnopds-pdf--inspect)
+    (cl-letf (((symbol-function 'nnopds-mupdf--inspect)
                (lambda (&rest _args) (ert-fail "Cached PDF should not be inspected again"))))
       (nnopds-test--with-browser
        (nnopds-test--at-book)
@@ -173,9 +176,9 @@ os.execv(%s, [%s] + sys.argv[1:])
            (should-not (nnopds-test--requests opds-root))
            (gnus-summary-exit))))))))
 
-(ert-deftest nnopds-pdf-test-download-failures-and-edition-changes-are-not-committed ()
-  (nnopds-pdf-test--with-server
-   (let* ((publication (nnopds-pdf-test--publication connection))
+(ert-deftest nnopds-mupdf-test-download-failures-and-edition-changes-are-not-committed ()
+  (nnopds-mupdf-test--with-server
+   (let* ((publication (nnopds-mupdf-test--publication connection))
           (directory (nnopds--cache-file
                       connection
                       (concat (secure-hash 'sha256 (nnopds--publication-group publication)) ".pdf/")))
@@ -183,31 +186,32 @@ os.execv(%s, [%s] + sys.argv[1:])
           (index (expand-file-name "index.json" directory)))
      (dolist (failure '("503" "truncated"))
        (nnopds-test--write opds-root "download-failure.txt" failure)
-       (should-error (nnopds--load-publication 'pdf connection publication))
+       (should-error (nnopds--load-publication 'local connection publication))
        (should-not (file-exists-p file))
        (should-not (file-exists-p index))
        (should-not (directory-files directory nil "^\\.nnopds-")))
      (delete-file (expand-file-name "download-failure.txt" opds-root))
      (nnopds-test--write opds-root "book.pdf" "%PDF-1.7\nInvalid PDF\n%%EOF\n")
-     (should-error (nnopds--load-publication 'pdf connection publication))
+     (should-error (nnopds--load-publication 'local connection publication))
      (should-not (file-exists-p file))
      (should-not (file-exists-p index))
      (should-not (directory-files directory nil "^\\.nnopds-"))
      (nnopds--write-json index '(:digest "previous-edition"))
-     (should-error (nnopds--load-publication 'pdf connection publication))
+     (should-error (nnopds--load-publication 'local connection publication))
      (should-not (file-exists-p file))
      (should (equal (plist-get (nnopds--read-json index) :digest) "previous-edition"))
      (should-not (directory-files directory nil "^\\.nnopds-")))))
 
-(ert-deftest nnopds-pdf-test-render-failure-keeps-download-and-can-retry ()
-  (nnopds-pdf-test--with-server
-   (let ((nnopds-pdf-mutool-program (nnopds-pdf-test--wrapper opds-root)))
+(ert-deftest nnopds-mupdf-test-render-failure-keeps-download-and-can-retry ()
+  (nnopds-mupdf-test--with-server
+   (let ((nnopds-mupdf-program (nnopds-mupdf-test--wrapper opds-root)))
      (nnopds-test--write opds-root "render-failure.txt" "enabled")
      (nnopds-paged-test--with-images
       (nnopds-test--with-browser
        (nnopds-test--at-book)
-       (nnopds-browse-read)
+       (nnopds-browse-select)
        (with-current-buffer gnus-summary-buffer
+         (gnus-summary-display-article (gnus-summary-article-number))
          (let* ((reader nnopds-paged--reader) (book (nnopds-paged--reader-book reader)))
            (nnopds-paged-test--settled reader)
            (should (string-match-p "fixture render failure" (gethash 1 (nnopds-paged--book-errors book))))
@@ -222,19 +226,20 @@ os.execv(%s, [%s] + sys.argv[1:])
            (should-not (gethash 1 (nnopds-paged--book-errors book)))
            (gnus-summary-exit))))))))
 
-(ert-deftest nnopds-pdf-test-closing-reader-cancels-render-and-restores-buffers ()
-  (nnopds-pdf-test--with-server
-   (let ((nnopds-pdf-mutool-program (nnopds-pdf-test--wrapper opds-root)))
+(ert-deftest nnopds-mupdf-test-closing-reader-cancels-render-and-restores-buffers ()
+  (nnopds-mupdf-test--with-server
+   (let ((nnopds-mupdf-program (nnopds-mupdf-test--wrapper opds-root)))
      (nnopds-test--write opds-root "render-delay.txt" "2")
      (nnopds-paged-test--with-images
       (nnopds-test--with-browser
        (nnopds-test--at-book)
-       (nnopds-browse-read)
+       (nnopds-browse-select)
        (with-current-buffer gnus-summary-buffer
+         (gnus-summary-display-article (gnus-summary-article-number))
          (let* ((reader nnopds-paged--reader) (book (nnopds-paged--reader-book reader))
                 (article (get-buffer gnus-article-buffer))
                 (render (cl-find-if (lambda (child)
-                                      (string-prefix-p "nnopds-pdf-render" (process-name child)))
+                                      (string-prefix-p "nnopds-mupdf-render" (process-name child)))
                                     (process-list)))
                 (output (and render (process-buffer render))))
            (should render)
@@ -249,5 +254,57 @@ os.execv(%s, [%s] + sys.argv[1:])
            (when (buffer-live-p article)
              (should-not (buffer-local-value 'nnopds-paged-mode article))))))))))
 
-(provide 'nnopds-pdf-test)
-;;; nnopds-pdf-test.el ends here
+(ert-deftest nnopds-mupdf-test-browser-opens-downloaded-pdf-in-article-buffer ()
+  (nnopds-mupdf-test--with-server
+   (nnopds-test--with-browser
+     (nnopds-test--at-book)
+     (should-error (nnopds-browse-read) :type 'user-error)
+     (should (= 1 (length (nnopds-test--requests opds-root))))
+     (let ((file (nnopds-browse-download)))
+       (should (equal (nnopds--read-bytes file)
+                      (nnopds--read-bytes (expand-file-name "book.pdf" opds-root))))
+       (nnopds-test--write opds-root "requests.jsonl" "")
+       (nnopds-paged-test--with-images
+         (nnopds-browse-read)
+         (with-current-buffer gnus-summary-buffer
+           (nnopds-paged-test--settled nnopds-paged--reader 1)
+           (with-current-buffer gnus-article-buffer
+             (should (derived-mode-p 'gnus-article-mode))
+             (should nnopds-paged-mode))
+           (gnus-summary-exit)))
+       (should-not (nnopds-test--requests opds-root))))))
+
+(ert-deftest nnopds-mupdf-test-epub-pages-use-a-separate-gnus-group ()
+  (nnopds-test--with-server
+    (skip-unless (and (executable-find nnopds-mupdf-program)
+                      (or (executable-find "7zz") (executable-find "7z"))
+                      (libxml-available-p)))
+    (nnopds-test--with-browser
+      (nnopds-test--at-book)
+      (let ((file (nnopds-browse-download)) (chapters (gnus-group-real-name (gnus-browse-group-name))))
+        (nnopds-browse-read)
+        (with-current-buffer gnus-summary-buffer
+          (should (equal (gnus-group-real-name gnus-newsgroup-name) chapters))
+          (should-not nnopds-paged-mode)
+          (with-current-buffer gnus-article-buffer
+            (should (derived-mode-p 'gnus-article-mode))
+            (should (string-search "中文内容 α" (buffer-string))))
+          (gnus-summary-exit))
+        (nnopds-test--write opds-root "requests.jsonl" "")
+        (let ((nnopds-book-readers '((epub . zr-doc-view))))
+          (nnopds-paged-test--with-images
+            (with-current-buffer gnus-browse-buffer
+              (nnopds-test--at-book)
+              (should (equal (nnopds-browse-download) file))
+              (nnopds-browse-read))
+            (with-current-buffer gnus-summary-buffer
+              (should (equal (gnus-group-real-name gnus-newsgroup-name) (concat chapters ".pages")))
+              (nnopds-paged-test--settled nnopds-paged--reader 1)
+              (with-current-buffer gnus-article-buffer
+                (should (derived-mode-p 'gnus-article-mode))
+                (should nnopds-paged-mode))
+              (gnus-summary-exit))))
+        (should-not (nnopds-test--requests opds-root))))))
+
+(provide 'nnopds-mupdf-test)
+;;; nnopds-mupdf-test.el ends here

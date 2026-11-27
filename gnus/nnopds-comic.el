@@ -38,19 +38,18 @@
           :image-type (cdr (assoc type nnopds-comic--image-types))
           :width (plist-get resource :width) :height (plist-get resource :height))))
 
-(cl-defmethod nnopds--load-publication ((_format (eql comic)) connection publication)
-  (let* ((directory (nnopds--cache-file
-                     connection
-                     (concat (secure-hash 'sha256 (nnopds--publication-group publication)) ".comic/")))
+(defun nnopds-comic--load (connection publication)
+  "Read PUBLICATION's Divina manifest on CONNECTION and prepare its page articles."
+  (let* ((directory (nnopds-paged--directory connection publication))
          (manifest-file (expand-file-name "manifest.json" directory))
          (cached (nnopds--read-json manifest-file))
          (response (unless cached
                      (nnopds--request
-                      connection "GET" (nnopds--publication-acquisition publication) nil nil
+                      connection "GET" (nnopds--publication-stream publication) nil nil
                       '(("Accept" . "application/divina+json, application/opds-publication+json;q=0.9, application/webpub+json;q=0.8")))))
          (manifest (if cached (plist-get cached :manifest) (nnopds--json response)))
          (base (or (and cached (plist-get cached :url)) (plist-get response :url)
-                   (nnopds--publication-acquisition publication)))
+                   (nnopds--publication-stream publication)))
          (pages (vconcat
                  (seq-map-indexed
                   (lambda (resource index)
@@ -62,8 +61,9 @@
     (unless cached (nnopds--write-json manifest-file (list :url base :manifest manifest)))
     (nnopds-paged--open-book
      'comic connection publication pages directory
-     :progression (if (equal (plist-get (plist-get manifest :metadata) :readingProgression) "rtl") 'rtl 'ltr)
-     :cover nnopds-paged-cover-single :landscape nnopds-paged-landscape-single)))
+     :progression (or (nnopds-paged--reading-progression manifest)
+                      (nnopds-paged--reading-progression (nnopds--publication-document publication))
+                      'ltr))))
 
 (cl-defmethod nnopds-paged--file ((_source (eql comic)) book page _width)
   (expand-file-name (secure-hash 'sha256 (plist-get page :href))

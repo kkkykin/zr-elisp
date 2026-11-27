@@ -112,7 +112,7 @@ position initialization is performed.  Preserve the cached edition's digest."
 
 (defun nnopds-search--fields (book chapter group)
   "Return searchable fields for BOOK's CHAPTER in GROUP."
-  (let* ((header (nnopds--header 'epub book chapter group))
+  (let* ((header (nnopds--header 'zr-epub book chapter group))
          (body (nnopds-search--chapter-text chapter))
          (subject (mail-header-subject header))
          (from (mail-header-from header))
@@ -137,7 +137,8 @@ resources are skipped.  Searching does not download books or update progress."
     (unless (gnus-check-server method) (user-error "OPDS server unavailable"))
     (let* ((connection (nnopds--change-server (cadr method)))
            (table (nnopds--connection-publications connection))
-           (groups (delete-dups (mapcar (lambda (group) (gnus-group-real-name group))
+           (groups (delete-dups (mapcar (lambda (group)
+                                         (string-remove-suffix ".pages" (gnus-group-real-name group)))
                                        (or groups (gnus-search-get-active server))))))
       (unless (eql limit 0)
         (catch 'limit

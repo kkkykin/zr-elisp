@@ -4,12 +4,17 @@
 
 ## nnopds
 
-`nnopds` 将 OPDS 2 目录作为 Gnus server，每本书是一个 group，正文资源
-是 articles。首次进入 EPUB 时下载整本，章节解析复用 `zr-epub`。
-漫画通过 Divina manifest 按页取图；PDF 首次打开时完整下载，再按需渲染。
-漫画和 PDF 的一张原始页面对应一篇 article，共用分页阅读器。
-HTTP 请求需要 `curl`；EPUB 需要 libxml 和 `7zz`/`7z`；PDF 需要提供
-`run` 和 `draw` 命令的 `mutool`；页图阅读需要支持相应图片格式的图形 Emacs。
+`nnopds` 将 OPDS 2 目录作为 Gnus server，在 Article buffer 中显示章节或页图。
+章节阅读复用 `zr-epub`，分页阅读复用 `zr-doc-view` 的分页规则。
+
+| 阅读方式 | 本地原文件 | 流式来源 |
+| --- | --- | --- |
+| `zr-epub` | EPUB 章节 | — |
+| `zr-doc-view` | PDF、CBZ、EPUB 页图 | CBZ 的 Divina 页图 |
+
+HTTP 请求需要 `curl`，EPUB 章节解析需要 libxml 和 `7zz`/`7z`。
+PDF 和 CBZ 的下载验证以及本地分页需要提供 `run` 和 `draw` 命令的 `mutool`。
+显示页图需要支持相应图片格式的图形 Emacs。
 
 更新已编译的 nnopds 时，先用 `make clean` 清理旧字节码，再重新编译这些
 模块；它们共享的结构体访问器会在编译时内联：
@@ -50,9 +55,27 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 索引；新服务器尚无索引时列表为空，可以先用 `nnopds-browse` 发现书籍。
 分级目录保留 OPDS 的 `navigation`、嵌套 `groups` 和 facets，
 只加载当前页，不递归扫描。目录和分页链接都按 `RET` 进入，`b`/`^` 返回，
-`n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入章节
-或页码列表并定位到上次读到的位置，不打开正文；`SPC` 直接从该位置阅读。
+`n`/`p` 移动，`g` 刷新当前页，`q` 退出。书籍用 `u` 订阅，`RET` 进入
+Gnus 的章节或页码列表，并定位到上次读到的位置。首次进入整本格式的列表时
+会下载文件。
 可以直接将某个目录或书目列表的 URL 配为 `nnopds-url`。
+
+在书籍行按 `D`（`M-x nnopds-browse-download`）下载整本并留在目录中。
+`SPC` 在 Article buffer 开始阅读。有原文件缓存时从本地读取，未下载的 Divina 漫画
+通过服务器按页读取。未下载的 EPUB、
+PDF 和仅提供整包链接的 CBZ 会提示先按 `D`。Gnus 生成章节或页码列表时
+复用已下载的原文件。
+
+`nnopds-book-readers` 按格式选择 Gnus Summary 和 Article 的阅读方式。
+EPUB 默认按章节阅读，PDF 和 CBZ 默认按页阅读。
+用下面的配置可将 EPUB 也按页阅读。
+
+```elisp
+(setq nnopds-book-readers '((epub . zr-doc-view)))
+```
+
+两种 EPUB 阅读方式共用原件缓存，各自有 Gnus group、已读标记和续读位置。
+EPUB 全文搜索结果定位到章节 group。
 
 在目录浏览器按 `s`（`M-x nnopds-browse-search`）输入关键词进行服务端搜索。
 后端自动读取当前页的 OPDS 2 `rel=search` URI 模板，当前页未提供时使用根目录
@@ -107,10 +130,11 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 
 目录按服务器提供的分页逐页加载。
 
-首次列出书籍时只取书目，章节数或页数在首次打开后更新。支持
-`application/divina+json` 漫画 manifest、`application/epub+zip` 和
-`application/pdf` 取书链接；多个入口同时存在时按漫画、EPUB、PDF 的顺序选择。
-EPUB 阅读使用 Gnus 原有命令，图片、跨章链接和脚注由 `zr-gnus-epub` 处理。
+首次列出书籍时只取书目，Gnus 的章节数或页数在首次进入书籍列表后更新。支持
+`application/divina+json` 漫画 manifest，以及 `application/epub+zip`、
+`application/pdf` 和 `application/x-cbz` 等整本下载链接。带 Divina manifest
+的书籍使用 CBZ 下载链接，其他书籍按 EPUB、PDF、CBZ 的顺序选择。
+EPUB 章节阅读使用 Gnus 原有命令，图片、跨章链接和脚注由 `zr-gnus-epub` 处理。
 
 Komga 的 OPDS 2 目录在 `self` 链接提供漫画 manifest，用户需要页面流式阅读
 权限。calibre 9.18 及以上在 `/opds` 的 acquisition 链接提供 CBZ 漫画 manifest；
@@ -118,7 +142,8 @@ CBR/CB7 的整包下载链接不会作为流式漫画列出。后端沿 manifest
 读取图片，保留页 URL 的库名、版本等参数，并从原始和 alternate 链接中选择
 Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest 和 API key。
 
-漫画和 PDF 在 summary 和 article buffer 启用局部 `nnopds-paged-mode`：
+分页阅读时，Summary 和 Article buffer 启用 `nnopds-paged-mode`。
+同一本漫画下载后再次打开时，Gnus 从本地文件取页，沿用页码、同屏页数、独占设置和阅读方向。
 
 | 按键 | 操作 |
 | --- | --- |
@@ -131,18 +156,19 @@ Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest �
 | `p` / `DEL` | 按阅读顺序后退一屏 |
 | 左右箭头 | 按阅读方向移动一个原始页码 |
 | `j` | 跳到指定原始页码 |
-| `g` | 重试当前页面的下载或渲染失败 |
+| `g` | 重试当前页图的下载或渲染 |
 
-默认同屏一页。漫画默认封面、横页独占，方向跟随 manifest 的
-`readingProgression`；PDF 默认允许封面和横页与其他页并排，方向跟随 OPDS
-书目，缺少方向时使用左向右。`M-x nnopds-paged-set-direction` 可选择 `auto`。
+分页布局共用 `zr-doc-view` 的自定义项。默认同屏最多两页，横页独占。
+自动方向优先跟随已缓存 manifest 的 `readingProgression`，然后读取 OPDS 书目，
+缺少方向时使用左向右。
+`M-x nnopds-paged-set-direction` 可选择 `auto`。
 设置可在阅读中切换，并按书保存。可配置新书的初始显示：
 
 ```elisp
-(setq nnopds-paged-visible-pages 3
-      nnopds-paged-cover-single t
-      nnopds-paged-landscape-single t
-      nnopds-paged-direction 'auto)
+(setq zr-doc-view-visible-pages 3
+      zr-doc-view-cover-single t
+      zr-doc-view-landscape-single t
+      zr-doc-view-direction 'auto)
 ```
 
 当前原始页码是显示起点：N=3 时，`[2,3,4]` 按前进方向键变为 `[3,4,5]`，
@@ -151,27 +177,27 @@ Emacs 支持的格式。图片请求复用目录认证，包括 Basic、Digest �
 独占页会截断显示范围，末尾不足 N 页时显示剩余页面。页面按窗口宽高等比缩放，
 并排页使用相同高度，窗口调整后重新适配。漫画未提供尺寸时按需读取图片尺寸。
 
-打开漫画只取 manifest，列页目录或 Gnus 预取文章不会下载图片。PDF 首次进入
-group 时完整下载并验证文件，通过 `mutool run` 获取裁剪、旋转和 UserUnit
-生效后的页尺寸，再由 `mutool draw` 渲染 PNG。渲染按目标像素宽度向上取
+打开未下载的 Divina 漫画页列表时只取 manifest。列页目录或 Gnus 预取文章时也只取页码。
+Gnus 从 PDF、CBZ 或 EPUB 原文件分页时，通过 `mutool run` 获取页尺寸，再由
+`mutool draw` 渲染 PNG。PDF 页尺寸包含裁剪、旋转和 UserUnit。渲染按目标像素宽度向上取
 256、512、1024、2048 等档位，窗口变化跨越档位时重新渲染并复用已有缓存。
-可用 `nnopds-pdf-mutool-program` 指定可执行文件路径。
-PDF 当前采用页图阅读；文字选择、搜索和注释需要额外文本层，要求密码的 PDF
+可用 `nnopds-mupdf-program` 指定可执行文件路径。
+Gnus 中的 PDF 采用页图阅读，文字选择、搜索和注释需要额外文本层。要求密码的 PDF
 会报告打开失败。
 
 `nnopds-paged-prefetch-pages` 默认准备显示范围前后各 4 页，设为 0 可关闭；
 `nnopds-paged-max-requests` 默认限制每本书最多 2 个并发取图或渲染任务。
 任务写入临时文件，成功后替换正式缓存，关闭阅读或服务器时取消待处理任务。
-漫画 manifest 和图片缓存位于账号目录下的 `.comic/`，PDF 原文件、页尺寸索引
-和渲染图片位于 `.pdf/`，均可跨会话、离线复用。解码图片只保留当前显示的页面。
+漫画 manifest 和图片缓存位于账号目录下的 `.comic/`。PDF 和 CBZ 的整本原文件、
+页尺寸索引和 Gnus 渲染图片分别位于 `.pdf/` 和 `.cbz/`。分页 EPUB 的页尺寸和
+渲染图片位于 `.epub-pages/`。这些缓存可跨会话复用。
+解码图片只保留当前显示的页面。
 
-漫画和 PDF 自动保存本地原始页码，重新进入 group 时恢复。完整显示当前页面
-范围后才保存位置、更新其中 articles 的已读标记；预取、失败任务和布局重绘
-不会推进位置，Gnus 的收藏等手动标记保留。`nnopds-koreader-*`、
-`nnopds-resume` 和 `nnopds-save-position` 的服务器同步继续用于 EPUB。
+分页阅读完整显示当前页面范围后保存本地页码，更新相应 articles 的已读标记并保留
+收藏等手动标记。重新进入 Gnus group 时从保存的页码继续。
+`nnopds-koreader-*`、`nnopds-resume` 和 `nnopds-save-position` 的服务器同步用于 EPUB 章节阅读。
 
-取书请求优先接受 EPUB 媒体类型，也接受通用二进制响应；下载内容按 EPUB
-解析，支持将附件标为 `application/octet-stream` 的接口。
+整本下载优先接受书籍格式对应的媒体类型，也接受 `application/octet-stream`。
 
 目录、EPUB、漫画和 PDF 缓存保存在 `gnus-cache-directory` 下的 `nnopds/` 子目录，
 不同 server 和认证配置分别缓存。打开 Gnus 只读取本地已遇到的书籍索引，
@@ -254,9 +280,10 @@ spine 中的序号估算，实际跳转使用 XPointer。KOReader 没有条件�
 
 目录、阅读格式和同步协议分别处理。`nnopds-progress-protocol` 当前只支持
 `koreader`，配置项和协议读写接口保留，方便后续添加正式的 OPDS 同步协议。
-Divina 取图位于 `nnopds-comic.el`，PDF 下载和 MuPDF 适配位于 `nnopds-pdf.el`，
-共用布局、导航、调度与本地位置位于 `nnopds-paged.el`。服务器漫画和 PDF 进度
-协议可在现有位置接口上另行适配。
+Divina 取图位于 `nnopds-comic.el`，本地文档的 Gnus 页图渲染位于
+`nnopds-mupdf.el`。`nnopds-paged.el` 将页图接入 Gnus Article buffer，
+调度取图任务并管理阅读状态。并排尺寸、页范围和翻屏位置由 `zr-doc-view` 计算。
+服务器漫画和 PDF 进度协议可在现有位置接口上另行适配。
 
 ## zr-epub
 
@@ -343,7 +370,7 @@ Gnus 的原有命令及函数保持不变。
 ## 检查
 
 ```sh
-make test TEST_FILE='gnus/test/zr-epub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el gnus/test/nnopds-pdf-test.el'
+make test TEST_FILE='gnus/test/zr-epub-test.el gnus/test/nnopds-test.el gnus/test/nnopds-comic-test.el gnus/test/nnopds-mupdf-test.el'
 make check-parens byte-compile FILE='zr-epub.el $(wildcard gnus/*.el)'
 make clean
 ```

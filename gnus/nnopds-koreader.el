@@ -74,7 +74,7 @@
     locator))
 
 (cl-defmethod nnopds-koreader--encode ((_format (eql epub)) data locator)
-  (let* ((location (nnopds--locate 'epub data locator))
+  (let* ((location (nnopds--locate 'zr-epub data locator))
          (chapter (cl-find (car location) (zr-epub-book-chapters data)
                            :key (lambda (chapter) (plist-get chapter :number))))
          (spine (zr-epub-book-spine data))
@@ -97,7 +97,7 @@
          (chapter (and path (cl-find path (zr-epub-book-chapters data)
                                      :key (lambda (chapter) (plist-get chapter :path)) :test #'equal))))
     (unless chapter (error "KOReader XPointer does not match an EPUB resource: %s" progress))
-    (let ((locator (nnopds--locator 'epub data chapter)))
+    (let ((locator (nnopds--locator 'zr-epub data chapter)))
       (setf (plist-get (plist-get locator :locations) :totalProgression) percentage)
       locator)))
 

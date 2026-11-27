@@ -135,7 +135,7 @@
             (should (equal (seq-map (lambda (result) (aref result 1))
                                    (nnopds-search-test--query (car case) (list group)))
                            (cdr case))))
-          (let ((id (mail-header-id (nnopds--header 'epub book (zr-epub-chapter book 2) group))))
+          (let ((id (mail-header-id (nnopds--header 'zr-epub book (zr-epub-chapter book 2) group))))
             (should (= 2 (aref (aref (nnopds-search-test--query (concat "id:\"" id "\"")) 0) 1))))
           (dolist (term '("HiddenTitle" "HiddenCSS" "HiddenScript" "HiddenAttribute"))
             (should (equal (nnopds-search-test--query term) [])))
