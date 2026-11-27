@@ -71,6 +71,35 @@ Gnus 自带的 server buffer `RET` 和 group buffer `B` 则显示已遇到的书
 具体搜索范围和语法由服务器决定，客户端遵循其
 [OPDS 2 搜索链接](https://specs.opds.io/opds-2.0#3-search)，无需按服务器配置路径。
 
+章节全文搜索使用独立的 `nnopds-search` 模块：
+
+```elisp
+(require 'nnopds-search)
+```
+
+它为 `nnopds` 注册 `gnus-search-nnopds` 引擎。在 Group buffer 的书籍行按
+`G G`（`gnus-group-read-ephemeral-search-group`）搜索该书，也可先标记多本书
+再搜索；在 Server buffer 的 OPDS 服务器行按 `G` 搜索其本地已知书籍。
+`G g` 创建可重复使用的搜索 group。只搜索已下载的 EPUB，包含可阅读的
+章节、附录和目录；未下载书籍、PDF、漫画和 EPUB 中的纯图片资源跳过。
+搜索不联网、不更新阅读位置，重新启动后仍可搜索本地缓存。
+结果列出命中的章节，可直接阅读，按 `A W` 返回原书中的该章节。
+
+默认查询是不区分大小写的字面文本匹配，正文会去除 HTML 标签、解码实体并
+合并空白；章节标题和作者也参与匹配。需要多个关键词、字段和布尔条件时，
+启用 Gnus 的查询解析：
+
+```elisp
+(setq gnus-search-use-parsed-queries t)
+```
+
+支持隐式 AND、`or`、`not` / `-`、括号、带双引号的短语和 `/正则/`。
+`body:` 搜索章节正文，`subject:` 搜索章节标题，`from:` / `sender:` 搜索作者，
+`text:` 搜索正文和文章头，`id:` 搜索 Message-ID。例如
+`body:"中文内容" not subject:附录`，或 `subject:第一章 or body:/脚注.*目标/`。
+`limit:20` 限制结果数；`C-u G G` 可临时使用字面查询。
+不支持的字段会报告错误。
+
 书籍的章节顺序、`gnus-summary-goto-unread`（`never`）和 `gnus-large-newsgroup`
 （`nil`）是 Summary 的局部默认值，可由书籍的 group 参数覆盖。
 后端不改写 `gnus-parameters`。如果希望进入书籍时始终显示已读章节，可在
