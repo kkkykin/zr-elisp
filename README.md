@@ -88,6 +88,28 @@ DocView 的配置；加载新包不会自动启用模式，关闭模式恢复原
 成功后触发，页码始终按文件顺序排列；加载失败及缩放、方向切换等重绘不会重复
 报告。这些接口可供 nnopds 等入口同步页文章和已读标记。
 
+`zr-shadowfile` 修正内置 shadowfile 对 Windows 盘符、cluster 和 regexp
+文件组的路径处理，通过 TRAMP 维护跨机器的文件副本：
+
+```elisp
+(use-package zr-shadowfile
+  :config (zr-shadowfile-mode 1))
+```
+
+用此模式代替 `shadow-initialize`，继续使用 `shadow-define-literal-group`、
+`shadow-define-regexp-group`、`shadow-define-cluster` 和 `shadow-cancel`。
+定义 literal 文件组时，逐个输入站点及该站点的文件路径，例如本机的
+`C:/Users/user/notes.txt` 与远端的 `/home/user/notes.txt`；`~/` 在所选站点
+展开。Regexp 文件组要求各站点的文件名相同，Windows 与 Linux 的不同路径
+应使用 literal 文件组。
+
+保存文件后记录待复制队列，执行 `C-x 4 s` 或 `shadow-copy-files` 更新副本。
+默认退出 Emacs 时也询问复制；将 `zr-shadowfile-copy-on-exit` 设为 nil 可关闭
+退出复制。确认行为沿用 `shadow-noquery`，配置和队列分别保存在
+`shadow-info-file`、`shadow-todo-file`。复制失败保留队列，供下次重试。
+TRAMP 连接须能独立访问目标，目标目录须已存在；副本更新会覆盖目标文件，
+不合并两端的并行修改。加载库不会自动启用，关闭模式撤销替换、hook 和快捷键。
+
 HTTP 客户端请求统一使用 `zr-http`，需要本机安装 curl。全局默认、包级
 `*-http-options`、单次请求参数按顺序覆盖，显式 nil 也会覆盖默认值：
 
