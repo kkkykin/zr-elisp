@@ -156,16 +156,43 @@
                      ((:source "~/org/" :destination "~/copies/" :unknown t))
                      ((:source "~/org/" :source "~/org/" :destination "~/copies/"))
                      ((:source "~/org/" :destination))
-                     ((:type unknown :source "~/org/" :destination "~/copies/"))
-                     ((:type nil :source "~/org/" :destination "~/copies/"))
-                     ((:type file :source "~/notes.org" :destination "~/notes.org"))
-                     ((:type file :source "~/org/" :destination "~/notes.org"))
-                     ((:type file :source "~/notes.org" :destination "~/copies/"))))
+                     ((:type file :source "~/notes.org" :destination "~/copies/notes.org"))
+                     ((:source "~/notes.org" :destination "~/notes.org"))
+                     ((:source "~/notes.org" :destination "~/copies/"))))
       (setq zr-shadowfile-rules rules)
       (should-error (zr-shadowfile-mode 1))
       (should-not zr-shadowfile-mode)
       (should-not zr-shadowfile--active)
       (should-not (memq #'zr-shadowfile--after-save after-save-hook)))))
+
+(ert-deftest zr-shadowfile-source-paths-determine-mappings-before-they-exist ()
+  (zr-shadowfile-test--with-state
+    (let* ((source (expand-file-name "sources.d/"))
+           (directory-target (expand-file-name "tree-copy"))
+           (file (expand-file-name "notes"))
+           (file-target (expand-file-name "file-copy"))
+           (child (expand-file-name "nested/entry" source))
+           (child-target (expand-file-name "nested/entry"
+                                         (file-name-as-directory directory-target))))
+      (zr-shadowfile-mode -1)
+      (setq zr-shadowfile-rules
+            (list (list :source source :destination directory-target)
+                  (list :source file :destination file-target)
+                  (list :source "/webdavs:offline@example.invalid:/dav/sources.d/"
+                        :destination (expand-file-name "remote-tree-copy"))
+                  (list :source "/webdavs:offline@example.invalid:/dav/notes"
+                        :destination (expand-file-name "remote-file-copy"))))
+      (cl-letf (((symbol-function 'zr-tramp-webdav--request)
+                 (lambda (&rest _) (ert-fail "Rules must not connect to remote sources"))))
+        (zr-shadowfile-mode 1)
+        (zr-shadowfile-test--write file "File")
+        (zr-shadowfile-test--write child "Directory child")
+        (should (= (zr-shadowfile-queue-directory default-directory) 2))
+        (should (gethash (cons file file-target) zr-shadowfile--pending))
+        (should (gethash (cons child child-target) zr-shadowfile--pending))
+        (should (= (zr-shadowfile-copy-files t) 2))
+        (should (equal (zr-shadowfile-test--bytes file-target) "File"))
+        (should (equal (zr-shadowfile-test--bytes child-target) "Directory child"))))))
 
 (ert-deftest zr-shadowfile-invalid-state-is-not-evaluated ()
   (zr-shadowfile-test--with-state
@@ -294,7 +321,7 @@
       (zr-shadowfile-test--git source "init" "--quiet")
       (setq zr-shadowfile-rules
             (list (list :source source :destination directory-target :vc-only t)
-                  (list :type 'file :source file :destination file-target :vc-only t)))
+                  (list :source file :destination file-target :vc-only t)))
       (with-current-buffer (find-file-noselect file)
         (goto-char (point-max)) (insert "\nUntracked save") (save-buffer))
       (should (= (hash-table-count zr-shadowfile--pending) 0))
@@ -620,8 +647,8 @@
       (zr-shadowfile-test--write file "Saved")
       (zr-shadowfile-test--write unrelated "Unrelated")
       (setq zr-shadowfile-rules
-            (list (list :type 'file :source file :destination first)
-                  (list :type 'file :source file :destination second)))
+            (list (list :source file :destination first)
+                  (list :source file :destination second)))
       (should (= (zr-shadowfile-queue-file file) 2))
       (should (= (zr-shadowfile-queue-file unrelated) 0))
       (should (= (zr-shadowfile-queue-file file) 0))
@@ -635,7 +662,7 @@
       (should (equal (zr-shadowfile-test--bytes file) (zr-shadowfile-test--bytes first)))
       (should (equal (zr-shadowfile-test--bytes file) (zr-shadowfile-test--bytes second))))))
 
-(ert-deftest zr-shadowfile-explicit-file-rule-remains-visible-inside-excluded-directory ()
+(ert-deftest zr-shadowfile-file-rule-remains-visible-inside-excluded-directory ()
   (zr-shadowfile-test--with-state
     (let* ((source (expand-file-name "org/"))
            (directory-target (expand-file-name "copies/tree/"))
@@ -645,7 +672,7 @@
         (zr-shadowfile-test--write (expand-file-name relative source) "Saved"))
       (setq zr-shadowfile-rules
             (list (list :source source :destination directory-target :exclude "\\`private\\'")
-                  (list :type 'file :source file :destination file-target)))
+                  (list :source file :destination file-target)))
       (should (= (zr-shadowfile-queue-directory source) 2))
       (should (gethash (cons file file-target) zr-shadowfile--pending))
       (with-current-buffer (find-file-noselect (expand-file-name "private/other.org" source))
@@ -661,7 +688,7 @@
           (destination (expand-file-name "copies/renamed.txt")))
       (zr-shadowfile-test--write file "Saved")
       (setq zr-shadowfile-rules
-            (list (list :type 'file :source file :destination destination :include "\\.txt\\'")))
+            (list (list :source file :destination destination :include "\\.txt\\'")))
       (should (= (zr-shadowfile-queue-file file) 0))
       (setf (plist-get (car zr-shadowfile-rules) :include) "\\.org\\'"
             (plist-get (car zr-shadowfile-rules) :exclude) "\\`notes\\.org\\'")
@@ -714,7 +741,7 @@
              (target (concat remote-root "archive/renamed.txt")))
         (let ((coding-system-for-write 'utf-8-dos))
           (zr-shadowfile-test--write file "第一行\nsecond\n"))
-        (setq zr-shadowfile-rules (list (list :type 'file :source file :destination target)))
+        (setq zr-shadowfile-rules (list (list :source file :destination target)))
         (cl-letf (((symbol-function 'zr-tramp-webdav--request)
                    (lambda (&rest _) (ert-fail "Queuing a file must not connect to the target"))))
           (should (= (zr-shadowfile-queue-file file) 1)))
@@ -727,7 +754,7 @@
     (zr-shadowfile-test--with-webdav
       (let ((file (concat remote-root "notes.org"))
             (target (expand-file-name "copies/renamed.txt")))
-        (setq zr-shadowfile-rules (list (list :type 'file :source file :destination target)))
+        (setq zr-shadowfile-rules (list (list :source file :destination target)))
         (with-current-buffer (find-file-noselect file)
           (insert "远端文件\n") (save-buffer))
         (should (gethash (cons file target) zr-shadowfile--pending))

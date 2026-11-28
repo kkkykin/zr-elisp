@@ -6,8 +6,8 @@
 ;;; Commentary:
 
 ;; Configure `zr-shadowfile-rules' and enable `zr-shadowfile-mode'.
-;; Directory rules preserve relative paths.  Rules with `:type file' map
-;; an individual source file to a destination filename.  Local paths,
+;; Source paths ending in a directory separator preserve relative paths.
+;; Other sources map one file to a destination filename.  Local paths,
 ;; including Windows drive letters and UNC paths, use the usual Emacs file
 ;; APIs; remote paths use TRAMP.
 ;;
@@ -40,10 +40,12 @@
 
 (defcustom zr-shadowfile-rules nil
   "One-way file and directory copy rules.
-Each rule is a plist with :source and :destination paths.  :type defaults
-to directory, preserving relative paths; file maps one source file to an
-exact destination filename, which may have a different name.  Relative
-paths use the local home directory as their base; remote names use TRAMP syntax.
+Each rule is a plist with :source and :destination paths.  A source ending
+in a directory separator denotes a directory, preserving relative paths;
+otherwise it maps one source file to an exact destination filename, which
+may have a different name.  Sources need not exist when configuring rules.
+Relative paths use the local home directory as their base; remote names
+use TRAMP syntax.
 Matching follows the source filesystem's case rules.
 
 :vc-only t restricts a rule to source files registered with an Emacs VC
@@ -56,13 +58,13 @@ each ancestor directory, without trailing slashes.  Excluded directories
 are pruned unless another rule needs their contents.  Saving a file below
 an excluded directory does not queue a copy under that rule.
 For file rules, :include and :exclude match the source basename.
-Directory destinations must be outside their source; file destinations
-must be different from their source and must not end in a directory separator.
+Directory destinations are treated as directories and must be outside
+their source; file destinations must be different from their source and
+must not end in a directory separator.
 
 Changes affect new tasks; pending tasks retain their source and destination."
   :type '(repeat (plist :options
-                       ((:type (choice (const directory) (const file)))
-                        (:source file) (:destination file)
+                       ((:source file) (:destination file)
                         (:vc-only boolean)
                         (:include (choice (const nil) regexp))
                         (:exclude (choice (const nil) regexp)))))
@@ -121,7 +123,7 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
 
 (defun zr-shadowfile--check-file-target (file destination)
   "Check that DESTINATION names a file other than FILE."
-  (when (equal destination (file-name-as-directory destination))
+  (when (directory-name-p destination)
     (user-error "File destination requires a filename: %s" destination))
   (when (zr-shadowfile--same-file-name-p destination file)
     (user-error "File destination must differ from its source: %s" destination)))
@@ -136,14 +138,11 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
        (user-error "Invalid copy rule: %S" rule))
      (let (keys)
        (cl-loop for (key value) on rule by #'cddr do
-                (unless (and (memq key '(:type :source :destination :vc-only :include :exclude))
+                (unless (and (memq key '(:source :destination :vc-only :include :exclude))
                              (not (memq key keys)))
                   (user-error "Invalid or repeated copy rule option: %S" key))
                 (push key keys)
                 (cond
-                 ((eq key :type)
-                  (unless (memq value '(file directory))
-                    (user-error "Copy rule :type must be file or directory")))
                  ((eq key :vc-only)
                   (unless (memq value '(nil t))
                     (user-error "Copy rule :vc-only must be nil or t")))
@@ -155,12 +154,12 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
                   (string-match-p value "")))))
      (unless (and (plist-get rule :source) (plist-get rule :destination))
        (user-error "Copy rules require :source and :destination"))
-     (let ((type (or (plist-get rule :type) 'directory))
+     (let ((type (if (directory-name-p (plist-get rule :source)) 'directory 'file))
            (source (zr-shadowfile--expand-path (plist-get rule :source)))
            (destination (zr-shadowfile--expand-path (plist-get rule :destination))))
        (if (eq type 'file)
            (progn
-             (when (equal source (file-name-as-directory source))
+             (when (directory-name-p source)
                (user-error "File source requires a filename: %s" source))
              (zr-shadowfile--check-file-target source destination))
          (setq source (file-name-as-directory source)

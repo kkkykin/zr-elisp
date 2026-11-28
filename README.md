@@ -103,12 +103,14 @@ Windows 盘符、UNC 路径以及 TRAMP 远程路径。例如将 Windows 的 `~/
 (zr-shadowfile-mode 1)
 ```
 
-单文件规则使用 `:type file`，源和目标都填写完整文件名，可与目录规则混用：
+规则根据源路径末尾的目录分隔符区分类型：`~/org/` 表示目录，
+`~/notes.org` 表示文件，无需额外指定类型，也不要求配置时源路径已经存在。
+目录规则的目标按目录处理；单文件规则的源和目标都填写完整文件名，
+可与目录规则混用：
 
 ```elisp
 (add-to-list 'zr-shadowfile-rules
-             '(:type file
-               :source "~/notes.org"
+             '(:source "~/notes.org"
                :destination "/webdavs:xxxx@app.koofr.net:/dav/Koofr/notes-backup.org"))
 ```
 
