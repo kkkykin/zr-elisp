@@ -99,6 +99,21 @@
   (make-directory (file-name-directory file) t)
   (write-region contents nil file nil 'silent))
 
+(defun zr-shadowfile-test--git (directory &rest args)
+  "Run Git ARGS in DIRECTORY, reporting its output on failure."
+  (let ((default-directory directory))
+    (with-temp-buffer
+      (let ((status (apply #'process-file "git" nil t nil
+                           "-c" "user.name=zr-shadowfile tests"
+                           "-c" "user.email=zr-shadowfile-tests@example.invalid"
+                           "-c" "commit.gpgsign=false"
+                           "-c" (concat "core.hooksPath="
+                                        (expand-file-name ".git/no-hooks" directory))
+                           "-c" (concat "core.excludesFile="
+                                        (expand-file-name ".git/no-excludes" directory))
+                           args)))
+        (ert-info ((buffer-string)) (should (eq status 0)))))))
+
 (ert-deftest zr-shadowfile-loading-does-not-load-built-in-shadowfile-or-enable-mode ()
   (with-temp-buffer
     (let ((status (call-process
@@ -136,6 +151,8 @@
                      ((:source "" :destination "~/copies/"))
                      ((:source "~/org/" :destination "~/copies/" :include "["))
                      ((:source "~/org/" :destination "~/copies/" :exclude 1))
+                     ((:source "~/org/" :destination "~/copies/" :vc-only Git))
+                     ((:source "~/org/" :destination "~/copies/" :vc-only 1))
                      ((:source "~/org/" :destination "~/copies/" :unknown t))
                      ((:source "~/org/" :source "~/org/" :destination "~/copies/"))
                      ((:source "~/org/" :destination))
@@ -195,6 +212,113 @@
         (let ((pair (cons (expand-file-name relative source) (concat destination relative))))
           (should (gethash pair zr-shadowfile--pending))
           (should (member pair (zr-shadowfile-test--state))))))))
+
+(ert-deftest zr-shadowfile-vc-only-directory-rules-filter-registered-files ()
+  (skip-unless (executable-find "git"))
+  (zr-shadowfile-test--with-state
+    (let* ((vc-handled-backends '(Git))
+           (source (expand-file-name "sources/"))
+           (repository (expand-file-name "project/" source))
+           (destination (expand-file-name "copies/")))
+      (make-directory repository t)
+      (zr-shadowfile-test--git repository "init" "--quiet")
+      (zr-shadowfile-test--write (expand-file-name ".gitignore" repository) "ignored.org\n")
+      (dolist (relative '("tracked.org" "nested/中文 notes.org" "private/hidden.org" "README.txt"))
+        (zr-shadowfile-test--write (expand-file-name relative repository) "Committed"))
+      (zr-shadowfile-test--git repository "add" "--" ".gitignore" "tracked.org"
+                               "nested/中文 notes.org" "private/hidden.org" "README.txt")
+      (zr-shadowfile-test--git repository "commit" "--quiet" "-m" "Initial files")
+      (zr-shadowfile-test--write (expand-file-name "tracked.org" repository) "Modified")
+      (zr-shadowfile-test--write (expand-file-name "added.org" repository) "Added")
+      (zr-shadowfile-test--git repository "add" "--" "added.org")
+      (dolist (relative '("untracked.org" "ignored.org"))
+        (zr-shadowfile-test--write (expand-file-name relative repository) "Not tracked"))
+      (zr-shadowfile-test--write (expand-file-name "loose.org" source) "No repository")
+      (setq zr-shadowfile-rules
+            (list (list :source source :destination destination :vc-only t)))
+      (should (= (zr-shadowfile-queue-directory source) 6))
+      (dolist (relative '(".gitignore" "tracked.org" "nested/中文 notes.org"
+                          "private/hidden.org" "README.txt" "added.org"))
+        (should (gethash (cons (expand-file-name relative repository)
+                               (expand-file-name (concat "project/" relative) destination))
+                         zr-shadowfile--pending)))
+      (should (= (zr-shadowfile-cancel t) 6))
+      (setf (plist-get (car zr-shadowfile-rules) :include) "\\.org\\'"
+            (plist-get (car zr-shadowfile-rules) :exclude) "\\`project/private\\'")
+      (should (= (zr-shadowfile-queue-directory source) 3))
+      (should-not (gethash (cons (expand-file-name "private/hidden.org" repository)
+                                 (expand-file-name "project/private/hidden.org" destination))
+                           zr-shadowfile--pending)))))
+
+(ert-deftest zr-shadowfile-vc-filter-is-optional-for-each-rule ()
+  (skip-unless (executable-find "git"))
+  (zr-shadowfile-test--with-state
+    (let* ((vc-handled-backends '(Git))
+           (source (expand-file-name "repository/"))
+           (tracked (expand-file-name "tracked.org" source))
+           (untracked (expand-file-name "untracked.org" source))
+           (filtered (expand-file-name "filtered/"))
+           (ordinary (expand-file-name "ordinary/"))
+           (explicit-nil (expand-file-name "explicit-nil/")))
+      (zr-shadowfile-test--write tracked "Tracked")
+      (zr-shadowfile-test--write untracked "Untracked")
+      (zr-shadowfile-test--git source "init" "--quiet")
+      (zr-shadowfile-test--git source "add" "--" "tracked.org")
+      (setq zr-shadowfile-rules
+            (list (append (zr-shadowfile-test--rule source filtered) '(:vc-only t))
+                  (zr-shadowfile-test--rule source ordinary)
+                  (append (zr-shadowfile-test--rule source explicit-nil) '(:vc-only nil))))
+      (should (= (zr-shadowfile-queue-directory source) 5))
+      (dolist (destination (list filtered ordinary explicit-nil))
+        (should (gethash (cons tracked (expand-file-name "tracked.org" destination))
+                         zr-shadowfile--pending))
+        (should (eq (gethash (cons untracked (expand-file-name "untracked.org" destination))
+                             zr-shadowfile--pending)
+                    (not (equal destination filtered)))))
+      (should (= (zr-shadowfile-cancel t) 5))
+      (setq zr-shadowfile-rules (cdr zr-shadowfile-rules))
+      (cl-letf (((symbol-function 'vc-registered)
+                 (lambda (_) (ert-fail "Disabled VC filters must not query VC"))))
+        (should (= (zr-shadowfile-queue-directory source) 4))))))
+
+(ert-deftest zr-shadowfile-vc-only-file-queues-and-saves-recheck-registration ()
+  (skip-unless (executable-find "git"))
+  (zr-shadowfile-test--with-state
+    (let* ((vc-handled-backends '(Git))
+           (source (expand-file-name "repository/"))
+           (file (expand-file-name "notes.org" source))
+           (directory-target (expand-file-name "copies/"))
+           (file-target (expand-file-name "renamed/backup.org"))
+           (one-off (expand-file-name "one-off/notes.org")))
+      (zr-shadowfile-test--write file "Saved")
+      (zr-shadowfile-test--git source "init" "--quiet")
+      (setq zr-shadowfile-rules
+            (list (list :source source :destination directory-target :vc-only t)
+                  (list :type 'file :source file :destination file-target :vc-only t)))
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-max)) (insert "\nUntracked save") (save-buffer))
+      (should (= (hash-table-count zr-shadowfile--pending) 0))
+      (should (= (zr-shadowfile-queue-file file) 0))
+      (should-not (vc-backend file))
+      (should (= (zr-shadowfile-queue-file file one-off) 1))
+      (should (= (zr-shadowfile-copy-files t) 1))
+      (zr-shadowfile-test--git source "add" "--" "notes.org")
+      (should (= (zr-shadowfile-queue-file file) 2))
+      (should (= (zr-shadowfile-copy-files t) 2))
+      (zr-shadowfile-test--git source "rm" "--cached" "--quiet" "--" "notes.org")
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-max)) (insert "\nRemoved from index") (save-buffer))
+      (should (= (hash-table-count zr-shadowfile--pending) 0))
+      (zr-shadowfile-test--git source "add" "--" "notes.org")
+      (with-current-buffer (find-file-noselect file)
+        (goto-char (point-max)) (insert "\nRegistered save") (save-buffer))
+      (should (gethash (cons file file-target) zr-shadowfile--pending))
+      (should (gethash (cons file (expand-file-name "notes.org" directory-target))
+                       zr-shadowfile--pending))
+      (should (= (length (zr-shadowfile-test--state)) 2))
+      (should (= (zr-shadowfile-copy-files t) 2))
+      (should (equal (zr-shadowfile-test--bytes file-target)
+                     (zr-shadowfile-test--bytes file))))))
 
 (ert-deftest zr-shadowfile-excluding-a-directory-also-excludes-later-saves ()
   (zr-shadowfile-test--with-state

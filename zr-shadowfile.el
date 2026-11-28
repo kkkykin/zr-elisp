@@ -14,6 +14,8 @@
 ;; `:include' matches relative file paths.  `:exclude' matches relative
 ;; paths and their ancestor directories, so excluding a directory also
 ;; excludes files subsequently saved below it.  Scans skip symbolic links.
+;; `:vc-only t' additionally requires source files to be registered with an
+;; Emacs VC backend, such as Git.  This filter is optional for each rule.
 ;;
 ;; `zr-shadowfile-queue-directory' queues existing files; use
 ;; `zr-shadowfile-queue-file' for one file, optionally with a one-off target.
@@ -30,6 +32,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'vc)
 
 (defgroup zr-shadowfile nil
   "Copy files and directory trees through TRAMP."
@@ -43,6 +46,11 @@ exact destination filename, which may have a different name.  Relative
 paths use the local home directory as their base; remote names use TRAMP syntax.
 Matching follows the source filesystem's case rules.
 
+:vc-only t restricts a rule to source files registered with an Emacs VC
+backend, such as Git.  Files added to Git's index qualify even before their
+first commit; untracked and ignored files do not.  The default nil allows
+files without version control.  Registration is checked when queuing.
+
 :include matches a file's relative path.  :exclude matches that path and
 each ancestor directory, without trailing slashes.  Excluded directories
 are pruned unless another rule needs their contents.  Saving a file below
@@ -55,6 +63,7 @@ Changes affect new tasks; pending tasks retain their source and destination."
   :type '(repeat (plist :options
                        ((:type (choice (const directory) (const file)))
                         (:source file) (:destination file)
+                        (:vc-only boolean)
                         (:include (choice (const nil) regexp))
                         (:exclude (choice (const nil) regexp)))))
   :group 'zr-shadowfile)
@@ -127,7 +136,7 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
        (user-error "Invalid copy rule: %S" rule))
      (let (keys)
        (cl-loop for (key value) on rule by #'cddr do
-                (unless (and (memq key '(:type :source :destination :include :exclude))
+                (unless (and (memq key '(:type :source :destination :vc-only :include :exclude))
                              (not (memq key keys)))
                   (user-error "Invalid or repeated copy rule option: %S" key))
                 (push key keys)
@@ -135,6 +144,9 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
                  ((eq key :type)
                   (unless (memq value '(file directory))
                     (user-error "Copy rule :type must be file or directory")))
+                 ((eq key :vc-only)
+                  (unless (memq value '(nil t))
+                    (user-error "Copy rule :vc-only must be nil or t")))
                  ((memq key '(:source :destination))
                   (unless (and (stringp value) (not (string-empty-p value)))
                     (user-error "%S requires a path" key)))
@@ -156,6 +168,7 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
          (when (zr-shadowfile--relative-name destination source)
            (user-error "Copy destination must be outside its source: %s" destination)))
        (list :type type :source source :destination destination
+             :vc-only (plist-get rule :vc-only)
              :include (plist-get rule :include) :exclude (plist-get rule :exclude))))
    zr-shadowfile-rules))
 
@@ -250,7 +263,8 @@ This is machine-local state.  Changes take effect when the mode is reenabled."
                     ((file-in-directory-p
                       file (if (eq (plist-get rule :type) 'file)
                                (file-name-directory (plist-get rule :source))
-                             (plist-get rule :source)))))
+                             (plist-get rule :source))))
+                    ((or (not (plist-get rule :vc-only)) (vc-registered file))))
           (zr-shadowfile--enqueue
            file (if (eq (plist-get rule :type) 'file)
                     (plist-get rule :destination)
