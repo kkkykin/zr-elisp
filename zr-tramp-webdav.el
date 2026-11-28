@@ -45,9 +45,10 @@
 ;; Modes/IDs are synthetic; permission checks are estimates, with the
 ;; server enforcing access on each request.  Setting modes/times is a
 ;; no-op.  DAV LOCK, trash, file notifications, TRAMP multi-hop, and
-;; cross-server directory renames are not implemented.  Requests are
-;; synchronous and file contents pass through memory.  Requests use `zr-http'
-;; and support Basic/custom-header authentication.
+;; cross-server directory renames are not implemented.  File operations are
+;; synchronous; `zr-tramp-webdav-copy-file-async' provides cancellable copies
+;; for clients that manage their own queues.  File contents pass through
+;; memory.  Requests use `zr-http' and support Basic/custom-header authentication.
 
 ;;; Code:
 
@@ -243,22 +244,37 @@ that have already answered."
    (plist-get (zr-http-options zr-http-default-options
                               (zr-tramp-webdav--http-options file)) :headers)))
 
+(defun zr-tramp-webdav--request-headers (file headers &optional authorization-function)
+  "Merge HEADERS with FILE's configured headers and known credentials.
+AUTHORIZATION-FUNCTION, if supplied, looks up credentials for a TRAMP vector."
+  (let* ((headers (zr-tramp-webdav--merge-headers
+                   headers (zr-tramp-webdav--extra-headers file)
+                   '(("Accept-Encoding" . "identity"))))
+         (authorization (unless (assoc-string "Authorization" headers t)
+                          (funcall (or authorization-function #'zr-tramp-webdav--authorization)
+                                   (tramp-dissect-file-name file)))))
+    (if authorization (cons (cons "Authorization" authorization) headers) headers)))
+
+(defun zr-tramp-webdav--redirect-url (response origin redirects file)
+  "Validate RESPONSE's redirect against ORIGIN and REDIRECTS for FILE."
+  (let* ((location (zr-tramp-webdav--header (plist-get response :headers) "location"))
+         (next (and location (url-expand-file-name location (plist-get response :url))))
+         (parsed (and next (url-generic-parse-url next))))
+    (unless (and next (< redirects 5)
+                 (equal origin (zr-tramp-webdav--origin next))
+                 (not (url-user parsed)) (not (url-password parsed)))
+      (signal 'file-error (list "Unsafe or excessive WebDAV redirect" file)))
+    next))
+
 (defun zr-tramp-webdav--retrieve (file method headers data)
   "Send METHOD for FILE with HEADERS and DATA, handling auth and redirects."
   (let* ((vec (tramp-dissect-file-name (expand-file-name file)))
          (url (zr-tramp-webdav--url vec))
          (origin (zr-tramp-webdav--origin url))
-         (headers (zr-tramp-webdav--merge-headers
-                   headers (zr-tramp-webdav--extra-headers file)
-                   '(("Accept-Encoding" . "identity"))))
-         (authorization (or (zr-tramp-webdav--header headers "Authorization")
-                            (zr-tramp-webdav--authorization vec)))
-
+         (headers (zr-tramp-webdav--request-headers file headers))
+         (authorization (zr-tramp-webdav--header headers "Authorization"))
          (redirects 0)
          response finished)
-    (when (and authorization (not (assoc-string "Authorization" headers t)))
-      (push (cons "Authorization" authorization) headers))
-    (zr-tramp-webdav--check-headers headers)
     (while (not finished)
       (setq response (zr-tramp-webdav--http-request file method url headers data))
       (let ((status (plist-get response :status)))
@@ -272,20 +288,61 @@ that have already answered."
                (setq authorization (zr-tramp-webdav--authorization vec t)))
           (push (cons "Authorization" authorization) headers))
          ((memq status '(301 302 307 308))
-          (let* ((location (zr-tramp-webdav--header
-                            (plist-get response :headers) "location"))
-                 (next (and location (url-expand-file-name location url)))
-                 (parsed (and next (url-generic-parse-url next))))
-            (unless (and next (< redirects 5)
-                         (equal origin (zr-tramp-webdav--origin next))
-                         (not (url-user parsed)) (not (url-password parsed)))
-              (signal 'file-error
-                      (list "Unsafe or excessive WebDAV redirect" file)))
-            (setq redirects (1+ redirects) url next)))
+          (setq url (zr-tramp-webdav--redirect-url
+                     (plist-put response :url url) origin redirects file)
+                redirects (1+ redirects)))
          (t (setq finished t)))))
     (when (= (plist-get response :status) 401)
       (remhash (tramp-make-tramp-file-name vec 'noloc) zr-tramp-webdav--passwords))
     (plist-put response :url url)))
+
+(defun zr-tramp-webdav--request-async
+    (file method callback &optional headers data authorization-function)
+  "Send METHOD for FILE, calling CALLBACK with (RESPONSE ERROR).
+ERROR is an Emacs condition, or nil.  Return a cancellation function.
+Reuse known credentials without prompting from a process callback."
+  (let* ((vec (tramp-dissect-file-name file))
+         (key (tramp-make-tramp-file-name vec 'noloc))
+         (url (zr-tramp-webdav--url vec))
+         (origin (zr-tramp-webdav--origin url))
+         (headers (zr-tramp-webdav--request-headers file headers authorization-function))
+         (options (zr-http-options zr-http-default-options
+                                   (zr-tramp-webdav--http-options file)))
+         (redirects 0)
+         request done)
+    (cl-labels
+        ((finish (response error)
+           (unless done
+             (setq done t)
+             (if (or error (= (plist-get response :status) 401))
+                 (remhash key zr-tramp-webdav--connected)
+               (puthash key t zr-tramp-webdav--connected))
+             (when (and response (= (plist-get response :status) 401))
+               (remhash key zr-tramp-webdav--passwords))
+             (funcall callback response error)))
+         (send ()
+           (setq request
+                 (zr-http-request
+                  url :options options :method method :headers headers :body data
+                  :callback
+                  (lambda (response error)
+                    (unless done
+                      (if error
+                          (finish nil (list 'file-error error file))
+                        (condition-case err
+                            (if (memq (plist-get response :status) '(301 302 307 308))
+                                (progn
+                                  (setq url (zr-tramp-webdav--redirect-url
+                                             response origin redirects file)
+                                        redirects (1+ redirects))
+                                  (send))
+                              (finish response nil))
+                          (error (finish nil err))))))))))
+      (send)
+      (lambda ()
+        (unless done
+          (finish nil '(quit "WebDAV request cancelled"))
+          (zr-http-cancel request))))))
 
 (defun zr-tramp-webdav-http-request (file &optional resolve)
   "Return (URL . HEADERS) for another HTTP client to access WebDAV FILE.
@@ -415,6 +472,23 @@ Actual attributes take precedence over hints recorded after MKCOL."
         (tramp-get-file-property vec localname "zr-webdav-collection")
       (plist-get entry :directory))))
 
+(defun zr-tramp-webdav--stat-response (response file)
+  "Return FILE's metadata in PROPFIND RESPONSE, or nil when missing."
+  (pcase (plist-get response :status)
+    ((or 404 410) nil)
+    (207
+     (let* ((path (zr-tramp-webdav--href-path
+                   (plist-get response :url) (plist-get response :url)))
+            (entry (cl-find path (zr-tramp-webdav--entries response)
+                            :key (lambda (e) (plist-get e :path)) :test #'equal)))
+       (unless entry
+         (signal 'file-error (list "WebDAV response omitted requested resource" file)))
+       (pcase (plist-get entry :status)
+         ((or 404 410) nil)
+         (200 entry)
+         (_ (zr-tramp-webdav--http-error entry file)))))
+    (_ (zr-tramp-webdav--http-error response file))))
+
 (defun zr-tramp-webdav--stat (file &optional fresh)
   "Return metadata for FILE, or nil if missing; FRESH bypasses the cache.
 Non-essential metadata checks always reuse cached values."
@@ -444,20 +518,7 @@ Non-essential metadata checks always reuse cached values."
                      (memq status '(404 410)))
             (setq response (zr-tramp-webdav--propfind (directory-file-name target) "0")
                   status (plist-get response :status)))
-          (let ((entry
-                 (cond
-                  ((memq status '(404 410)) nil)
-                  ((= status 207)
-                   (let* ((path (zr-tramp-webdav--href-path
-                                 (plist-get response :url) (plist-get response :url)))
-                          (entry (cl-find path (zr-tramp-webdav--entries response)
-                                          :key (lambda (e) (plist-get e :path)) :test #'equal)))
-                     (unless entry
-                       (signal 'file-error (list "WebDAV response omitted requested resource" file)))
-                     (cond ((memq (plist-get entry :status) '(404 410)) nil)
-                           ((= (plist-get entry :status) 200) entry)
-                           (t (zr-tramp-webdav--http-error entry file)))))
-                  (t (zr-tramp-webdav--http-error response file)))))
+          (let ((entry (zr-tramp-webdav--stat-response response file)))
             (tramp-set-file-property v localname "zr-webdav-collection" (plist-get entry :directory))
             entry))))))
 
@@ -570,6 +631,15 @@ Non-essential metadata checks always reuse cached values."
   (with-parsed-tramp-file-name (expand-file-name file) nil
     (tramp-flush-directory-properties v localname)))
 
+(defun zr-tramp-webdav--flush-response (file response)
+  "Invalidate FILE and a redirected resource named by RESPONSE."
+  (zr-tramp-webdav--flush file)
+  (when-let* ((url (plist-get response :url))
+              (path (zr-tramp-webdav--href-path url url)))
+    (with-parsed-tramp-file-name file nil
+      (unless (equal path (directory-file-name localname))
+        (tramp-flush-directory-properties v path)))))
+
 (defun zr-tramp-webdav--get (file)
   "Retrieve FILE, returning a successful GET response."
   (let ((response (zr-tramp-webdav--request file "GET")))
@@ -678,25 +748,31 @@ EXCLUSIVE controls the error for a failed create-only precondition.
 ACCEPTED-STATUSES are HTTP errors the caller handles itself."
   (let (copied)
     (unwind-protect
-        (let* ((response (zr-tramp-webdav--request file method headers data))
-               (status (plist-get response :status)))
-          (unless (or (<= 200 status 299) (memq status accepted-statuses))
-            (zr-tramp-webdav--http-error response file exclusive))
-          ;; DELETE/COPY/MOVE may return HTTP 207 with per-resource failures.
-          (when (= status 207)
-            (let ((nodes (zr-tramp-webdav--children (zr-tramp-webdav--xml response) "response")))
-              (unless nodes
-                (signal 'file-error (list "Empty WebDAV mutation response" file)))
-              (dolist (node nodes)
-                (unless (let ((code (zr-tramp-webdav--status node)))
-                          (and code (<= 200 code 299)))
-                  (zr-tramp-webdav--http-error
-                   (list :status (or (zr-tramp-webdav--status node) 500)) file)))))
+        (let ((response (zr-tramp-webdav--request file method headers data)))
+          (zr-tramp-webdav--check-mutation-response response file exclusive accepted-statuses)
           ;; A successful COPY changes only the destination.  Keep source
           ;; attributes for subsequent copies and local downloads.
           (setq copied (equal method "COPY"))
           response)
       (unless copied (zr-tramp-webdav--flush file)))))
+
+(defun zr-tramp-webdav--check-mutation-response
+    (response file &optional exclusive accepted-statuses)
+  "Check mutation RESPONSE for FILE, including per-resource failures.
+EXCLUSIVE and ACCEPTED-STATUSES have the meaning used by
+`zr-tramp-webdav--mutate'."
+  (let ((status (plist-get response :status)))
+    (unless (or (<= 200 status 299) (memq status accepted-statuses))
+      (zr-tramp-webdav--http-error response file exclusive))
+    (when (= status 207)
+      (let ((nodes (zr-tramp-webdav--children (zr-tramp-webdav--xml response) "response")))
+        (unless nodes
+          (signal 'file-error (list "Empty WebDAV mutation response" file)))
+        (dolist (node nodes)
+          (unless (let ((code (zr-tramp-webdav--status node)))
+                    (and code (<= 200 code 299)))
+            (zr-tramp-webdav--http-error
+             (list :status (or (zr-tramp-webdav--status node) 500)) file)))))))
 
 (defun zr-tramp-webdav--write-region (start end file &optional append visit _lockname mustbenew)
   "Implement `write-region' using a conditional WebDAV PUT."
@@ -882,6 +958,139 @@ DIRECTORY permits replacing an empty directory.  Return overwrite consent."
                  ("Overwrite" . ,(if overwrite "T" "F"))) headers)
        nil (not overwrite))
     (zr-tramp-webdav--flush newname)))
+
+(defun zr-tramp-webdav-copy-file-async (file newname callback)
+  "Copy FILE to NEWNAME asynchronously, overwriting an existing file.
+Create destination parent directories.  At least one path must use WebDAV;
+the other may be local or WebDAV.  Call CALLBACK once with (SUCCESS ERROR),
+where ERROR is an Emacs condition or nil.  Return a cancellation function.
+Local uploads snapshot the saved bytes before returning.  Downloads are
+published locally after a complete response; same-server copies use COPY.
+Use configured or previously entered credentials; completion never prompts."
+  (let* ((file (expand-file-name file))
+         (newname (expand-file-name newname))
+         (source-remote (zr-tramp-webdav-file-name-p file))
+         (target-remote (zr-tramp-webdav-file-name-p newname))
+         (same-server (and source-remote target-remote (tramp-equal-remote file newname)))
+         (http-defaults zr-http-default-options)
+         (http-options zr-tramp-webdav-http-options)
+         (authorizations
+          (mapcar (lambda (name)
+                    (let ((vec (tramp-dissect-file-name name)))
+                      (cons (tramp-make-tramp-file-name vec 'noloc)
+                            (zr-tramp-webdav--authorization vec))))
+                  (delq nil (list (and source-remote file) (and target-remote newname)))))
+         request done)
+    (unless (and (or source-remote target-remote)
+                 (or source-remote (not (file-remote-p file)))
+                 (or target-remote (not (file-remote-p newname)))
+                 (not (equal file newname)) (not (directory-name-p newname)))
+      (user-error "Async copies require distinct local/WebDAV file names"))
+    (cl-labels
+        ((finish (error)
+           (unless done
+             (setq done t)
+             (when request (funcall request))
+             (when (and error source-remote) (zr-tramp-webdav--flush file))
+             (when target-remote (zr-tramp-webdav--flush newname))
+             (funcall callback (not error) error)))
+         (send (name method continuation &optional headers data)
+           (let ((zr-http-default-options http-defaults)
+                 (zr-tramp-webdav-http-options http-options))
+             (condition-case err
+                 (setq request
+                       (zr-tramp-webdav--request-async
+                        name method
+                        (lambda (response error)
+                          (unless done
+                            (when (member method '("PUT" "MKCOL"))
+                              (zr-tramp-webdav--flush-response name response))
+                            (if error (finish error)
+                              (condition-case err
+                                  (funcall continuation response)
+                                (error (finish err))))))
+                        headers data
+                        (lambda (vec)
+                          (cdr (assoc (tramp-make-tramp-file-name vec 'noloc) authorizations)))))
+               (error (finish err)))))
+         (stat (name continuation)
+           (send name "PROPFIND"
+                 (lambda (response)
+                   (funcall continuation (zr-tramp-webdav--stat-response response name)))
+                 '(("Depth" . "0") ("Content-Type" . "application/xml; charset=utf-8"))
+                 zr-tramp-webdav--propfind-body))
+         (mkdir (directory continuation &optional retried)
+           (let* ((vec (tramp-dissect-file-name directory))
+                  (localname (tramp-file-name-localname vec)))
+             (if (zr-tramp-webdav--cached-collection-p vec localname)
+                 (funcall continuation)
+               (send directory "MKCOL"
+                     (lambda (response)
+                       (zr-tramp-webdav--check-mutation-response
+                        response directory nil '(405 409))
+                       (pcase (plist-get response :status)
+                         (409
+                          (let ((parent (file-name-directory (directory-file-name directory))))
+                            (when (or retried (equal directory parent))
+                              (zr-tramp-webdav--http-error response directory))
+                            (mkdir parent (lambda () (mkdir directory continuation t)))))
+                         (405
+                          (stat directory
+                                (lambda (entry)
+                                  (unless (plist-get entry :directory)
+                                    (signal 'file-already-exists (list "File exists" directory)))
+                                  (tramp-set-file-property vec localname "zr-webdav-collection" t)
+                                  (funcall continuation))))
+                         (_
+                          (tramp-set-file-property vec localname "zr-webdav-collection" t)
+                          (funcall continuation))))))))
+         (write-target (data)
+           (if target-remote
+               (mkdir
+                (file-name-directory newname)
+                (lambda ()
+                  (stat newname
+                        (lambda (entry)
+                          (when (plist-get entry :directory)
+                            (signal 'file-error (list "Cannot overwrite a directory" newname)))
+                          (if same-server
+                              (send file "COPY"
+                                    (lambda (response)
+                                      (zr-tramp-webdav--check-mutation-response response file)
+                                      (finish nil))
+                                    `(("Destination" . ,(zr-tramp-webdav--url
+                                                         (tramp-dissect-file-name newname)))
+                                      ("Overwrite" . "T")))
+                            (send newname "PUT"
+                                  (lambda (response)
+                                    (zr-tramp-webdav--check-mutation-response response newname)
+                                    (finish nil))
+                                  '(("Content-Type" . "application/octet-stream")) data))))))
+             (make-directory (file-name-directory newname) t)
+             (let ((temporary (make-temp-file
+                               (expand-file-name ".zr-webdav-" (file-name-directory newname)))))
+               (unwind-protect
+                   (progn
+                     (zr-tramp-webdav--write-bytes data temporary)
+                     (rename-file temporary newname t))
+                 (when (file-exists-p temporary) (delete-file temporary))))
+             (finish nil))))
+      (condition-case err
+          (if source-remote
+              (stat file
+                    (lambda (entry)
+                      (unless entry (signal 'file-missing (list "Source does not exist" file)))
+                      (when (plist-get entry :directory)
+                        (signal 'file-error (list "Cannot copy a directory" file)))
+                      (if same-server (write-target nil)
+                        (send file "GET"
+                              (lambda (response)
+                                (unless (= (plist-get response :status) 200)
+                                  (zr-tramp-webdav--http-error response file))
+                                (write-target (plist-get response :body)))))))
+            (write-target (zr-tramp-webdav--read-bytes file)))
+        (error (finish err)))
+      (lambda () (finish '(quit "WebDAV copy cancelled"))))))
 
 (defun zr-tramp-webdav--copy-file
     (file newname &optional okay keep-time preserve-uid-gid preserve-permissions)

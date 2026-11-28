@@ -9,6 +9,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'zr-test-helpers)
 (require 'dired)
 
 (load (expand-file-name "../zr-tramp-webdav.el"
@@ -1019,6 +1020,156 @@
                 (should (equal (zr-tramp-webdav-test--contents file) "original\nedited\n"))))
           (with-current-buffer buffer (set-buffer-modified-p nil))
           (kill-buffer buffer))))))
+
+(defun zr-tramp-webdav-test--wait-until (predicate)
+  "Wait for PREDICATE, bounding asynchronous fixture failures."
+  (let ((deadline (+ (float-time) 5)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (should (funcall predicate))))
+
+(defun zr-tramp-webdav-test--copy-async (file newname)
+  "Copy FILE to NEWNAME, waiting and signaling any transfer error."
+  (let* (done success failure
+              (cancel (zr-tramp-webdav-copy-file-async
+                       file newname (lambda (value error)
+                                      (setq done t success value failure error)))))
+    (unwind-protect
+        (progn
+          (zr-tramp-webdav-test--wait-until (lambda () done))
+          (when failure (signal (car failure) (cdr failure)))
+          success)
+      (funcall cancel))))
+
+(ert-deftest zr-tramp-webdav-async-upload-snapshots-bytes-and-invalidates-cache ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let* ((file (expand-file-name "source.bin"))
+             (target (concat root "new/中文 %/copy.bin"))
+             (bytes (unibyte-string 0 255 128 13 10 1 254))
+             (calls 0) success failure cancel)
+        (zr-tramp-webdav--write-bytes bytes file)
+        (should-not (file-exists-p target))
+        (cl-letf (((symbol-function 'zr-tramp-webdav--request)
+                   (lambda (&rest _) (ert-fail "Async copying must not use synchronous file requests")))
+                  ((symbol-function 'accept-process-output)
+                   (lambda (&rest _) (ert-fail "Async startup must not wait"))))
+          (setq cancel (zr-tramp-webdav-copy-file-async
+                        file target (lambda (value error)
+                                      (cl-incf calls) (setq success value failure error)))))
+        (unwind-protect
+            (progn
+              (should (zerop calls))
+              (zr-tramp-webdav--write-bytes "Changed" file)
+              (zr-tramp-webdav-test--wait-until (lambda () (> calls 0)))
+              (should success)
+              (should-not failure)
+              (should (equal (zr-tramp-webdav--read-bytes target) bytes))
+              (funcall cancel)
+              (should (= calls 1)))
+          (funcall cancel))))))
+
+(ert-deftest zr-tramp-webdav-async-download-copy-and-cross-server-transfer ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let* ((local (expand-file-name "source.bin"))
+             (download (expand-file-name "new/download.bin"))
+             (source (concat root "source.bin"))
+             (copy (concat root "new/copy.bin"))
+             (cross (concat (replace-regexp-in-string "127.0.0.1" "localhost" root t t)
+                            "new/cross.bin"))
+             (bytes (unibyte-string 255 0 13 10 128)))
+        (zr-tramp-webdav--write-bytes bytes local)
+        (should (zr-tramp-webdav-test--copy-async local source))
+        (should (zr-tramp-webdav-test--copy-async source download))
+        (should (equal (zr-tramp-webdav--read-bytes download) bytes))
+        (should (zr-tramp-webdav-test--copy-async source copy))
+        (should (equal (zr-tramp-webdav--read-bytes copy) bytes))
+        (should (zr-tramp-webdav-test--copy-async source cross))
+        (should (equal (zr-tramp-webdav--read-bytes cross) bytes))))))
+
+(ert-deftest zr-tramp-webdav-async-copy-refuses-directory-replacements ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let ((local (expand-file-name "source.txt"))
+            (directory (concat root "collection/"))
+            (file (concat root "not-directory")))
+        (zr-tramp-webdav--write-bytes "Saved" local)
+        (make-directory directory)
+        (write-region "Retained" nil file nil 'silent)
+        (should-error (zr-tramp-webdav-test--copy-async local (directory-file-name directory))
+                      :type 'file-error)
+        (should-error (zr-tramp-webdav-test--copy-async local (concat file "/new/copy.txt"))
+                      :type 'file-already-exists)
+        (should (file-directory-p directory))
+        (should (equal (zr-tramp-webdav-test--contents file) "Retained"))))))
+
+(ert-deftest zr-tramp-webdav-async-copy-captures-auth-and-options-without-prompting ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let ((file (expand-file-name "source.txt"))
+            (auth (expand-file-name "authinfo"))
+            (target (format "/webdav:alice@127.0.0.1#%s:/auth/async-%d/file.txt"
+                            port zr-tramp-webdav-test--serial))
+            done failure cancel)
+        (zr-tramp-webdav--write-bytes "Authenticated" file)
+        (write-region (format "machine 127.0.0.1 port %s login alice password app-password\n" port)
+                      nil auth nil 'silent)
+        (unwind-protect
+            (progn
+              (cl-letf (((symbol-function 'read-passwd)
+                         (lambda (&rest _) (ert-fail "A background transfer must not prompt"))))
+                (let ((auth-sources (list auth))
+                      (zr-tramp-webdav-http-options '(:timeout 3)))
+                  (setq cancel (zr-tramp-webdav-copy-file-async
+                                file target (lambda (_success error) (setq done t failure error)))))
+                (unwind-protect
+                    (let ((zr-http-default-options '(:curl-program "/no-such-curl"))
+                          (zr-tramp-webdav-http-options '(:timeout 0)))
+                      (zr-tramp-webdav-test--wait-until (lambda () done))
+                      (should-not failure))
+                  (funcall cancel)))
+              (let ((auth-sources (list auth)))
+                (should (equal (zr-tramp-webdav-test--contents target) "Authenticated"))))
+          (let ((auth-sources (list auth)))
+            (ignore-errors (delete-directory (file-name-directory target) t))))))))
+
+(ert-deftest zr-tramp-webdav-async-copy-handles-redirects-and-preserves-failed-downloads ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let ((file (expand-file-name "source.txt"))
+            (download (expand-file-name "download.txt")))
+        (zr-tramp-webdav--write-bytes "Saved" file)
+        (should (zr-tramp-webdav-test--copy-async file (concat root "redirect-source")))
+        (should (equal (zr-tramp-webdav-test--contents (concat root "redirect-target")) "Saved"))
+        (dolist (name '("put-cross-origin.mkv" "put-loop.mkv" "put-see-other.mkv"))
+          (should-error (zr-tramp-webdav-test--copy-async file (concat root name)) :type 'file-error))
+        (let ((remote (concat root "get-cross-origin.mkv")))
+          (write-region "Remote" nil remote nil 'silent)
+          (zr-tramp-webdav--write-bytes "Retained" download)
+          (should-error (zr-tramp-webdav-test--copy-async remote download) :type 'file-error)
+          (should (equal (zr-tramp-webdav--read-bytes download) "Retained")))))))
+
+(ert-deftest zr-tramp-webdav-async-copy-cancel-timeout-and-startup-errors-finish-once ()
+  (zr-tramp-webdav-test--with-server
+    (zr-test-with-temp-directory
+      (let ((file (expand-file-name "source.txt"))
+            (target (format "/webdav:127.0.0.1#%s:/__test__/slow" port)))
+        (zr-tramp-webdav--write-bytes "Saved" file)
+        (dolist (action '(cancel timeout startup))
+          (let* ((calls 0) failure
+                 (zr-tramp-webdav-http-options
+                  (if (eq action 'startup) '(:curl-program "/no-such-curl") '(:timeout 0.03)))
+                 (cancel (zr-tramp-webdav-copy-file-async
+                          file target (lambda (_success error) (cl-incf calls) (setq failure error)))))
+            (unwind-protect
+                (progn
+                  (when (eq action 'cancel) (funcall cancel))
+                  (zr-tramp-webdav-test--wait-until (lambda () (> calls 0)))
+                  (should failure)
+                  (funcall cancel)
+                  (should (= calls 1)))
+              (funcall cancel))))))))
 
 (provide 'zr-tramp-webdav-test)
 ;;; zr-tramp-webdav-test.el ends here
