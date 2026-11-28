@@ -23,6 +23,7 @@
 ;; `zr-shadowfile-copy-files' (C-x 4 s)
 ;; copies the saved disk bytes and creates destination parent directories.
 ;; Failed copies remain pending in `zr-shadowfile-pending-file'.
+;; Tasks whose source no longer exists are discarded when copying.
 ;;
 ;; Pending copies retain their resolved source and destination even when
 ;; rules change.  Use `zr-shadowfile-cancel' to discard old tasks.  Copying
@@ -329,30 +330,47 @@ Use `zr-shadowfile-copy-files' or C-x 4 s to perform the queued copies."
       (message "Queued %d copies; use C-x 4 s to copy" count)
       count)))
 
-(defun zr-shadowfile--copy-file (pair)
-  "Copy PAIR's saved disk bytes, removing its task only after success."
+(defun zr-shadowfile--source-exists-p (pair)
+  "Return whether PAIR's source exists, discarding the task if missing.
+If checking fails, report the error and retain the task for a later retry."
   (condition-case err
-      (progn
+      (if (file-exists-p (car pair))
+          t
+        (remhash pair zr-shadowfile--pending)
+        (setq zr-shadowfile--pending-dirty t)
+        nil)
+    (error (message "Cannot check source %s: %s" (car pair) (error-message-string err)) nil)))
+
+(defun zr-shadowfile--copy-file (pair)
+  "Copy PAIR's saved disk bytes, discarding successful or missing tasks."
+  (condition-case err
+      (when (zr-shadowfile--source-exists-p pair)
         (make-directory (file-name-directory (cdr pair)) t)
         (copy-file (car pair) (cdr pair) t)
         (remhash pair zr-shadowfile--pending)
         (setq zr-shadowfile--pending-dirty t)
         t)
+    (file-missing
+     (when (zr-shadowfile--source-exists-p pair)
+       (message "Cannot copy %s: %s" (cdr pair) (error-message-string err)))
+     nil)
     (error (message "Cannot copy %s: %s" (cdr pair) (error-message-string err)) nil)))
 
 ;;;###autoload
 (defun zr-shadowfile-copy-files (&optional noquery)
   "Copy pending files, asking unless NOQUERY or `zr-shadowfile-noquery' is set.
 With a prefix argument, copy without asking.  Copy the saved disk bytes,
-create destination parent directories, and retain failed or skipped tasks."
+create destination parent directories, and retain failed or skipped tasks.
+Discard tasks whose source no longer exists without asking."
   (interactive "P")
   (unless zr-shadowfile-mode (zr-shadowfile-mode 1))
   (let ((copied 0))
     (unwind-protect
         (map-y-or-n-p
          (lambda (pair)
-           (or noquery zr-shadowfile-noquery
-               (format "Copy %s to %s? " (car pair) (cdr pair))))
+           (and (zr-shadowfile--source-exists-p pair)
+                (or noquery zr-shadowfile-noquery
+                    (format "Copy %s to %s? " (car pair) (cdr pair)))))
          (lambda (pair) (when (zr-shadowfile--copy-file pair) (cl-incf copied) t))
          (zr-shadowfile--pending-copies) '("file" "files" "copy"))
       (zr-shadowfile--write-pending))

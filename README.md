@@ -134,6 +134,8 @@ Windows 盘符、UNC 路径以及 TRAMP 远程路径。例如将 Windows 的 `~/
 到本机的 `zr-shadowfile-pending-file`，下次启用模式时恢复。规则修改只影响
 新任务，已入队任务保留原来的源和目标；用 `zr-shadowfile-cancel` 选择取消，
 加前缀参数可取消全部任务。规则放在个人配置或通过 Custom 保存。
+源文件移动或删除后，复制时会自动清理旧路径的待复制任务；移动后的文件
+再次保存或手动入队即可按当前规则复制。
 
 默认复制前询问，`zr-shadowfile-noquery` 可关闭询问；默认退出 Emacs 时也
 询问复制，`zr-shadowfile-copy-on-exit` 设为 nil 可关闭退出复制。加载库不自动
