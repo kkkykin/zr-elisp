@@ -59,5 +59,37 @@
       (kill-buffer first)
       (kill-buffer second))))
 
+(ert-deftest zr-process-menu-test-exit-query-shows-omitted-processes ()
+  (let* ((queried (make-pipe-process :name "zr-process-menu-ispell" :buffer nil))
+         (background (make-pipe-process :name "zr-process-menu-server" :buffer nil :noquery t))
+         (buffer (generate-new-buffer " *zr exit processes*"))
+         (process-menu-mode-hook
+          (list (lambda ()
+                  (setq zr-process-menu-omit-regexp (regexp-quote (process-name queried)))
+                  (zr-process-menu-mode 1)))))
+    (unwind-protect
+        (progn
+          (list-processes nil buffer)
+          (with-current-buffer buffer
+            (should-not (assq queried tabulated-list-entries))
+            (should (assq background tabulated-list-entries)))
+          ;; `save-buffers-kill-emacs' uses this listing before its query.
+          (list-processes t buffer)
+          (with-current-buffer buffer
+            (should (assq queried tabulated-list-entries))
+            (should-not (assq background tabulated-list-entries))
+            (should (string-match-p (regexp-quote (process-name queried)) (buffer-string)))
+            (revert-buffer)
+            (should (assq queried tabulated-list-entries))
+            (should (equal zr-process-menu-omit-regexp (regexp-quote (process-name queried)))))
+          (list-processes nil buffer)
+          (with-current-buffer buffer
+            (should-not (assq queried tabulated-list-entries)))
+          (should (process-query-on-exit-flag queried))
+          (should-not (process-query-on-exit-flag background)))
+      (delete-process queried)
+      (delete-process background)
+      (kill-buffer buffer))))
+
 (provide 'zr-process-menu-test)
 ;;; zr-process-menu-test.el ends here

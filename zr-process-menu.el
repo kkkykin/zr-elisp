@@ -19,7 +19,8 @@
   :group 'processes)
 
 (defcustom zr-process-menu-omit-regexp nil
-  "Process names to omit; nil displays all processes."
+  "Process names to omit from ordinary listings; nil displays all processes.
+Exit confirmation listings always show processes requiring confirmation."
   :type '(choice (const nil) regexp))
 (make-variable-buffer-local 'zr-process-menu-omit-regexp)
 
@@ -27,7 +28,7 @@
 
 (defun zr-process-menu--groups ()
   "Filter the current process entries and return their display groups."
-  (when zr-process-menu-omit-regexp
+  (when (and zr-process-menu-omit-regexp (not process-menu-query-only))
     (setq tabulated-list-entries
           (cl-remove-if
            (lambda (entry)
