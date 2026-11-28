@@ -794,9 +794,18 @@ With a prefix argument ALL, cancel every pending copy."
   "Stop background work and persist tasks without network requests or queries."
   (let ((inhibit-quit t)
         (zr-shadowfile--inhibit-automatic t))
-    (zr-shadowfile--cancel-timers)
-    (zr-shadowfile--stop-batch)
-    (zr-shadowfile--write-pending)))
+    (unwind-protect
+        (progn
+          (zr-shadowfile--cancel-timers)
+          (zr-shadowfile--stop-batch)
+          (zr-shadowfile--write-pending))
+      (zr-shadowfile--unlock-state-file))))
+
+(defun zr-shadowfile--unlock-state-file ()
+  "Release the active local state file only if this Emacs owns its lock."
+  (when (and zr-shadowfile--state-file (not (file-remote-p zr-shadowfile--state-file))
+             (eq t (file-locked-p zr-shadowfile--state-file)))
+    (unlock-file zr-shadowfile--state-file)))
 
 (defun zr-shadowfile--disable ()
   "Remove this mode's hooks and release its local state file."
@@ -805,9 +814,7 @@ With a prefix argument ALL, cancel every pending copy."
   (remove-hook 'after-save-hook #'zr-shadowfile--after-save)
   (remove-hook 'kill-emacs-query-functions #'zr-shadowfile--query-exit)
   (remove-hook 'kill-emacs-hook #'zr-shadowfile--kill-emacs)
-  (when (and zr-shadowfile--state-file (not (file-remote-p zr-shadowfile--state-file))
-             (eq t (file-locked-p zr-shadowfile--state-file)))
-    (unlock-file zr-shadowfile--state-file))
+  (zr-shadowfile--unlock-state-file)
   (setq zr-shadowfile--active nil zr-shadowfile--state-file nil))
 
 ;;;###autoload

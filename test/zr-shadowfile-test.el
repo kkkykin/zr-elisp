@@ -275,6 +275,62 @@
       (zr-shadowfile-mode -1)
       (should-not (file-locked-p zr-shadowfile-pending-file)))))
 
+(ert-deftest zr-shadowfile-exit-and-restart-release-the-state-file-lock ()
+  (dolist (restart '(nil t))
+    (zr-test-with-temp-directory
+      (let* ((state (expand-file-name "pending.eld"))
+             (marker (expand-file-name "started"))
+             (file (expand-file-name "notes.org"))
+             (target (expand-file-name "copies/notes.org"))
+             (lock (make-lock-file-name state))
+             (program
+              `(progn
+                 (require 'zr-shadowfile)
+                 (setq zr-shadowfile-pending-file ,state
+                       zr-shadowfile-copy-on-exit nil
+                       create-lockfiles t)
+                 (when (file-exists-p ,marker)
+                   (when (or (file-exists-p ,lock) (file-symlink-p ,lock))
+                     (error "Pending-copy lock survived restart")))
+                 (zr-shadowfile-mode 1)
+                 (if (file-exists-p ,marker)
+                     (progn
+                       (unless (gethash (cons ,file ,target) zr-shadowfile--pending)
+                         (error "Pending copy was lost during restart"))
+                       (kill-emacs 0))
+                   (write-region "Saved" nil ,file nil 'silent)
+                   (zr-shadowfile-queue-file ,file ,target)
+                   (write-region "Started" nil ,marker nil 'silent)
+                   ,(if restart '(restart-emacs) '(kill-emacs 0))))))
+        (with-temp-buffer
+          (let ((status (call-process
+                         invocation-name nil t nil "--batch" "-Q" "-L"
+                         (file-name-directory (locate-library "zr-shadowfile"))
+                         "--eval" (prin1-to-string program))))
+            (ert-info ((buffer-string)) (should (eq status 0)))))
+        ;; Inspect the lock directly: `file-locked-p' would remove a dead
+        ;; subprocess's stale lock and conceal the missing exit cleanup.
+        (should-not (file-symlink-p lock))
+        (should-not (file-exists-p lock))
+        (with-temp-buffer
+          (insert-file-contents state)
+          (should (equal (read (current-buffer)) (list (list file target nil nil)))))))))
+
+(ert-deftest zr-shadowfile-shutdown-releases-the-lock-when-state-writing-fails ()
+  (zr-shadowfile-test--with-state
+    (zr-shadowfile-mode -1)
+    (let ((create-lockfiles t)
+          (file (expand-file-name "notes.org"))
+          (target (expand-file-name "copies/notes.org")))
+      (zr-shadowfile-mode 1)
+      (zr-shadowfile-test--write file "Saved")
+      (zr-shadowfile-queue-file file target)
+      (cl-letf (((symbol-function 'rename-file)
+                 (lambda (&rest _) (signal 'file-error '("Cannot replace pending state")))))
+        (should-error (zr-shadowfile--kill-emacs) :type 'file-error))
+      (should-not (file-locked-p zr-shadowfile-pending-file))
+      (should (equal (zr-shadowfile-test--state) (list (cons file target)))))))
+
 (ert-deftest zr-shadowfile-another-emacs-lock-is-not-released ()
   (zr-shadowfile-test--with-state
     (zr-shadowfile-mode -1)
